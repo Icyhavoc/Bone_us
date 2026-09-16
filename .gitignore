@@ -1,0 +1,15 @@
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+
+# Raw/private data; keep the expected directory structure locally
+raw_data/
+
+# Reproducible generated experiment and visualization outputs
+experiments/
+visualizations/
+
+# Local backup and smoke-test artifacts
+backup/
+smoke_test/
+smoke_all/

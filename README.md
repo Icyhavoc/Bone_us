@@ -1,0 +1,301 @@
+# EMD 特征提取 + MLP 分类
+
+本目录实现当前阶段的完整实验管线：
+
+```text
+raw_data
+  -> 四种帧处理方式
+  -> 任意深度区间 branch
+  -> 每个 branch 重采样到 512 点
+  -> 每个 branch 独立进行 EMD
+  -> branch 特征拼接
+  -> NumPy MLP 分类头
+```
+
+代码文件与 `raw_data` 同级：
+
+- `emd_pipeline.py`：数据加载、帧处理、深度映射、重采样、EMD、特征和 MLP 实现。
+- `run_emd_experiments.py`：命令行入口，可运行单组或全部 16 组标准实验。
+- `README.md`：使用说明。
+
+## 数据格式
+
+默认从 `raw_data` 读取数据。每个 `train`、`val`、`test` 子目录包含：
+
+- `X.npy`：`[N, 50, 2, 896]`，依次为样本、帧、物理通道、采样点。
+- `y.npy`：二分类标签。
+- `samples.json`：样本编号、深度值和标签信息。
+
+当前数据集的标签保持不变：`label=0` 对应 `depth < 1 mm`，`label=1` 对应 `depth >= 1 mm`。
+
+## 四种帧处理方式
+
+命令行中的 `--forms` 支持：
+
+- `mean_std`：对 50 帧逐点计算 Mean 和 Std。
+- `raw50`：保留全部 50 帧。
+- `max1`：依据整段 0–5 mm 信号的综合 RMS 选择 1 帧。
+- `top3_mean`：依据综合 RMS 选择 3 帧并求平均。
+
+Max 1 Frame 和 Top-3 Mean 默认在完整 0–5 mm 区间上选择帧，然后把相同的帧处理结果提供给各个深度 branch。选择范围可通过 `--selection-region-json` 修改。
+
+## 深度 branch
+
+标准区域组合为：
+
+- `full`：`[[0, 5]]`
+- `bone`：`[[1, 3]]`
+- `bone_plus_post`：`[[1, 3], [3, 5]]`
+- `dyn_envelope`：对每个样本的处理后信号计算 Hilbert 包络，自动定位第一个显著波峰的起始点；第 1 个 branch 为该起点之后的 `a` 个采样点，第 2 个 branch 为其余信号。
+
+branch 不要求覆盖完整 0–5 mm，也不要求互斥、连续或等长。可以使用任意嵌套或重叠区间，例如：
+
+```powershell
+python run_emd_experiments.py --forms max1 --regions-json "[[0,5],[1,3]]"
+```
+
+每个 branch 独立切片、重采样到 512 点、进行 EMD，并在最后拼接特征。
+
+重采样完成后，每个 branch 的每条信号都会乘以长度为 512、`alpha=0.3` 的 Tukey 窗，再进入 EMD。该参数可通过 `--tukey-alpha` 修改。
+
+### 深度到采样点映射
+
+默认映射为：
+
+```text
+index = round(depth_mm / 5.0 * 896)
+```
+
+因此 1 mm 默认对应 `round(896 * 0.2) = 179`。映射由 `DepthMapper` 封装，后续可以替换 `depth_to_index()` 和 `index_to_depth()`，无需修改 branch 或预处理逻辑。
+
+边界采用左闭右开区间 `[start, end)`，避免相邻区域重复使用边界采样点。
+
+### 动态包络 branch
+
+`dyn_envelope` 不改变原始处理后信号，只使用包络结果确定 branch 边界。当前默认检测方法为：对每条处理后信号使用带反射填充的 Hilbert 包络，跨信号流取均值，再用长度 21 的移动平均平滑；以中位数和 MAD 估计基线与噪声尺度，选择第一个超过显著性阈值的局部峰，并将峰值超出基线部分的 50% 位置作为峰起始点。为避免把很小的早期扰动当作目标峰，阈值同时要求达到全局包络峰高相对基线的 20%。
+
+默认第一个 branch 的 `a=0.75 mm`，第二个 branch 为之后的全部采样点。程序会按照 `DepthMapper` 的映射将毫米换算为采样点；在当前 `896 点对应 5 mm` 的设置下，`0.75 mm` 对应约 `134` 个采样点。`a` 和检测参数都可以从命令行调整：
+
+```powershell
+python run_emd_experiments.py `
+  --forms top3_mean `
+  --region-set dyn_envelope `
+  --channel-mode 1 `
+  --dyn-a 0.75 `
+  --dyn-smooth-window 21 `
+  --dyn-prominence-sigma 2.0 `
+  --dyn-min-peak-width 12
+```
+
+每个样本实际检测到的峰起点、峰位置、阈值以及两个 branch 的采样点边界会写入该实验的 `feature_info.json`；参数会写入 `config.json`。因此动态 branch 不会把一个样本的峰位置套用到其他样本。
+
+## 通道选择
+
+`--channel-mode` 支持：
+
+- `1`：只使用物理通道 1。
+- `2`：只使用物理通道 2。
+- `3`：同时使用通道 1 和 2，分别处理，不做数值相加。
+
+通道选择与深度 branch 是两个独立维度；物理通道不会被误当成深度 branch。
+
+## EMD 特征
+
+当前实现包含一个仅依赖 NumPy 的确定性 EMD 实现。默认最多提取 5 个 IMF，并保留残余项。每个 IMF/残余项提取：
+
+- Mean
+- Std
+- RMS
+- Energy
+- Mean absolute value
+- Peak absolute value
+- Zero-crossing rate
+- Spectral centroid
+
+默认使用 `--stream-aggregation pooled`：对每个 branch 内的所有 EMD 分量和信号流做均值池化，每个 branch 得到 8 个统计量；多个 branch 之间不做均值，而是直接拼接。因此最终输入维度为 `8 × branch 数`。例如 `bone_plus_post` 有两个 branch，最终为 16 维。
+
+`flatten` 和 `stats` 仍保留作对照实验，不再设置最终特征维数上限。
+
+## MLP 分类头
+
+默认使用轻量 MLP：
+
+```text
+Linear(input_dim, 64)
+-> ReLU + Dropout(0.1)
+-> Linear(64, 32)
+-> ReLU + Dropout(0.1)
+-> Linear(32, 2)
+```
+
+MLP 只负责 branch 特征融合和二分类，不使用 CNN。标准化参数只在训练集上拟合，验证集用于早停；测试集不参与训练或模型选择，每个 epoch 的 test loss 仅用于曲线观察。
+
+当前 MLP 使用两个输出节点的 softmax 交叉熵。对于二分类，它与单输出节点 sigmoid BCE 数学等价，因此不需要仅因为类别数为 2 而更换 loss；测试集 loss 只记录用于训练曲线，不参与模型选择。
+
+## 运行方式
+
+在本目录下执行。
+
+### 运行全部 16 组标准实验
+
+```powershell
+python run_emd_experiments.py --forms all --region-set all --channel-mode 3
+```
+
+### 运行一组实验
+
+```powershell
+python run_emd_experiments.py `
+  --forms max1 `
+  --region-set bone_plus_post `
+  --channel-mode 3
+```
+
+### 自定义 N 个 branch
+
+```powershell
+python run_emd_experiments.py `
+  --forms top3_mean `
+  --regions-json "[[0,5],[1,3],[3,4.5]]" `
+  --channel-mode 3
+```
+
+### 快速 smoke test
+
+只处理每个 split 的前 4 个样本并训练 2 个 epoch：
+
+```powershell
+python run_emd_experiments.py `
+  --forms max1 `
+  --region-set full `
+  --channel-mode 3 `
+  --max-samples 4 `
+  --epochs 2 `
+  --patience 2 `
+  --output-dir smoke_test
+```
+
+## 输出文件
+
+默认输出到 `experiments/`，每组实验一个目录，例如：
+
+```text
+experiments/
+  form_max1__regions_full__channels_3/
+    config.json
+    features_train.npy
+    features_val.npy
+    features_test.npy
+    labels_train.npy
+    labels_val.npy
+    labels_test.npy
+    standard_scaler.npz
+    mlp_model.npz
+    history.json                 # 每个 epoch 的 train/validation/test loss
+    metrics.json
+    feature_info.json
+    probabilities_train.npy
+    probabilities_val.npy
+    probabilities_test.npy
+  summary.json
+```
+
+`metrics.json` 保存 `best_epoch`、`trained_epochs`、最佳验证集指标，以及 Accuracy、Precision、F1-score、Sensitivity、Specificity、AUC 和混淆矩阵计数。
+
+## 图形化实验查看器
+
+`gui_app.py` 提供本地 Tkinter 图形界面，读取已有的 `experiments/` 和 `visualizations/` 结果，并支持在界面中启动当前选项的训练。运行 GUI 的 Python 环境需要包含完整的 Tcl/Tk 运行库。
+
+启动方式：
+
+```powershell
+python gui_app.py
+```
+
+界面功能：
+
+- 选择 `全部预处理方式` 时，显示当前已生成实验的 summary 对比表。
+- Summary 显示特征维数、Best Epoch、实际训练 Epoch 数和 Train/Val/Test 指标；Best Epoch 遵循训练检查点规则（默认 `min_delta=1e-4`），优先选择验证集 AUC 改善的 epoch，AUC 相同时选择 validation loss 改善的 epoch。
+- 选择单一预处理方式时，显示对应的预处理信号图和 EMD 分量图。
+- “Training Curve” 页位于预处理可视化和 EMD 分解之间，显示当前筛选实验的 validation loss/test loss-epoch 曲线，并标出 Best Epoch。
+- “Confusion Matrix” 页显示当前顶部筛选对应的 test 集混淆矩阵，并可在右侧选择栏中独立选择其他已生成实验进行对比。
+- 预处理页不再提供全局类别下拉框；四个等宽列分别显示当前组合 label=0/1 和目标组合 label=0/1。顶部筛选条件只控制当前组合，目标组合选择栏可独立选择所有已生成的 form/region/channel 结果。四列共用横向滑动条，按图片序号同步切换，多 branch 图像可横向查看。
+- 支持区域组合和通道模式筛选；EMD 页默认同时显示两个类别。
+- 点击“开始训练”后，会按当前预处理方式、区域组合和通道模式调用现有训练脚本；训练在后台执行，日志会显示在 Summary 页底部。
+- 默认训练完成后自动生成对应的预处理图、EMD 分量图、训练曲线图和 test 集混淆矩阵图；可以取消“训练后生成图像”。
+- 旧版不含通道号的图片文件也可以读取；新生成的图片文件名会包含通道模式，避免不同通道结果互相覆盖。
+
+训练时需要选择具体通道 1、2 或 3，不能选择“全部通道”。预处理方式和区域组合可以选择“全部”，这会按现有命令行脚本运行多组实验。
+
+如果某个筛选组合尚未运行实验或生成图像，界面会提示缺少结果；需要先使用 `run_emd_experiments.py`、`visualize_preprocessing.py`、`visualize_emd_components.py`、`visualize_training_curves.py` 或 `visualize_confusion_matrix.py` 生成对应文件。
+
+## 数据可视化
+
+新增四个可视化脚本：
+
+- `visualize_preprocessing.py`：对四种帧处理方式的输出进行可视化，每个类别随机选择 10 个样本。
+- `visualize_emd_components.py`：对 EMD 得到的 IMF 和 Residue 进行可视化，每个类别随机选择 1 个样本。
+- `visualize_training_curves.py`：读取 `history.json`，绘制 validation loss 和 test loss 随 epoch 的变化；test loss 不参与 early stopping。
+- `visualize_confusion_matrix.py`：读取 `metrics.json`，绘制 test 集混淆矩阵。
+
+两个脚本默认都使用：
+
+- `label=0` 作为“即将穿透”；
+- `label=1` 作为“安全”；
+- 固定随机种子 42；
+- `train + val + test` 的全部样本池；
+- 四种帧处理方式和四种区域组合（`full`、`bone`、`bone_plus_post`、`dyn_envelope`）；
+- 通道模式 3，即同时保留物理通道 1 和 2。
+
+运行预处理结果可视化：
+
+```powershell
+python visualize_preprocessing.py `
+  --forms all `
+  --region-set all `
+  --channel-mode 3
+```
+
+运行 EMD 分量可视化：
+
+```powershell
+python visualize_emd_components.py `
+  --forms all `
+  --region-set all `
+  --channel-mode 3
+```
+
+运行训练曲线可视化（需先完成训练）：
+
+```powershell
+python visualize_training_curves.py `
+  --experiments-dir experiments `
+  --output-dir visualizations/training_curves
+```
+
+输出分别位于：
+
+```text
+visualizations/preprocessing/
+visualizations/emd/
+visualizations/training_curves/
+visualizations/confusion_matrices/
+```
+
+如果只想检查当前实验配置，可以运行：
+
+```powershell
+python visualize_preprocessing.py `
+  --forms top3_mean `
+  --region-set bone_plus_post `
+  --channel-mode 1
+
+python visualize_emd_components.py `
+  --forms top3_mean `
+  --region-set bone_plus_post `
+  --channel-mode 1
+```
+
+预处理图中的横轴为 `Depth / mm`，纵轴为归一化 `RF Amplitude`，纵轴默认固定为 `[-1, 1]`。EMD 图中每一行对应一个 IMF 或残余项。Raw 50 Frames 会对每个帧/通道信号流分别做 EMD，并在同一分量图中叠加显示各信号流及其均值。
+
+当前代码默认使用 NumPy，不依赖 PyTorch、SciPy、scikit-learn 或 PyEMD。若后续改用经过验证的 EMD 库，只需替换 `emd_pipeline.py` 中的 `emd_decompose()`，其余 branch、特征和 MLP 接口保持不变。
