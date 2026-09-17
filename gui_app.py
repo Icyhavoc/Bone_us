@@ -22,8 +22,6 @@ from typing import Any, Iterable
 
 from PIL import Image, ImageTk
 
-from emd_pipeline import DynamicEnvelopeConfig
-
 
 APP_DIR = Path(__file__).resolve().parent
 EXPERIMENTS_DIR = APP_DIR / "experiments"
@@ -971,8 +969,6 @@ class EMDViewerApp(tk.Tk):
             region,
             "--channel-mode",
             channel,
-            "--dyn-a",
-            str(DynamicEnvelopeConfig().branch_length_mm),
             "--output-dir",
             str(EXPERIMENTS_DIR),
         ]
@@ -989,8 +985,6 @@ class EMDViewerApp(tk.Tk):
                         region,
                         "--channel-mode",
                         channel,
-                        "--dyn-a",
-                        str(DynamicEnvelopeConfig().branch_length_mm),
                         "--output-dir",
                         str(VISUALIZATIONS_DIR / "preprocessing"),
                     ],
@@ -1003,8 +997,6 @@ class EMDViewerApp(tk.Tk):
                         region,
                         "--channel-mode",
                         channel,
-                        "--dyn-a",
-                        str(DynamicEnvelopeConfig().branch_length_mm),
                         "--output-dir",
                         str(VISUALIZATIONS_DIR / "emd"),
                     ],

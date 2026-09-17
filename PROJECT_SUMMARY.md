@@ -29,6 +29,20 @@ raw_data
 - 当前实验不考虑同一骨头不同采样点之间的相关性和数据泄露问题。
 - 数据划分由 `raw_data/train`、`raw_data/val`、`raw_data/test` 提供。
 
+### 2.1 直流电平归零（`--data-dir raw_data` 的硬性前提）
+
+源 ADC 同时用码值 127 和 128 表示“零”，两者归一化后分别是
+$\pm 0.5/127.5 \approx \pm 0.003922$，即同一个物理电平被拆到了 127.5 中点的两侧。
+`raw_data/` 保留了这一 $\pm 0.0039$ 抖动，而 `after_split_data/` 是从抖动已被抹平的信号生成的；
+这点量化噪声足以让 `dyn_envelope` 的过阈点偏移几十个采样点
+（实测 `N35_P2_01` 通道 1 会从 324 漂到 267，从而触发人工修正守卫报错）。
+
+因此 `emd_pipeline.load_split()` 现在统一调用 `replace_adc_dc_level()`
+（`ADC_DC_MAGNITUDE = 0.5 / 127.5`，`ADC_DC_ATOL = 1e-6`）把这一对码值塌陷到 0.0。
+由于入口唯一，训练与四个可视化脚本都自动获得同一份直流归零后的帧；
+对本身已归零的 `after_split_data/` 该操作是幂等的。实验目录的 `config.json`
+会用 `adc_dc_replacement` 字段记录该常数。
+
 深度映射由 `DepthMapper` 封装，默认规则为：
 
 ```text
@@ -71,49 +85,76 @@ index = round(depth_mm / 5.0 * 896)
 
 新增动态区域组合：
 
-- `dyn_envelope`：对每个样本独立检测第一个显著包络峰，并据此划分两个 branch。
+- `dyn_envelope`：逐通道定位被检测信号的起振波包，并据此划分两个 branch。
 
 固定区域不要求覆盖完整 0–5 mm，也不要求 branch 等长。所有 branch 都分别处理，最后再拼接特征。
 
 ## 6. 动态包络区域 `dyn_envelope`
 
-动态区域不会替换原始信号，只使用包络分析结果确定 branch 边界。
+`dyn_envelope` 是 `reference_code/pipeline.py` 中 `segment()` 的**完整移植**，与 `after_split_data/` 的产物逐位一致（见 `verify_dyn_envelope.py`）。它不改变信号，只用包络结果确定 branch 边界。
 
-当前检测流程：
+> ⚠️ 本区域对输入的直流电平敏感：必须先执行 §2.1 的 ADC 127/128 归零，
+> 否则 $\pm 0.0039$ 的量化抖动会把越阈点推偏几十个采样点，并触发人工修正守卫
+> `recorded manual correction no longer applies`。`load_split()` 已统一处理。
 
-1. 对帧预处理和通道选择后的每条信号计算 Hilbert 包络。
-2. 对信号首尾进行反射填充，降低 FFT/Hilbert 变换产生的边界伪峰。
-3. 对全部信号流和物理通道的包络逐点取平均。
-4. 用长度为 21 的移动平均平滑融合包络。
-5. 用包络中位数估计背景基线，用 MAD 估计噪声尺度。
-6. 构造自适应显著性阈值：同时考虑 `2σ` 噪声阈值和全局峰值相对基线高度的 20%。
-7. 从采样点起点开始寻找第一个超过阈值且足够宽的局部峰。
-8. 从峰顶向左回溯到峰值相对基线高度的 50%，将该位置定义为峰起始点。
-9. 从峰起始点开始截取长度为 `a` 的第一个 branch，之后的全部信号作为第二个 branch。
+### 定位信号
 
-当前默认参数：
+定位信号与帧处理方式**无关**：每个通道各自按 `max(abs(x))` 选出幅值最大的 3 帧（并列取较早帧），在 `float64` 下求平均后回写 `float32`，再取 Hilbert 包络。因此切换 `mean_std` / `raw50` / `max1` / `top3_mean` 不会移动分割边界。
+
+### 检测流程
+
+1. 包络前 71 点置零，其余用 `mode='nearest'` 的长度 5 移动平均平滑。
+2. 参考点：第 71 点起首个严格 `> 0.015` 的采样点；单通道缺失时借用另一通道，全部缺失时改用 RNorm 融合包络（0.5×最大值）回退。
+3. 局部峰：`[参考点-50, 参考点+150)` 窗口内包络的最大值。
+4. 比例阈值：`0.05 × 局部峰值`。
+5. 前置波包合并：以含该峰的高于阈值连续段为主波包，向前合并满足以下全部条件的段：间隔 ≤ 8、宽度 ≥ 8、面积 ≥ 主波包面积的 5%、相对主波包起点的累计提前量 ≤ 96。
+6. 阈值点 `t` = 合并后的最早越阈点。
+7. 主窗：`s = max(t - 20, 70)`，`[s, s + 170)`，**不补零、不平移**（越界直接报错）。
+8. 尾部：固定 `[251, 896)`，与主窗**允许重叠或留间隔**。
+
+### 逐通道边界
+
+两个通道**各自独立**定位，因此同一采样点的主窗起点、与尾部的重叠长度都可能不同。分支在切片后各自重采样到 512 点并加 Tukey 窗，再按 `stream × channel` 展平。
+
+### 默认参数
 
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
-| `branch_length_mm` | `0.75 mm` | 动态 branch 1 的长度 `a` |
-| `smooth_window` | `21` | 包络平滑窗口 |
-| `prominence_sigma` | `2.0` | 噪声尺度倍数 |
-| `min_relative_height` | `0.2` | 全局峰值相对高度比例 |
-| `min_peak_width` | `12` | 候选峰最小宽度 |
+| `locator_top_k` | `3` | 每通道用于定位的帧数 |
+| `noise_start` | `71` | 包络噪声头长度 |
+| `weak_threshold` | `0.015` | 参考点越阈水平 |
+| `smooth_window` | `5` | 包络平滑窗口 |
+| `peak_window_back` / `peak_window_forward` | `50` / `150` | 局部峰搜索窗 |
+| `peak_ratio` | `0.05` | 比例阈值系数 |
+| `gap_max` / `min_run_width` | `8` / `8` | 波包合并间隔与最小宽度 |
+| `min_run_area_ratio` | `0.05` | 合并最小面积比 |
+| `merge_max_lead` | `96` | 最大累计提前量 |
+| `lead_back` | `20` | 由阈值点回退到主窗起点 |
+| `main_start_min` | `70` | 主窗起点下限 |
+| `main_length` | `170` | 主窗固定长度 |
+| `tail_start` | `251` | 尾部固定起点 |
+| `apply_manual_corrections` | `True` | 是否套用参考实现的人工复核修正表 |
 
-当前映射下，`0.75 mm` 约等于 134 个原始采样点。可以直接通过命令行调整：
+每个样本逐通道的阈值点、局部峰、参考点、回退规则、主窗/尾部边界、重叠与间隔长度都会写入实验目录的 `feature_info.json`；参数写入 `config.json`。
+
+调用：
 
 ```powershell
 python run_emd_experiments.py `
   --forms top3_mean `
   --region-set dyn_envelope `
-  --channel-mode 1 `
-  --dyn-a 0.75
+  --channel-mode 3
 ```
 
-GUI 启动训练时会从 `DynamicEnvelopeConfig().branch_length_mm` 读取默认 `a`，因此修改 `emd_pipeline.py` 中的默认值后，GUI 训练和自动可视化会同步使用新值。
+`--dyn-*` 参数由 `dyn_cli.py` 统一定义，默认值全部取自 `DynamicEnvelopeConfig`；GUI 训练与四个可视化脚本共用同一套默认值，不再各自硬编码。
 
-每个样本实际检测到的起点、峰位置、阈值和 branch 边界会写入实验目录的 `feature_info.json`；实验参数写入 `config.json`。
+一致性校验：
+
+```powershell
+python verify_dyn_envelope.py
+```
+
+该脚本对 268 个点位 × 2 通道同时校验「边界逐位相同」与「分支内容是无补零的纯切片」。
 
 ## 7. 重采样、Tukey 窗和可视化顺序
 
@@ -281,8 +322,18 @@ python run_emd_experiments.py `
   --forms top3_mean `
   --region-set dyn_envelope `
   --channel-mode 1 `
-  --dyn-a 0.75
+  --dyn-lead-back 20 `
+  --dyn-main-length 170
 ```
+
+校验 `dyn_envelope` 与参考实现逐位一致：
+
+```powershell
+python verify_dyn_envelope.py
+```
+
+> `experiments/` 中部分目录早于本次算法移植或早于 §2.1 的直流归零，
+> 引用其中的指标前请先读 `experiments/STALENESS.md`。
 
 快速验证代码：
 
@@ -306,6 +357,7 @@ python run_emd_experiments.py `
 - 所有核心 Python 文件语法检查；
 - 固定区域训练流程验证；
 - `dyn_envelope` 训练流程验证；
+- `dyn_envelope` 与参考实现 268 点位 × 2 通道逐位一致性验证（`verify_dyn_envelope.py`，边界与分支内容全部通过）；
 - 动态 branch 两个分支均重采样到 512 点的验证；
 - Tukey 窗仍保留在训练/EMD路径的验证；
 - 预处理可视化不加 Tukey 窗的验证；

@@ -22,12 +22,12 @@ import numpy as np
 
 from emd_pipeline import (
     DepthMapper,
-    DynamicEnvelopeConfig,
     EMDConfig,
     FORM_ORDER,
     MLPConfig,
     RegionSpec,
     StandardScaler,
+    ADC_DC_MAGNITUDE,
     binary_metrics,
     build_feature_matrix,
     canonical_form,
@@ -37,6 +37,7 @@ from emd_pipeline import (
     write_json,
     NumpyMLPClassifier,
 )
+from dyn_cli import add_dyn_arguments, dyn_config_from_args
 
 
 REGION_PRESETS: dict[str, list[list[float]]] = {
@@ -75,33 +76,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3], default=3)
     parser.add_argument("--target-length", type=int, default=512)
     parser.add_argument("--tukey-alpha", type=float, default=0.3)
-    parser.add_argument(
-        "--dyn-a",
-        "--dyn-a-mm",
-        "--dyn-branch-length-mm",
-        dest="dyn_a_mm",
-        type=float,
-        default=DynamicEnvelopeConfig().branch_length_mm,
-        help="length a in millimetres for dyn_envelope branch 1",
-    )
-    parser.add_argument(
-        "--dyn-smooth-window",
-        type=int,
-        default=21,
-        help="moving-average window for the envelope detector",
-    )
-    parser.add_argument(
-        "--dyn-prominence-sigma",
-        type=float,
-        default=2.0,
-        help="minimum envelope peak prominence measured in robust sigma units",
-    )
-    parser.add_argument(
-        "--dyn-min-peak-width",
-        type=int,
-        default=12,
-        help="minimum width used to accept a prominent envelope peak",
-    )
+    # dyn_envelope mirrors reference_code/pipeline.py; see dyn_cli for the flags.
+    add_dyn_arguments(parser)
     parser.add_argument("--max-depth-mm", type=float, default=5.0)
     parser.add_argument("--signal-length", type=int, default=896)
     parser.add_argument("--rounding", choices=["round", "floor", "ceil"], default="round")
@@ -194,14 +170,7 @@ def run_one(
         stream_aggregation=args.stream_aggregation,
     )
     dynamic_envelope_config = (
-        DynamicEnvelopeConfig(
-            branch_length_mm=args.dyn_a_mm,
-            smooth_window=args.dyn_smooth_window,
-            prominence_sigma=args.dyn_prominence_sigma,
-            min_peak_width=args.dyn_min_peak_width,
-        )
-        if region_name == DYNAMIC_REGION_NAME
-        else None
+        dyn_config_from_args(args) if region_name == DYNAMIC_REGION_NAME else None
     )
     hidden_dims = tuple(int(item) for item in args.hidden_dims.split(",") if item.strip())
     mlp_config = MLPConfig(
@@ -225,6 +194,7 @@ def run_one(
         "emd": emd_config,
         "mlp": mlp_config,
         "data_dir": data_dir,
+        "adc_dc_replacement": ADC_DC_MAGNITUDE,
         "max_samples": args.max_samples,
     }
     write_json(output_dir / "config.json", experiment_config)
@@ -251,6 +221,7 @@ def run_one(
             emd_config=emd_config,
             score_region=selection_region,
             limit=args.max_samples,
+            sample_ids=[str(record.get("sample_id", "")) for record in samples],
         )
         feature_data[split] = features
         feature_info[split] = info

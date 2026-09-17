@@ -132,31 +132,69 @@ class DepthMapper:
 class DynamicEnvelopeConfig:
     """Settings for the sample-wise envelope-defined two-branch split.
 
-    ``branch_length_mm`` is the adjustable ``a`` in the project definition.
-    It is converted to sample points with the same depth-to-sample convention
-    as :class:`DepthMapper`; the first branch then contains that many original
-    samples starting at the detected onset of the first prominent envelope
-    peak.  The second branch contains all remaining samples after that
-    interval.
+    The defaults reproduce ``reference_code/pipeline.py``
+    (:func:`segment`) exactly, including its index constants.  The detector is
+    applied **per channel**: every channel gets its own reference crossing,
+    local peak, merged leading packet and therefore its own main/tail
+    boundary.  Branches are never re-padded and may overlap.
+
+    ``main_length`` and ``tail_start`` are index constants of the reference
+    rule ``start = max(t - lead_back, noise_start); end = start + main_length``
+    and ``tail = [tail_start, signal_length)``.
     """
 
-    branch_length_mm: float = 0.75
-    smooth_window: int = 21
-    prominence_sigma: float = 2.0
-    min_relative_height: float = 0.2
-    min_peak_width: int = 12
+    # Detector constants (identical to the reference implementation).
+    noise_start: int = 71
+    weak_threshold: float = 0.015
+    smooth_window: int = 5
+    peak_window_back: int = 50
+    peak_window_forward: int = 150
+    peak_ratio: float = 0.05
+    gap_max: int = 8
+    min_run_width: int = 8
+    min_run_area_ratio: float = 0.05
+    merge_max_lead: int = 96
+    lead_back: int = 20
+    # Boundary constants.
+    # ``main_start_min`` is the clamp floor of ``max(t - lead_back, 70)`` in the
+    # reference.  It is deliberately *not* ``noise_start`` (71): the reference
+    # lets the main window start one sample into the noise head.
+    main_start_min: int = 70
+    main_length: int = 170
+    tail_start: int = 251
+    signal_length: int = 896
+    # Per-channel locator signal: mean of the K frames with the largest
+    # absolute amplitude, matching ``compute_hilbert_topk_amplitude_mean``.
+    locator_top_k: int = 3
+    # Apply the small hand-checked correction table ported from the reference.
+    # Set to ``False`` to run the detector with no hand tuning at all.
+    apply_manual_corrections: bool = True
 
     def validate(self) -> None:
-        if self.branch_length_mm <= 0:
-            raise ValueError("dynamic envelope branch_length_mm must be positive")
+        if self.noise_start < 0:
+            raise ValueError("dynamic envelope noise_start cannot be negative")
+        if not 0.0 <= self.weak_threshold:
+            raise ValueError("dynamic envelope weak_threshold cannot be negative")
         if self.smooth_window <= 0:
             raise ValueError("dynamic envelope smooth_window must be positive")
-        if self.prominence_sigma < 0:
-            raise ValueError("dynamic envelope prominence_sigma cannot be negative")
-        if not 0.0 <= self.min_relative_height <= 1.0:
-            raise ValueError("dynamic envelope min_relative_height must be in [0, 1]")
-        if self.min_peak_width <= 0:
-            raise ValueError("dynamic envelope min_peak_width must be positive")
+        if self.peak_window_back < 0 or self.peak_window_forward <= 0:
+            raise ValueError("dynamic envelope peak window must be forward-positive")
+        if not 0.0 < self.peak_ratio < 1.0:
+            raise ValueError("dynamic envelope peak_ratio must be in (0, 1)")
+        if self.gap_max < 0 or self.merge_max_lead < 0 or self.lead_back < 0:
+            raise ValueError("dynamic envelope merge limits cannot be negative")
+        if self.min_run_width <= 0:
+            raise ValueError("dynamic envelope min_run_width must be positive")
+        if not 0.0 <= self.min_run_area_ratio <= 1.0:
+            raise ValueError("dynamic envelope min_run_area_ratio must be in [0, 1]")
+        if self.main_length <= 0:
+            raise ValueError("dynamic envelope main_length must be positive")
+        if self.main_start_min < 0:
+            raise ValueError("dynamic envelope main_start_min cannot be negative")
+        if not 0 <= self.tail_start < self.signal_length:
+            raise ValueError("dynamic envelope tail_start must be inside the signal")
+        if self.locator_top_k <= 0:
+            raise ValueError("dynamic envelope locator_top_k must be positive")
 
 
 @dataclass(frozen=True)
@@ -397,195 +435,430 @@ def prepare_interval_signals(
     return resampled * tukey_window(target_length, tukey_alpha)[None, :]
 
 
+# Manual per-channel corrections ported verbatim from
+# ``reference_code/pipeline.py``.  Keys are ``(point_id, channel_index)`` with
+# 0-based channel indices.  The reference refuses to apply a correction when
+# the automatic result no longer matches the recorded one, so a changed input
+# cannot silently inherit a stale hand fix.
+MANUAL_CORRECTIONS: dict[tuple[str, int], tuple[int, int]] = {
+    ("N32_P3_01", 0): (249, 163),
+    ("N35_P2_01", 0): (324, 272),
+    ("N35_P2_01", 1): (365, 279),
+}
+
+
 def _hilbert_envelope(signal: np.ndarray) -> np.ndarray:
-    """Compute a real-signal Hilbert envelope with NumPy's FFT primitives."""
+    """Magnitude of the analytic signal, mirroring ``scipy.signal.hilbert``.
 
-    signal = np.asarray(signal, dtype=np.float64).reshape(-1)
-    if signal.size == 0:
-        return signal.copy()
-    centered = signal - np.median(signal)
-    # Reflect padding prevents the FFT's implicit periodic boundary from
-    # creating a false high envelope at the first or last few samples.
-    pad = min(max(32, signal.size // 8), signal.size - 1)
-    padded = np.pad(centered, (pad, pad), mode="reflect") if pad else centered
-    spectrum = np.fft.fft(padded)
-    mask = np.zeros(padded.size, dtype=np.float64)
+    Accepts a single ``[samples]`` signal or a ``[rows, samples]`` batch and
+    returns the envelope with the same shape.  Unlike the earlier version this
+    performs no detrending and no boundary padding, because the reference
+    implementation relies on the plain FFT round trip: any smoothing of the
+    edges would move the detected crossing.
+    """
+
+    values = np.asarray(signal, dtype=np.float32)
+    squeeze = values.ndim == 1
+    if squeeze:
+        values = values[None, :]
+    if values.ndim != 2:
+        raise ValueError(f"Expected 1-D or 2-D input, got {values.shape}")
+    length = values.shape[-1]
+    if length == 0:
+        return values.astype(np.float64).reshape(np.shape(signal))
+    spectrum = np.fft.fft(values, axis=-1)
+    mask = np.zeros(length, dtype=np.float64)
     mask[0] = 1.0
-    if padded.size % 2 == 0:
-        mask[padded.size // 2] = 1.0
-        mask[1 : padded.size // 2] = 2.0
+    if length % 2 == 0:
+        mask[length // 2] = 1.0
+        mask[1 : length // 2] = 2.0
     else:
-        mask[1 : (padded.size + 1) // 2] = 2.0
-    analytic = np.fft.ifft(spectrum * mask)
-    return np.abs(analytic[pad : pad + signal.size]).astype(np.float64)
+        mask[1 : (length + 1) // 2] = 2.0
+    analytic = np.fft.ifft(spectrum * mask, axis=-1)
+    envelope = np.abs(analytic)
+    return envelope[0] if squeeze else envelope
 
 
-def _smooth_envelope(envelope: np.ndarray, window: int) -> np.ndarray:
-    """Smooth an envelope while avoiding artificial zero-padding at edges."""
+def _moving_average_nearest(values: np.ndarray, window: int) -> np.ndarray:
+    """Moving average with clamped edges, matching ``uniform_filter1d``.
 
-    envelope = np.asarray(envelope, dtype=np.float64).reshape(-1)
-    if envelope.size == 0 or window <= 1:
-        return envelope.copy()
-    window = min(int(window), envelope.size)
-    if window % 2 == 0:
-        window = max(1, window - 1)
-    if window == 1:
-        return envelope.copy()
+    The reference smooths with
+    ``scipy.ndimage.uniform_filter1d(..., mode='nearest')``, which accumulates
+    in ``float64`` and writes the result back in the input dtype.  Reproducing
+    that accumulation order keeps the later ``> weak_threshold`` comparisons
+    identical; accumulating in ``float32`` instead shifts values by ~1e-6 and
+    can flip a crossing.
+    """
+
+    values = np.asarray(values, dtype=np.float32)
+    if values.ndim != 2:
+        raise ValueError(f"Expected [rows, samples], got {values.shape}")
+    window = int(window)
+    if window <= 1:
+        return values.copy()
+    window = min(window, values.shape[-1])
     radius = window // 2
-    padded = np.pad(envelope, (radius, radius), mode="edge")
-    kernel = np.ones(window, dtype=np.float64) / window
-    return np.convolve(padded, kernel, mode="valid")
+    # ``uniform_filter1d`` biases an even-sized window towards earlier samples.
+    left, right = (radius, radius) if window % 2 else (radius - 1, radius)
+    padded = np.pad(values, [(0, 0), (left, right)], mode="edge")
+    windowed = np.lib.stride_tricks.sliding_window_view(padded, window, axis=-1)
+    return windowed.mean(axis=-1, dtype=np.float64).astype(values.dtype)
 
 
-def detect_dynamic_envelope_start(
-    processed: np.ndarray,
+def locator_mean_signal(frames: np.ndarray, top_k: int) -> np.ndarray:
+    """Average the ``top_k`` frames with the largest peak amplitude per channel.
+
+    Port of ``compute_hilbert_topk_amplitude_mean.select_topk``: each channel
+    picks its own frames by ``max(abs(x))`` over the whole trace, ties broken
+    towards the earlier frame, and the selection is averaged in ``float64``
+    before being stored back as ``float32``.
+    """
+
+    frames = np.asarray(frames, dtype=np.float32)
+    if frames.ndim != 3:
+        raise ValueError(f"Expected [frames, channels, samples], got {frames.shape}")
+    frame_count, channel_count = frames.shape[0], frames.shape[1]
+    top_k = min(int(top_k), frame_count)
+    if top_k <= 0:
+        raise ValueError("top_k must be positive")
+    peak_abs = np.max(np.abs(frames), axis=-1)
+    order = np.arange(frame_count)
+    selected = np.empty((channel_count, top_k, frames.shape[-1]), dtype=np.float32)
+    for channel in range(channel_count):
+        chosen = np.lexsort((order, -peak_abs[:, channel]))[:top_k]
+        selected[channel] = frames[chosen, channel, :]
+    return np.mean(selected, axis=1, dtype=np.float64).astype(np.float32)
+
+
+def _first_crossing(values: np.ndarray, threshold: float, noise_start: int) -> int:
+    """First index at or after ``noise_start`` strictly above ``threshold``."""
+
+    hits = np.flatnonzero(values[noise_start:] > threshold)
+    return int(hits[0] + noise_start) if hits.size else -1
+
+
+def _threshold_runs(
+    values: np.ndarray, threshold: float, noise_start: int
+) -> list[dict[str, float]]:
+    """Contiguous runs of ``values > threshold`` ignoring the noise head."""
+
+    mask = values > threshold
+    mask[:noise_start] = False
+    edges = np.diff(np.concatenate(([False], mask, [False])).astype(np.int8))
+    starts = np.flatnonzero(edges == 1)
+    ends = np.flatnonzero(edges == -1)
+    # ``area`` keeps the input dtype accumulation of the reference code because
+    # it is only ever compared against a ratio of another run's area.
+    return [
+        {
+            "start": int(run_start),
+            "end": int(run_end),
+            "width": int(run_end - run_start),
+            "area": float(values[run_start:run_end].sum()),
+        }
+        for run_start, run_end in zip(starts, ends)
+    ]
+
+
+def locate_dynamic_span(
+    smoothed: np.ndarray,
     config: DynamicEnvelopeConfig = DynamicEnvelopeConfig(),
-) -> dict[str, float | int]:
-    """Find the onset of the first prominent envelope peak.
+    point_id: str | None = None,
+) -> dict[str, Any]:
+    """Port of ``reference_code/pipeline.py::segment`` (per-channel locator).
 
-    The envelope is computed independently for every processed stream and
-    physical channel, then averaged.  A robust median/MAD baseline determines
-    significance.  The first local maximum above that baseline is selected;
-    its onset is the point where the smoothed envelope first rises above half
-    of that peak's excess over baseline.  If no significant local maximum is
-    found, the global maximum is used as a deterministic fallback.
+    ``smoothed`` is the ``[channels, samples]`` smoothed Hilbert envelope.  The
+    rules are reproduced exactly:
+
+    * reference crossing: first sample at or after ``noise_start`` strictly
+      above ``weak_threshold``; when exactly one channel is missing it borrows
+      the other channel's crossing, and when every channel is missing it falls
+      back to ``0.5 * max`` of the joint RMS envelope;
+    * local peak: maximum of the window
+      ``[reference - peak_window_back, reference + peak_window_forward)``;
+    * threshold: ``peak_ratio`` times that peak;
+    * leading-packet merge: walk backwards while the gap to the running start
+      is within ``gap_max``, the run is at least ``min_run_width`` wide, its
+      area reaches ``min_run_area_ratio`` of the *original* anchor run, and the
+      total lead stays within ``merge_max_lead`` of the anchor start;
+    * boundary: ``start = max(t - lead_back, main_start_min)`` and
+      ``end = start + main_length``, never silently shifted to fit.
+
+    The tail is the fixed ``[tail_start, signal_length)`` slice, so it may
+    overlap the main window or leave a gap.
     """
 
     config.validate()
-    if processed.ndim != 3:
-        raise ValueError(f"Expected [streams, channels, samples], got {processed.shape}")
-    sample_count = processed.shape[-1]
-    if sample_count < 2:
-        raise ValueError("Dynamic envelope detection requires at least two samples")
+    smoothed = np.asarray(smoothed, dtype=np.float32)
+    if smoothed.ndim != 2:
+        raise ValueError(f"Expected [channels, samples], got {smoothed.shape}")
+    channel_count, sample_count = smoothed.shape
+    if sample_count != config.signal_length:
+        raise ValueError(
+            f"dynamic envelope expects {config.signal_length} samples, got {sample_count}"
+        )
 
-    flattened = processed.reshape(-1, sample_count)
-    envelopes = np.stack([_hilbert_envelope(row) for row in flattened], axis=0)
-    envelope = np.mean(envelopes, axis=0)
-    smoothed = _smooth_envelope(envelope, config.smooth_window)
-    baseline = float(np.median(smoothed))
-    mad = float(np.median(np.abs(smoothed - baseline)))
-    sigma = max(1.4826 * mad, float(np.std(smoothed)) * 0.1, 1e-8)
-    global_excess = max(float(np.max(smoothed)) - baseline, 0.0)
-    threshold = baseline + max(
-        config.prominence_sigma * sigma,
-        config.min_relative_height * global_excess,
+    direct = np.array(
+        [_first_crossing(row, config.weak_threshold, config.noise_start) for row in smoothed],
+        dtype=np.int64,
     )
-    maxima, _ = _local_extrema(smoothed)
-    candidates = maxima[smoothed[maxima] >= threshold]
-
-    peak_index: int
-    if candidates.size:
-        peak_index = int(candidates[0])
-        selected_width = 0
-        for candidate in candidates:
-            peak_value = float(smoothed[candidate])
-            edge_level = baseline + 0.5 * max(peak_value - baseline, sigma)
-            left = int(candidate)
-            right = int(candidate)
-            while left > 0 and smoothed[left - 1] >= edge_level:
-                left -= 1
-            while right + 1 < sample_count and smoothed[right + 1] >= edge_level:
-                right += 1
-            width = right - left + 1
-            if width >= config.min_peak_width:
-                peak_index = int(candidate)
-                selected_width = width
-                break
-        if selected_width == 0:
-            candidate = peak_index
-            edge_level = baseline + 0.5 * max(float(smoothed[candidate]) - baseline, sigma)
-            left = candidate
-            while left > 0 and smoothed[left - 1] >= edge_level:
-                left -= 1
-            right = candidate
-            while right + 1 < sample_count and smoothed[right + 1] >= edge_level:
-                right += 1
-            selected_width = right - left + 1
+    reference = direct.copy()
+    rules = ["direct"] * channel_count
+    relative_fallback = 0.0
+    missing = np.flatnonzero(reference < 0)
+    if missing.size == 0:
+        pass
+    elif missing.size == 1 and channel_count > 1:
+        channel = int(missing[0])
+        donor = int(next(i for i in range(channel_count) if i != channel))
+        reference[channel] = reference[donor]
+        rules[channel] = "paired_fallback"
+    elif missing.size == channel_count:
+        joint = np.sqrt(np.mean(smoothed.astype(np.float64) ** 2, axis=0))
+        relative_fallback = 0.5 * float(joint[config.noise_start :].max())
+        reference[:] = _first_crossing(joint, relative_fallback, config.noise_start)
+        if reference[0] < 0:
+            raise ValueError(
+                "dynamic envelope: no valid reference crossing, manual review required"
+            )
+        rules = ["rms_joint_fallback"] * channel_count
     else:
-        peak_index = int(np.argmax(smoothed))
-        selected_width = 0
+        raise ValueError(
+            "dynamic envelope: partial multi-channel crossing fallback is undefined"
+        )
 
-    peak_value = float(smoothed[peak_index])
-    edge_level = baseline + 0.5 * max(peak_value - baseline, sigma)
-    onset = peak_index
-    while onset > 0 and smoothed[onset - 1] >= edge_level:
-        onset -= 1
+    starts = np.zeros(channel_count, dtype=np.int64)
+    ends = np.zeros(channel_count, dtype=np.int64)
+    automatic = np.zeros(channel_count, dtype=np.int64)
+    peaks = np.zeros(channel_count, dtype=np.int64)
+    thresholds = np.zeros(channel_count, dtype=np.float64)
+    premerge = np.zeros(channel_count, dtype=np.int64)
+    windows = np.zeros((channel_count, 2), dtype=np.int64)
+    corrected = np.zeros(channel_count, dtype=bool)
+    audits: list[dict[str, Any]] = []
+
+    for channel in range(channel_count):
+        row = smoothed[channel]
+        low = max(config.noise_start, int(reference[channel]) - config.peak_window_back)
+        high = min(sample_count, int(reference[channel]) + config.peak_window_forward)
+        peak = int(low + np.argmax(row[low:high]))
+        threshold = config.peak_ratio * float(row[peak])
+        if threshold <= 0.0:
+            raise ValueError("dynamic envelope: non-positive local peak, cannot threshold")
+        runs = _threshold_runs(row, threshold, config.noise_start)
+        anchor_index = next(
+            index for index, run in enumerate(runs) if run["start"] <= peak < run["end"]
+        )
+        anchor = runs[anchor_index]
+        crossing = int(anchor["start"])
+        accepted: list[int] = []
+        # The area denominator stays the original anchor run and never grows as
+        # further packets are merged.
+        for index in range(anchor_index - 1, -1, -1):
+            run = runs[index]
+            if (
+                crossing - run["end"] > config.gap_max
+                or run["width"] < config.min_run_width
+                or run["area"] < config.min_run_area_ratio * anchor["area"]
+                or anchor["start"] - run["start"] > config.merge_max_lead
+            ):
+                break
+            crossing = int(run["start"])
+            accepted.append(index)
+
+        automatic[channel] = crossing
+        peaks[channel] = peak
+        thresholds[channel] = threshold
+        premerge[channel] = int(anchor["start"])
+        windows[channel] = (low, high)
+        audits.append(
+            {
+                "runs": runs,
+                "main_run_index": anchor_index,
+                "accepted_run_indices": accepted,
+            }
+        )
+
+    automatic_before_manual = automatic.copy()
+    for channel in range(channel_count):
+        if point_id is None or not config.apply_manual_corrections:
+            continue
+        fix = MANUAL_CORRECTIONS.get((point_id, channel))
+        if fix is None:
+            continue
+        recorded, manual = fix
+        if int(automatic[channel]) != recorded:
+            raise ValueError(
+                f"dynamic envelope: {point_id} channel {channel + 1} automatic result "
+                f"changed (expected {recorded}, got {int(automatic[channel])}); "
+                "the recorded manual correction no longer applies"
+            )
+        automatic[channel] = manual
+        corrected[channel] = True
+        audits[channel]["manual_correction"] = {
+            "old_threshold_index": recorded,
+            "new_threshold_index": manual,
+        }
+
+    starts[:] = np.maximum(automatic - config.lead_back, config.main_start_min)
+    ends[:] = starts + config.main_length
+    if np.any(ends > sample_count):
+        raise ValueError(
+            "dynamic envelope: main window exceeds the signal, refusing to shift it"
+        )
+    tail_end = sample_count
     return {
-        "start_index": int(onset),
-        "peak_index": int(peak_index),
-        "peak_width": int(selected_width),
-        "baseline": baseline,
-        "sigma": sigma,
-        "threshold": threshold,
+        "starts": starts,
+        "ends": ends,
+        "tail_start": int(config.tail_start),
+        "tail_end": int(tail_end),
+        "crossing_index": automatic,
+        "automatic_crossing_index": automatic_before_manual,
+        "manual_correction_applied": corrected,
+        "local_peak_index": peaks,
+        "threshold_value": thresholds,
+        "premerge_crossing_index": premerge,
+        "peak_search_window": windows,
+        "reference_absolute_crossing": direct,
+        "reference_index": reference,
+        "reference_rule": rules,
+        "relative_fallback": float(relative_fallback),
+        "main_start_clamped": automatic - config.lead_back < config.main_start_min,
+        "gap_length": np.maximum((config.tail_start - ends), 0).astype(np.int64),
+        "overlap_length": np.maximum(
+            np.minimum(ends, tail_end) - np.maximum(starts, config.tail_start), 0
+        ).astype(np.int64),
+        "audits": audits,
     }
 
 
 def prepare_dynamic_envelope_branches(
     processed: np.ndarray,
+    locator_frames: np.ndarray,
     config: DynamicEnvelopeConfig = DynamicEnvelopeConfig(),
     target_length: int = 512,
     tukey_alpha: float = 0.3,
-    max_depth_mm: float = 5.0,
     apply_tukey: bool = True,
+    point_id: str | None = None,
 ) -> tuple[list[np.ndarray], dict[str, Any]]:
-    """Create the two dynamic-envelope branches for one processed sample."""
+    """Create the two dynamic-envelope branches for one processed sample.
+
+    ``processed`` is the frame-processed ``[streams, channels, samples]`` block
+    that the branches are cut from.  ``locator_frames`` is the matching raw
+    ``[frames, channels, samples]`` block used only to build the locator signal:
+    like the reference, the boundary comes from the top-``locator_top_k`` frame
+    average and not from the selected frame form, so switching form does not
+    move the split.
+
+    Boundaries are detected **per channel**.  Branch 1 is
+    ``[start, start + main_length)`` with ``start = max(t - lead_back,
+    main_start_min)``; branch 2 is the fixed ``[tail_start, samples)`` slice.  Both
+    are resampled to ``target_length`` and optionally Tukey-windowed by the
+    existing feature pipeline, then flattened to
+    ``[streams * channels, target_length]``.
+    """
 
     config.validate()
+    if processed.ndim != 3:
+        raise ValueError(f"Expected [streams, channels, samples], got {processed.shape}")
+    channel_count = int(processed.shape[1])
     sample_count = int(processed.shape[-1])
-    detection = detect_dynamic_envelope_start(processed, config)
-    if max_depth_mm <= 0:
-        raise ValueError("max_depth_mm must be positive")
-    requested_a = int(
-        math.floor(config.branch_length_mm / max_depth_mm * sample_count + 0.5)
-    )
-    effective_a = min(max(1, requested_a), sample_count - 1)
-    max_start = max(0, sample_count - effective_a - 1)
-    start = min(int(detection["start_index"]), max_start)
-    split = start + effective_a
-    intervals = [(start, split), (split, sample_count)]
-    branches = [
-        prepare_interval_signals(
-            processed,
-            interval_start,
-            interval_end,
-            target_length=target_length,
-            tukey_alpha=tukey_alpha,
-            apply_tukey=apply_tukey,
+    if locator_frames.ndim != 3:
+        raise ValueError(
+            f"Expected [frames, channels, samples] locator frames, got {locator_frames.shape}"
         )
-        for interval_start, interval_end in intervals
-    ]
+    if locator_frames.shape[1] != channel_count or locator_frames.shape[-1] != sample_count:
+        raise ValueError(
+            "dynamic envelope locator frames must match the processed channel count "
+            f"and length; got {locator_frames.shape} against {processed.shape}"
+        )
+
+    locator = locator_mean_signal(locator_frames, config.locator_top_k)
+    envelope = np.zeros((channel_count, sample_count), dtype=np.float32)
+    envelope[:] = _hilbert_envelope(locator).astype(np.float32)
+    smoothed = np.zeros_like(envelope)
+    # The head of the trace is deliberately zeroed so it can never take part in
+    # crossing detection or in the run masks.
+    smoothed[:, config.noise_start :] = _moving_average_nearest(
+        envelope[:, config.noise_start :], config.smooth_window
+    )
+
+    span = locate_dynamic_span(smoothed, config=config, point_id=point_id)
+    starts = span["starts"]
+    ends = span["ends"]
+    tail_start = span["tail_start"]
+    tail_end = span["tail_end"]
+
+    def cut(channel: int, start: int, end: int) -> np.ndarray:
+        """Resample one channel's interval into ``[streams, target_length]``."""
+        block = processed[:, channel : channel + 1, start:end]
+        flattened = block.reshape(-1, block.shape[-1])
+        resampled = resample_signals(flattened, target_length)
+        if not apply_tukey:
+            return resampled
+        return resampled * tukey_window(target_length, tukey_alpha)[None, :]
+
+    # Channel boundaries differ, so each channel is cut on its own and the
+    # pieces are stacked back into a single branch block.
+    main_parts = [cut(c, int(starts[c]), int(ends[c])) for c in range(channel_count)]
+    tail_parts = [cut(c, int(tail_start), int(tail_end)) for c in range(channel_count)]
+    branch_stream_count = int(processed.shape[0])
+    main_block = np.stack(
+        [part.reshape(branch_stream_count, target_length) for part in main_parts], axis=1
+    ).reshape(-1, target_length)
+    tail_block = np.stack(
+        [part.reshape(branch_stream_count, target_length) for part in tail_parts], axis=1
+    ).reshape(-1, target_length)
+
     branch_info = [
         {
-            "name": "dynamic_peak_window",
-            "start_index": int(start),
-            "end_index_exclusive": int(split),
-            "input_length": int(split - start),
+            "name": "dynamic_main_window",
+            "start_index": int(starts[0]),
+            "end_index_exclusive": int(ends[0]),
+            "start_index_by_channel": starts.astype(int).tolist(),
+            "end_index_exclusive_by_channel": ends.astype(int).tolist(),
+            "input_length_by_channel": (ends - starts).astype(int).tolist(),
+            "input_length": int(ends[0] - starts[0]),
             "feature_length": None,
         },
         {
-            "name": "dynamic_after_peak_window",
-            "start_index": int(split),
-            "end_index_exclusive": int(sample_count),
-            "input_length": int(sample_count - split),
+            "name": "dynamic_tail_window",
+            "start_index": int(tail_start),
+            "end_index_exclusive": int(tail_end),
+            "start_index_by_channel": [int(tail_start)] * channel_count,
+            "end_index_exclusive_by_channel": [int(tail_end)] * channel_count,
+            "input_length_by_channel": [int(tail_end - tail_start)] * channel_count,
+            "input_length": int(tail_end - tail_start),
             "feature_length": None,
         },
     ]
     info: dict[str, Any] = {
-        "detected_peak_start_index": int(detection["start_index"]),
-        "peak_index": int(detection["peak_index"]),
-        "requested_branch_length_mm": float(config.branch_length_mm),
-        "effective_branch_length_mm": float(effective_a / sample_count * max_depth_mm),
-        "requested_branch_length_samples": int(requested_a),
-        "effective_branch_length_samples": int(effective_a),
-        "max_depth_mm": float(max_depth_mm),
+        "algorithm": "reference_code.pipeline.segment",
+        "point_id": point_id,
+        "channel_count": channel_count,
         "sample_length": sample_count,
-        "baseline": float(detection["baseline"]),
-        "sigma": float(detection["sigma"]),
-        "threshold": float(detection["threshold"]),
-        "peak_width": int(detection["peak_width"]),
+        "locator_top_k": int(config.locator_top_k),
+        "main_length": int(config.main_length),
+        "main_start_index_by_channel": starts.astype(int).tolist(),
+        "main_end_exclusive_by_channel": ends.astype(int).tolist(),
+        "tail_interval": [int(tail_start), int(tail_end)],
+        "crossing_index": span["crossing_index"].astype(int).tolist(),
+        "automatic_crossing_index": span["automatic_crossing_index"].astype(int).tolist(),
+        "manual_correction_applied": span["manual_correction_applied"].astype(bool).tolist(),
+        "local_peak_index": span["local_peak_index"].astype(int).tolist(),
+        "threshold_value": span["threshold_value"].astype(float).tolist(),
+        "premerge_crossing_index": span["premerge_crossing_index"].astype(int).tolist(),
+        "peak_search_window": span["peak_search_window"].astype(int).tolist(),
+        "reference_absolute_crossing": span["reference_absolute_crossing"].astype(int).tolist(),
+        "reference_index": span["reference_index"].astype(int).tolist(),
+        "reference_rule": span["reference_rule"],
+        "relative_fallback": float(span["relative_fallback"]),
+        "main_start_clamped": span["main_start_clamped"].astype(bool).tolist(),
+        "gap_length_by_channel": span["gap_length"].astype(int).tolist(),
+        "overlap_length_by_channel": span["overlap_length"].astype(int).tolist(),
         "branches": branch_info,
     }
-    return branches, info
+    return [main_block, tail_block], info
 
 
 def _local_extrema(signal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -741,6 +1014,7 @@ def sample_feature_vector(
     tukey_alpha: float = 0.3,
     dynamic_envelope_config: DynamicEnvelopeConfig | None = None,
     score_region: RegionSpec = RegionSpec(0.0, 5.0, "selection_full"),
+    point_id: str | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Preprocess one sample and concatenate EMD features from all branches."""
 
@@ -754,12 +1028,15 @@ def sample_feature_vector(
     branch_info: list[dict[str, Any]] = []
     dynamic_info: dict[str, Any] | None = None
     if dynamic_envelope_config is not None:
+        # The locator always comes from the raw selected frames, so the split
+        # does not depend on which frame form is being evaluated.
         branch_signals_list, dynamic_info = prepare_dynamic_envelope_branches(
             processed,
+            locator_frames=selected_channels,
             config=dynamic_envelope_config,
             target_length=target_length,
             tukey_alpha=tukey_alpha,
-            max_depth_mm=mapper.max_depth_mm,
+            point_id=point_id,
         )
         branch_specs: list[tuple[str, np.ndarray, int, int, float | None, float | None]] = []
         for branch_index, branch_signals in enumerate(branch_signals_list):
@@ -820,8 +1097,45 @@ def sample_feature_vector(
     return np.concatenate(branch_features).astype(np.float32), info
 
 
+# The source ADC stores raw codes, and both 127 and 128 mean "zero": they
+# normalize to +-0.5 / 127.5, i.e. the same physical level split across the two
+# sides of the 127.5 midpoint.  Keeping that +-0.0039 jitter injects spurious
+# quantization noise, which is enough to move the ``dyn_envelope`` threshold
+# crossing by tens of samples (measured: 267 instead of 324 on ``N35_P2_01``).
+# ``after_split_data/`` was produced from the collapsed traces, so the loader
+# reproduces the collapse to keep ``--data-dir raw_data`` bit-exact.
+ADC_DC_MAGNITUDE = 0.5 / 127.5
+ADC_DC_ATOL = 1e-6
+
+
+def replace_adc_dc_level(
+    frames: np.ndarray,
+    magnitude: float = ADC_DC_MAGNITUDE,
+    atol: float = ADC_DC_ATOL,
+) -> np.ndarray:
+    """Collapse the ADC ``127``/``128`` pair onto the shared zero level.
+
+    Samples equal to +-``magnitude`` (both codes mapping to the same physical
+    level) are snapped to ``0.0``; everything else is untouched.  Returns a new
+    ``float32`` array, so the stored ``X.npy`` is never mutated.
+    """
+
+    values = np.asarray(frames, dtype=np.float32)
+    collapsed = values.copy()
+    near_zero_code = np.isclose(collapsed, magnitude, atol=atol) | np.isclose(
+        collapsed, -magnitude, atol=atol
+    )
+    collapsed[near_zero_code] = 0.0
+    return collapsed
+
+
 def load_split(data_dir: Path | str, split: str) -> tuple[np.ndarray, np.ndarray, list[dict[str, Any]]]:
-    """Load X, y, and sample metadata for one split."""
+    """Load X, y, and sample metadata for one split.
+
+    The stored frames go through :func:`replace_adc_dc_level` before being
+    returned, so every consumer sees the same DC-centred traces the reference
+    implementation was built on.
+    """
 
     split_dir = Path(data_dir) / split
     x_path = split_dir / "X.npy"
@@ -829,7 +1143,7 @@ def load_split(data_dir: Path | str, split: str) -> tuple[np.ndarray, np.ndarray
     samples_path = split_dir / "samples.json"
     if not x_path.exists() or not y_path.exists():
         raise FileNotFoundError(f"Missing X.npy/y.npy under {split_dir}")
-    x = np.load(x_path).astype(np.float32)
+    x = replace_adc_dc_level(np.load(x_path).astype(np.float32))
     y = np.load(y_path).astype(np.int64)
     if x.ndim != 4 or x.shape[1:] != (50, 2, 896):
         raise ValueError(f"Expected {split} X shape [N,50,2,896], got {x.shape}")
@@ -856,14 +1170,23 @@ def build_feature_matrix(
     dynamic_envelope_config: DynamicEnvelopeConfig | None = None,
     score_region: RegionSpec = RegionSpec(0.0, 5.0, "selection_full"),
     limit: int | None = None,
+    sample_ids: Sequence[str] | None = None,
 ) -> tuple[np.ndarray, list[dict[str, Any]]]:
-    """Build the feature matrix for a split."""
+    """Build the feature matrix for a split.
+
+    ``sample_ids`` are optional point identifiers used only by the dynamic
+    envelope locator, which keeps a small hand-checked correction table keyed
+    by point id.
+    """
 
     if limit is not None:
         x = x[:limit]
+        if sample_ids is not None:
+            sample_ids = list(sample_ids)[:limit]
     vectors: list[np.ndarray] = []
     infos: list[dict[str, Any]] = []
     for index, sample in enumerate(x):
+        point_id = None if sample_ids is None else str(sample_ids[index])
         vector, info = sample_feature_vector(
             sample,
             form=form,
@@ -875,6 +1198,7 @@ def build_feature_matrix(
             dynamic_envelope_config=dynamic_envelope_config,
             emd_config=emd_config,
             score_region=score_region,
+            point_id=point_id,
         )
         vectors.append(vector)
         # Fixed-region runs retain the historical compact preview (first

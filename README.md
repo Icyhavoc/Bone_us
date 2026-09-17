@@ -39,6 +39,10 @@ raw_data
 
 Max 1 Frame 和 Top-3 Mean 默认在完整 0–5 mm 区间上选择帧，然后把相同的帧处理结果提供给各个深度 branch。选择范围可通过 `--selection-region-json` 修改。
 
+### 直流电平归零
+
+源 ADC 用 127 和 128 两个码值表示同一个零电平，归一化后分别是 $\pm 0.5/127.5 \approx \pm 0.003922$。`raw_data/` 保留了这一抖动，而 `after_split_data/` 来自抖动已抹平的信号；该抖动足以让 `dyn_envelope` 的过阈点偏移几十个采样点。`emd_pipeline.load_split()` 因此统一调用 `replace_adc_dc_level()` 把这对码值塌陷到 `0.0`，训练与四个可视化脚本共用同一入口；对已归零的 `after_split_data/` 该操作幂等。实验 `config.json` 用 `adc_dc_replacement` 记录该常数。
+
 ## 深度 branch
 
 标准区域组合为：
@@ -46,7 +50,7 @@ Max 1 Frame 和 Top-3 Mean 默认在完整 0–5 mm 区间上选择帧，然后�
 - `full`：`[[0, 5]]`
 - `bone`：`[[1, 3]]`
 - `bone_plus_post`：`[[1, 3], [3, 5]]`
-- `dyn_envelope`：对每个样本的处理后信号计算 Hilbert 包络，自动定位第一个显著波峰的起始点；第 1 个 branch 为该起点之后的 `a` 个采样点，第 2 个 branch 为其余信号。
+- `dyn_envelope`：逐通道定位起振波包。每个通道按 `max(abs(x))` 取幅值最大的 3 帧求平均得到定位信号，再按包络检测起振点；第 1 个 branch 为 `[max(t-20,70), +170)`，第 2 个 branch 为固定尾部 `[251, 896)`。
 
 branch 不要求覆盖完整 0–5 mm，也不要求互斥、连续或等长。可以使用任意嵌套或重叠区间，例如：
 
@@ -72,22 +76,28 @@ index = round(depth_mm / 5.0 * 896)
 
 ### 动态包络 branch
 
-`dyn_envelope` 不改变原始处理后信号，只使用包络结果确定 branch 边界。当前默认检测方法为：对每条处理后信号使用带反射填充的 Hilbert 包络，跨信号流取均值，再用长度 21 的移动平均平滑；以中位数和 MAD 估计基线与噪声尺度，选择第一个超过显著性阈值的局部峰，并将峰值超出基线部分的 50% 位置作为峰起始点。为避免把很小的早期扰动当作目标峰，阈值同时要求达到全局包络峰高相对基线的 20%。
+`dyn_envelope` 不改变原始信号，只用包络分析结果确定 branch 边界。它是 `reference_code/pipeline.py` 中 `segment()` 的完整移植，与 `after_split_data/` 的产物逐位一致。
 
-默认第一个 branch 的 `a=0.75 mm`，第二个 branch 为之后的全部采样点。程序会按照 `DepthMapper` 的映射将毫米换算为采样点；在当前 `896 点对应 5 mm` 的设置下，`0.75 mm` 对应约 `134` 个采样点。`a` 和检测参数都可以从命令行调整：
+定位信号与帧处理方式无关：每个通道按 `max(abs(x))` 选幅值最大的 `locator_top_k=3` 帧（并列取较早帧）求平均，再取 Hilbert 包络。检测流程为：包络前 71 点置零后用 `mode='nearest'` 的长度 5 移动平均平滑；在第 71 点起找首个 `> 0.015` 的参考点；在 `[参考点-50, 参考点+150)` 内取局部峰；以 `0.05 × 峰值` 为比例阈值提取连续段；从含该峰的主波包向前合并间隔 ≤ 8、宽度 ≥ 8、面积 ≥ 主波包 5%、累计提前 ≤ 96 的段；阈值点 `t` 取合并后最早越阈点；主窗为 `[max(t-20,70), +170)`，尾部为固定 `[251, 896)`。
+
+两个通道**各自独立**定位，因此主窗起点与尾部重叠长度可能不同；主窗不补零、不平移，尾部允许与主窗重叠或留间隔。切片后各分支重采样到 512 点并加 Tukey 窗，再进入 EMD。
+
+全部参数由 `DynamicEnvelopeConfig` 提供默认值，`--dyn-*` 选项由 `dyn_cli.py` 统一定义：
 
 ```powershell
 python run_emd_experiments.py `
   --forms top3_mean `
   --region-set dyn_envelope `
-  --channel-mode 1 `
-  --dyn-a 0.75 `
-  --dyn-smooth-window 21 `
-  --dyn-prominence-sigma 2.0 `
-  --dyn-min-peak-width 12
+  --channel-mode 3 `
+  --dyn-smooth-window 5 `
+  --dyn-weak-threshold 0.015 `
+  --dyn-main-length 170 `
+  --dyn-tail-start 251
 ```
 
-每个样本实际检测到的峰起点、峰位置、阈值以及两个 branch 的采样点边界会写入该实验的 `feature_info.json`；参数会写入 `config.json`。因此动态 branch 不会把一个样本的峰位置套用到其他样本。
+每个样本逐通道的阈值点、局部峰、参考点、回退规则和两个 branch 的采样点边界会写入该实验的 `feature_info.json`；参数会写入 `config.json`。
+
+用 `python verify_dyn_envelope.py` 可对 268 个点位 × 2 通道重新校验边界与分支内容是否与参考实现完全一致。
 
 ## 通道选择
 

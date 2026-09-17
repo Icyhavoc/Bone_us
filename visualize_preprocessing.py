@@ -34,6 +34,7 @@ from emd_pipeline import (
     process_frames,
     select_channels,
 )
+from dyn_cli import add_dyn_arguments, dyn_config_from_args
 from run_emd_experiments import DYNAMIC_REGION_NAME, REGION_CHOICES, REGION_PRESETS
 
 
@@ -244,9 +245,9 @@ def _make_sheet(
             branch_title = f"Branch {column + 1}: {regions[column].label}"
         else:
             branch_title = (
-                "Branch 1: first envelope-peak window (a samples)"
+                "Branch 1: merged leading packet window (170 samples)"
                 if column == 0
-                else "Branch 2: remaining signal"
+                else "Branch 2: fixed tail [251, 896)"
             )
         draw.text(
             (x0 + 8, 58),
@@ -298,11 +299,12 @@ def _make_sheet(
         else:
             dynamic_branches, dynamic_info = prepare_dynamic_envelope_branches(
                 processed,
+                locator_frames=selected,
                 config=dynamic_envelope_config,
                 target_length=target_length,
                 tukey_alpha=tukey_alpha,
-                max_depth_mm=mapper.max_depth_mm,
                 apply_tukey=False,
+                point_id=str(sample_id),
             )
             branch_items = []
             for branch_flat, branch_info in zip(
@@ -351,14 +353,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--target-length", type=int, default=512)
     parser.add_argument("--tukey-alpha", type=float, default=0.3)
-    parser.add_argument(
-        "--dyn-a", "--dyn-a-mm", "--dyn-branch-length-mm",
-        dest="dyn_a_mm", type=float,
-        default=DynamicEnvelopeConfig().branch_length_mm,
-    )
-    parser.add_argument("--dyn-smooth-window", type=int, default=21)
-    parser.add_argument("--dyn-prominence-sigma", type=float, default=2.0)
-    parser.add_argument("--dyn-min-peak-width", type=int, default=12)
+    add_dyn_arguments(parser)
     parser.add_argument("--max-depth-mm", type=float, default=5.0)
     parser.add_argument("--signal-length", type=int, default=896)
     parser.add_argument("--rounding", choices=["round", "floor", "ceil"], default="round")
@@ -381,12 +376,7 @@ def main() -> None:
         args.seed,
     )
     mapper = DepthMapper(args.max_depth_mm, args.signal_length, args.rounding)
-    dynamic_envelope_config = DynamicEnvelopeConfig(
-        branch_length_mm=args.dyn_a_mm,
-        smooth_window=args.dyn_smooth_window,
-        prominence_sigma=args.dyn_prominence_sigma,
-        min_peak_width=args.dyn_min_peak_width,
-    )
+    dynamic_envelope_config = dyn_config_from_args(args)
     output_dir = args.output_dir.resolve()
     selection_manifest: dict[str, Any] = {
         "data_dir": args.data_dir.resolve(),

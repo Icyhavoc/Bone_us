@@ -4,12 +4,21 @@ __pycache__/
 
 # Raw/private data; keep the expected directory structure locally
 raw_data/
+after_split_data/
+reference_code/
 
-# Reproducible generated experiment and visualization outputs
-experiments/
+# Reproducible generated experiment and visualization outputs.
+# Use ``experiments/*`` rather than ``experiments/``: the directory itself stays
+# visible to git so the ``!`` rule below can keep its notes tracked.
+experiments/*
+!experiments/*.md
 visualizations/
 
-# Local backup and smoke-test artifacts
+# Local archives and scratch run directories.
+# ``_*/`` catches the throwaway ``--output-dir`` names (``_smoke_all``,
+# ``_verify_fullrun``, ...); it only matches directories, so ``_recon.ps1``
+# stays tracked.
 backup/
 smoke_test/
 smoke_all/
+_*/
