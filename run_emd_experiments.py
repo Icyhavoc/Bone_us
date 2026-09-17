@@ -91,6 +91,16 @@ def _parse_args() -> argparse.Namespace:
         default="pooled",
         help="pooled averages EMD components/streams within each branch, then concatenates branches",
     )
+    parser.add_argument(
+        "--channel-aggregation",
+        choices=["per_channel", "pooled"],
+        default="per_channel",
+        help=(
+            "per_channel keeps one feature group per selected channel and gives each "
+            "group its own MLP tower; pooled averages the channels into a single group "
+            "(the historical channel-3 behaviour)"
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--patience", type=int, default=40)
     parser.add_argument("--hidden-dims", default="64,32")
@@ -119,8 +129,39 @@ def _region_experiments(args: argparse.Namespace) -> list[tuple[str, list[Region
     ]
 
 
-def _experiment_name(form: str, region_name: str, channel_mode: int) -> str:
-    return f"form_{form}__regions_{region_name}__channels_{channel_mode}"
+def _experiment_name(
+    form: str, region_name: str, channel_mode: int, channel_aggregation: str = "per_channel"
+) -> str:
+    """Directory name for one experiment.
+
+    The default ``per_channel`` aggregation keeps the historical name so that
+    existing directories still line up.  ``pooled`` (the legacy channel-3
+    behaviour, now used as an ablation baseline) gets a suffix, otherwise it
+    would silently overwrite the ``per_channel`` run in the same directory.
+    """
+    name = f"form_{form}__regions_{region_name}__channels_{channel_mode}"
+    if channel_aggregation != "per_channel":
+        name = f"{name}__{channel_aggregation}"
+    return name
+
+
+def _feature_group_dims(info: object) -> tuple[int, ...]:
+    """Read the per-group feature widths recorded by the extractor.
+
+    The widths tell the classifier where one channel's features end and the
+    next one's begin.  A single entry means the channels were pooled and the
+    network stays a plain MLP.
+    """
+
+    if not isinstance(info, list) or not info:
+        raise ValueError("feature info is empty; cannot determine the feature groups")
+    first = info[0]
+    if not isinstance(first, dict):
+        raise ValueError("feature info entries must be mappings")
+    dims = first.get("feature_group_dims")
+    if not dims:
+        raise ValueError("feature info is missing 'feature_group_dims'")
+    return tuple(int(width) for width in dims)
 
 
 def _best_history_record(
@@ -168,6 +209,7 @@ def run_one(
         max_sift_iterations=args.max_sift_iterations,
         sift_sd_threshold=args.sift_sd_threshold,
         stream_aggregation=args.stream_aggregation,
+        channel_aggregation=args.channel_aggregation,
     )
     dynamic_envelope_config = (
         dyn_config_from_args(args) if region_name == DYNAMIC_REGION_NAME else None
@@ -233,7 +275,12 @@ def run_one(
     scaler = StandardScaler().fit(train_features)
     scaled = {split: scaler.transform(features) for split, features in feature_data.items()}
     scaler.save(output_dir / "standard_scaler.npz")
-    model = NumpyMLPClassifier(input_dim=train_features.shape[1], config=mlp_config)
+    feature_group_dims = _feature_group_dims(feature_info["train"])
+    model = NumpyMLPClassifier(
+        input_dim=train_features.shape[1],
+        config=mlp_config,
+        group_dims=feature_group_dims,
+    )
     history = model.fit(
         scaled["train"],
         split_data["train"][1],
@@ -248,6 +295,8 @@ def run_one(
 
     metrics: dict[str, object] = {
         "feature_dim": int(train_features.shape[1]),
+        "feature_group_dims": [int(width) for width in feature_group_dims],
+        "model_layout": model.parameter_layout(),
         "best_epoch": None if best_record is None else best_record.get("epoch"),
         "trained_epochs": 0 if not history else history[-1].get("epoch"),
         "best_val_auc": None if best_record is None else best_record.get("val_auc"),
@@ -292,7 +341,9 @@ def main() -> None:
     }
     for form in forms:
         for region_name, regions in region_experiments:
-            experiment_name = _experiment_name(form, region_name, args.channel_mode)
+            experiment_name = _experiment_name(
+                form, region_name, args.channel_mode, args.channel_aggregation
+            )
             experiment_dir = output_dir / experiment_name
             result = run_one(
                 data_dir=data_dir,

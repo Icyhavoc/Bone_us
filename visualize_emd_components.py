@@ -23,6 +23,7 @@ from emd_pipeline import (
     EMDConfig,
     RegionSpec,
     canonical_form,
+    channel_physical_indices,
     emd_decompose,
     json_ready,
     parse_regions,
@@ -264,6 +265,7 @@ def main() -> None:
             for label, indices in selected.items():
                 index = int(indices[0])
                 selected_channels = select_channels(x[index], args.channel_mode)
+                physical_channels = channel_physical_indices(args.channel_mode)
                 processed, selected_frames = process_frames(
                     selected_channels,
                     form,
@@ -280,6 +282,7 @@ def main() -> None:
                         target_length=args.target_length,
                         tukey_alpha=args.tukey_alpha,
                         point_id=str(records[index].get("sample_id", "")),
+                        physical_channels=physical_channels,
                     )
                     branch_items = zip(dynamic_branches, dynamic_info["branches"])
                     for branch_flat, branch_info in branch_items:

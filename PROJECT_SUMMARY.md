@@ -70,9 +70,114 @@ index = round(depth_mm / 5.0 * 896)
 
 - `1`：只使用物理通道 1；
 - `2`：只使用物理通道 2；
-- `3`：同时保留通道 1 和 2，两个通道分别处理，不做数值相加。
+- `3`：同时保留通道 1 和 2。
 
-通道维度和深度 branch 是相互独立的概念。
+通道维度和深度 branch 是两个**相互独立**的维度，物理通道不会被误当成深度 branch。
+
+### 4.1 通道 3 的处理流程（`per_channel`，默认）
+
+两个通道**各自独立**切片、重采样、做 EMD，各得一组特征；两组特征**拼接**后进入
+MLP 分类头，并且**每组特征各有一座独立的塔**，塔的输出再拼接起来交给共享头。
+分组方式由 `EMDConfig.channel_aggregation` 控制，CLI 对应 `--channel-aggregation`：
+
+| 取值 | 含义 |
+|---|---|
+| `per_channel`（默认） | 每个选中通道形成一组特征，组间拼接，每组一座 MLP 塔 |
+| `pooled` | 通道轴与分量轴一起平均成一组，复现历史行为（见 §4.3） |
+
+以某个 branch 为例：
+
+```text
+channel_mode=1 / 2                     channel_mode=3
+──────────────────                     ──────────────
+[50,1,896] 选中 1 个物理通道           [50,2,896] 选中通道 1+2
+     ↓ 帧处理                               ↓ 帧处理
+[1,1,896]                              [1,2,896]
+     ↓ 切片 + 重采样 + Tukey                ↓ 切片 + 重采样 + Tukey
+[1,512]  1 条流                        [2,512]  2 条流
+     ↓ EMD 跑 1 次                          ↓ EMD 跑 2 次（每通道各 1 次）
+ 8 维特征（1 组）                        8 + 8 = 16 维特征（2 组）
+     ↓                                    ↓
+ 1 座塔 8→64                            2 座塔 8→64 → 拼接成 128
+     ↓                                    ↓
+ 共享头 64→32→2                          共享头 128→32→2
+     ↓                                    ↓
+ 2 类输出                                2 类输出
+```
+
+关键点：
+
+1. **两个通道各自独立做预处理和 EMD**，不共享也不串扰；
+2. 合并发生在**分类头之前**，是**拼接**而不是平均：
+   通道 3 的每个 branch 宽 **16 维**（`8 × 2`），通道 1 / 2 仍是 8 维；
+3. 特征按 **group-major** 排列，即 `[组0 的所有 branch | 组1 的所有 branch]`，
+   这样分类头可以按 `feature_info.json` 里的 `feature_group_dims` 直接切片，
+   把每组特征喂给对应的塔。
+4. 单通道时只有一组，`per_channel` 与 `pooled` **完全等价**，
+   已做逐位回归验证（见 §14）。
+
+### 4.2 `per_channel` 与「信号相加」的区别
+
+通道 3 的两组特征来自**两次独立 EMD**，不是把两个通道加起来的 EMD。
+EMD 是**非线性**分解，"先相加再分解"与"先分别分解"结果完全不同：
+
+| 做法 | 与通道 3 实际结果的关系 |
+|---|---|
+| 两个通道分别分解、各自成组 | ✅ 就是现在的做法 |
+| 信号级相加后再分解 $f(x_1+x_2)$ | ❌ 与分别分解的结果差异达 $10^{-2}$ 量级 |
+
+### 4.3 历史行为：`--channel-aggregation pooled`
+
+历史版本的通道 3 会把通道轴和分量轴**一起求平均**，得到单组 8 维特征：
+
+```text
+[2,6,8]  2 通道 × 6 分量
+     ↓ np.mean(component_matrix, axis=(0, 1))
+  8 维特征  ← 维度不翻倍，两个通道的个性被平均掉
+```
+
+实测同一帧、同一 branch、同一选帧下，该平均关系满足（误差 `7.5e-9`，float32 精度下限）：
+
+$$f_{\text{ch3}}^{\text{pooled}} = \tfrac{1}{2}\left(f_{\text{ch1}} + f_{\text{ch2}}\right)$$
+
+| 做法 | 与 `pooled` 通道 3 实际结果的偏差 |
+|---|---:|
+| 特征级平均 $\tfrac{1}{2}(f_1+f_2)$ | $7.5\times10^{-9}$ ✅ 就是它 |
+| 信号级相加后再分解 $f(x_1+x_2)$ | $1.7\times10^{-2}$ ❌ 差 6 个数量级 |
+
+> 现默认已改为 `per_channel`，`pooled` 仅用于复现历史结果与消融对照。
+
+### 4.4 选帧会随通道模式变化（重要）
+
+`max1` / `top3_mean` 靠 RMS 排名选帧，而 `_rms_scores()` 对**通道轴和采样轴一起**求均方根：
+
+```python
+np.sqrt(np.mean(np.square(segment, dtype=np.float64), axis=(1, 2)))
+```
+
+因此同一帧在不同通道集下得分不同，排名可能不同。实测同一样本：
+
+| `--channel-mode` | `selected_frames` |
+|---|---|
+| 1 | `[13 11 12]` |
+| 2 | `[28 27 26]` |
+| 3 | `[26 27 24]` |
+
+结果是：**通道 1 单独运行时所选的那一帧，与通道 3 里第一个通道所用的帧并不是同一帧**。
+所以 §4.3 的"严格平均"只在**帧选择相同时**成立：
+
+| form | 是否选帧 | $\max\left|f_{\text{ch3}}^{\text{pooled}} - \tfrac{1}{2}(f_{\text{ch1}}+f_{\text{ch2}})\right|$ |
+|---|---|---|
+| `mean_std` | 否 | $1.5\times10^{-8}$ → 严格平均 |
+| `raw50` | 否 | $7.5\times10^{-8}$ → 严格平均 |
+| `max1` | 是 | $1.2\times10^{-2}$ → 偏离 |
+| `top3_mean` | 是 | $6.6\times10^{-3}$ → 偏离 |
+
+即：不选帧的 `mean_std` / `raw50` 严格满足平均关系；`max1` / `top3_mean` 因选帧差异而偏离。
+
+> 因此横向比较 `channels_1` 与 `channels_3` 的实验时，差异既包含"多了通道 2"的贡献，
+> 也包含"选帧变了"的贡献，两者无法从结果中分离。需要干净的消融对照时，
+> 应固定 `--selection-region-json`，或改用不使用选帧的 `mean_std` / `raw50`。
 
 ## 5. 区域组合
 
@@ -197,22 +302,30 @@ EMD 使用当前 `emd_pipeline.py` 中的 NumPy 实现，默认最多提取 5 �
 默认 `stream_aggregation=pooled`：
 
 - 同一 branch 内，对 EMD 分量和信号流做均值池化；
-- 每个 branch 得到 8 维特征；
+- 每个 branch 的每组特征得到 8 维；
 - 多个 branch 之间不求均值，直接拼接。
 
-因此：
+通道方向由 `channel_aggregation` 决定：
 
-```text
-full / bone：8 维
-bone_plus_post：16 维
-dyn_envelope：16 维
-```
+- `per_channel`（默认）：每个通道各一组，组间拼接；
+- `pooled`：通道轴并入流轴一起池化，只剩一组。
+
+因此每个 branch 的宽度是 `8 × 通道组数 × branch 数`：
+
+| 区域组合 | `--channel-mode 1` / `2` | `--channel-mode 3`（`per_channel`） | `--channel-mode 3`（`pooled`） |
+|---|---:|---:|---:|
+| `full` / `bone` | 8 | 16 | 8 |
+| `bone_plus_post` | 16 | 32 | 16 |
+| `dyn_envelope` | 16 | 32 | 16 |
 
 `flatten` 和 `stats` 模式仍保留用于对照实验。
 
 ## 9. MLP 分类头
 
-当前模型为 NumPy 实现的轻量 MLP，不使用 CNN：
+当前模型为 NumPy 实现的轻量 MLP，不使用 CNN。
+
+**单组特征**（`--channel-mode 1` / `2`，或 `--channel-mode 3 --channel-aggregation pooled`）
+时，网络就是历史结构：
 
 ```text
 Linear(input_dim, 64)
@@ -221,6 +334,27 @@ Linear(input_dim, 64)
   -> ReLU + Dropout(0.1)
   -> Linear(32, 2)
 ```
+
+**多组特征**（`--channel-mode 3`，默认 `per_channel`）时，改为「每组建一座塔 + 共享头」：
+
+```text
+组0 (8 维) -> Linear(8, 64)  -> ReLU + Dropout(0.1) -┐
+组1 (8 维) -> Linear(8, 64)  -> ReLU + Dropout(0.1) -┤ concat -> 128 维
+                                                     ↓
+                                        Linear(128, 32) -> ReLU + Dropout(0.1)
+                                                     ↓
+                                                  Linear(32, 2)
+```
+
+说明：
+
+- 塔的宽度取 `hidden_dims[0]`，共享头取 `hidden_dims[1:]` 再接 2 类输出；
+- 因此 `--channel-mode 3` 的双通道不再在 MLP 之前被平均掉，两个通道的特征
+  在分类头里**各自经过一层非线性**后才融合；
+- 只有一组时塔会塌缩成第一层全连接，网络与历史结构**完全等价**
+  （已用逐位回归验证，见 §14）；
+- `mlp_model.npz` 会额外记录 `group_dims` 与 `tower_count`，`feature_info.json`
+  会记录 `feature_groups` 与 `feature_group_dims`。
 
 当前使用两个输出节点的 softmax 交叉熵。对于二分类，它与单输出 sigmoid BCE 在数学上等价。
 
@@ -276,7 +410,8 @@ python gui_app.py
 
 ```text
 experiments/
-  form_<form>__regions_<region>__channels_<channel>/
+  form_<form>__regions_<region>__channels_<channel>/          # per_channel（默认）
+  form_<form>__regions_<region>__channels_<channel>__pooled/  # 历史通道平均行为
     config.json
     features_train.npy
     features_val.npy
@@ -294,6 +429,10 @@ experiments/
     probabilities_test.npy
   summary.json
 ```
+
+> `--channel-aggregation pooled` 会写入带 `__pooled` 后缀的目录，因为它是消融对照，
+> 不能覆盖默认的 `per_channel` 结果。单个通道（`--channel-mode 1` / `2`）两种设置等价，
+> 但目录名仍按传入值区分，便于对照。
 
 可视化默认输出到：
 
@@ -314,6 +453,10 @@ python run_emd_experiments.py `
   --region-set all `
   --channel-mode 3
 ```
+
+> `--channel-mode 3` 默认使用 `--channel-aggregation per_channel`，
+> 即两个通道各成一组特征并各有一座 MLP 塔。需要复现历史（通道平均）结果时加
+> `--channel-aggregation pooled`。
 
 运行单组动态包络实验：
 
@@ -363,23 +506,44 @@ python run_emd_experiments.py `
 - 预处理可视化不加 Tukey 窗的验证；
 - EMD 分量可视化验证；
 - GUI 导入和训练命令构建验证；
-- 混淆矩阵和训练曲线可视化验证。
+- 混淆矩阵和训练曲线可视化验证；
+- 双塔 MLP 的数值梯度检验（`verify_mlp_gradients.py`）：6 种拓扑（1 / 2 / 3 塔，
+  `hidden_dims` 为 `(64,32)`、`(32,16)`、`(16,12,6)`、`(64,)`、`(128,64)`）的
+  方向导数相对误差中位数 ≤ $2.2\times10^{-3}$、最差单方向 $1.8\times10^{-2}$
+  （逐方向取中位数是为了排除踩到 ReLU 折点的方向，这是损失面性质而非实现错误）；
+  逐参数中心差分 6 种拓扑中 5 种 100% 通过，1 种 57/58 通过（差值为 float32 舍入地板）；
+- 单通道逐位回归（`verify_channel_aggregation.py`）：`--channel-mode 1` / `2` 下
+  `--channel-aggregation per_channel` 与 `pooled` 的特征、标签、概率和全部指标
+  **逐位相同**；
+- 通道 3 双塔端到端验证（同一脚本）：`per_channel` 得到 `feature_group_dims=[8, 8]`、
+  `tower_count=2`、共享头首层 `fan_in=128`；`pooled` 得到 `[8]`、`tower_count=1`、
+  `fan_in=64`，即历史结构；两者精度不同（例：test AUC 0.7333 vs 0.7176，32 样本冒烟运行）。
 
-## 15. Git 发布建议
-
-当前工作目录本身未检测到 `.git` 仓库，因此本文档是 Git 发布用的项目说明，不代表已经完成 Git commit。
-
-发布前建议：
-
-1. 将 `经验小波分解/` 作为代码目录纳入仓库。
-2. 根据数据共享要求决定是否提交 `raw_data/`；原始数据通常不建议直接公开。
-3. 根据结果文件大小决定是否提交 `experiments/` 和 `visualizations/`；它们属于可再生成产物。
-4. 不提交 `__pycache__/` 和临时 smoke test 输出。
-5. 在真正的 Git 根目录执行：
+三个自检脚本都不依赖 `experiments/` 里的历史产物，可用当前代码直接重跑：
 
 ```powershell
-git add 经验小波分解/README.md 经验小波分解/PROJECT_SUMMARY.md 经验小波分解/*.py
-git commit -m "Implement EMD preprocessing experiments and GUI"
+python verify_dyn_envelope.py        # 动态包络切分与参考实现逐位一致
+python verify_mlp_gradients.py       # 双塔 MLP 解析梯度
+python verify_channel_aggregation.py # 通道聚合语义与网络拓扑
 ```
 
-如果需要发布可复现实验结果，可以额外选择性提交对应实验目录的 `config.json`、`metrics.json`、`history.json` 和 `summary.json`。
+## 15. Git 发布说明
+
+本目录已经是 Git 仓库根的子目录：远端为 `https://github.com/Icyhavoc/bone_us.git`，
+当前分支 `custom-dyn_envelop` 跟踪 `origin/custom-dyn_envelop`。
+`.gitignore` 已排除 `raw_data/`、`after_split_data/`、`reference_code/`、
+`experiments/*`（仅保留 `experiments/*.md`）、`visualizations/`、`backup/`、
+`__pycache__/` 和 `_*/` 临时输出目录。
+
+因此提交时只需：
+
+```powershell
+git add -A
+git commit -m "..."
+```
+
+`_*/` 规则只匹配目录，所以 `_recon.ps1` 仍在版本控制中；新增的
+`verify_*.py` 是脚本文件而不是目录，会正常被跟踪。
+
+如需发布可复现实验结果，可以额外选择性提交对应实验目录的 `config.json`、
+`metrics.json`、`history.json` 和 `summary.json`（需临时放开 `experiments/*` 的忽略规则）。

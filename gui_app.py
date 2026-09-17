@@ -148,7 +148,8 @@ class ExperimentCatalog:
         if part == "region":
             match = re.search(r"__regions_(.*?)__channels_", name)
             return match.group(1) if match else ""
-        match = re.search(r"__channels_(\d+)$", name)
+        # The name may carry a trailing aggregation suffix (``__pooled``).
+        match = re.search(r"__channels_(\d+)", name)
         return match.group(1) if match else ""
 
     def filtered_rows(self, form: str, region: str, channel: str) -> list[dict[str, Any]]:

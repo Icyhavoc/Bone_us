@@ -4,10 +4,30 @@
 
 > **当前状态**：本文件中提到的全部旧实验已归档到
 > `backup/5_experiments_2026-09-17/`（27 个实验目录 + 1 个 `summary.json`）。
-> `experiments/` 目录现在只保留本说明，等待用当前代码重新生成结果。
 > 归档保留的原因是下面列出的两类问题，**旧指标不要再引用**。
 
-## 结论速览
+## 现有目录（全部由当前代码重新生成）
+
+| 目录 | 说明 |
+|---|---|
+| `form_top3_mean__regions_dyn_envelope__channels_1` | 移植后算法 + ADC 直流归零 |
+| `form_top3_mean__regions_dyn_envelope__channels_2` | 移植后算法 + ADC 直流归零 |
+| `form_raw50__regions_dyn_envelope__channels_1` | 移植后算法 + ADC 直流归零 |
+| `form_max1__regions_full__channels_1` | 移植后算法 + ADC 直流归零 |
+
+> ⚠️ **不含任何 `channels_3` 结果。** 通道 3 的语义在双塔 MLP 改写后已变化：
+> 默认 `--channel-aggregation per_channel` 让两个通道各成一组特征、各有一座 MLP 塔，
+> 特征宽度从 8 变成 16，网络拓扑也随之改变。改写前生成的通道 3 指标对应的是
+> `pooled`（通道平均）行为，不能与当前默认结果混用。需要通道 3 基线时请重跑：
+
+```powershell
+D:\Miniconda3\python.exe run_emd_experiments.py --forms all --region-set all --channel-mode 3
+```
+
+> 目录命名：默认 `per_channel` 沿用 `form_<form>__regions_<region>__channels_<channel>`；
+> `--channel-aggregation pooled` 会写成同名 + `__pooled` 后缀，两者不会互相覆盖。
+
+## 结论速览（已归档的旧产物）
 
 | 实验目录（均已归档） | 数据源 | 状态 |
 |---|---|---|
@@ -18,6 +38,8 @@
 | `form_top3_mean__regions_bone_plus_post__channels_1` | `raw_data` | ⚠️ 2026-08-12 生成，**早于 ADC 直流归零** |
 | `form_top3_mean__regions_bone__channels_1` | `raw_data` | ⚠️ 无 `metrics.json`，是一次未完成的运行 |
 | `**/regions_after_split_pair__*`、`**/regions_main__*`、`**/regions_tail__*` | `after_split_data` | ❌ **不可复现的历史产物**（见下） |
+| 全部 `*__channels_3` | `raw_data` | ❌ 改写前生成，对应 `pooled` 行为，当前默认已改为 `per_channel` |
+
 
 ## 为什么 `raw_data` 的实验会变
 

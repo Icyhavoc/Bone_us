@@ -26,6 +26,7 @@ from emd_pipeline import (
     DynamicEnvelopeConfig,
     RegionSpec,
     canonical_form,
+    channel_physical_indices,
     json_ready,
     load_split,
     parse_regions,
@@ -274,6 +275,7 @@ def _make_sheet(
             font=_font(12),
         )
         selected = select_channels(x[sample_index], channel_mode)
+        physical_channels = channel_physical_indices(channel_mode)
         processed, _ = process_frames(
             selected,
             form,
@@ -305,6 +307,7 @@ def _make_sheet(
                 tukey_alpha=tukey_alpha,
                 apply_tukey=False,
                 point_id=str(sample_id),
+                physical_channels=physical_channels,
             )
             branch_items = []
             for branch_flat, branch_info in zip(

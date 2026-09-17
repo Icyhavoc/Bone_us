@@ -25,6 +25,7 @@ import numpy as np
 from emd_pipeline import (
     _hilbert_envelope,
     _moving_average_nearest,
+    channel_physical_indices,
     prepare_dynamic_envelope_branches,
     locate_dynamic_span,
     locator_mean_signal,
@@ -85,7 +86,12 @@ def check_boundaries(
         smoothed[:, config.noise_start :] = _moving_average_nearest(
             envelope[:, config.noise_start :], config.smooth_window
         )
-        span = locate_dynamic_span(smoothed, config=config, point_id=point)
+        span = locate_dynamic_span(
+            smoothed,
+            config=config,
+            point_id=point,
+            physical_channels=channel_physical_indices(3),
+        )
         want_main = reference[point]["main_index"][:, 0]
         want_tail = reference[point]["tail_index"]
         for channel in range(2):
@@ -120,30 +126,31 @@ def check_branch_content(
             target_length=TARGET_LENGTH,
             apply_tukey=False,
             point_id=point,
+            physical_channels=channel_physical_indices(3),
         )
         main_block, tail_block = branches
         stream_count, channel_count = channels.shape[0], channels.shape[1]
-        expected_rows = stream_count * channel_count
-        if main_block.shape != (expected_rows, TARGET_LENGTH):
+        expected_shape = (stream_count, channel_count, TARGET_LENGTH)
+        if main_block.shape != expected_shape:
             problems.append(f"{point}: unexpected main branch shape {main_block.shape}")
             continue
-        if tail_block.shape != (expected_rows, TARGET_LENGTH):
+        if tail_block.shape != expected_shape:
             problems.append(f"{point}: unexpected tail branch shape {tail_block.shape}")
             continue
         starts = info["main_start_index_by_channel"]
         for channel in range(channel_count):
             start = int(starts[channel])
-            # Branch rows are ordered stream-major, so every row of one channel
-            # is ``channel::channel_count``.
+            # The channel axis is preserved, so one channel occupies
+            # ``block[:, channel, :]`` rather than a strided row subset.
             expected_main = resample_signals(
                 frames[:, channel, start : start + config.main_length], TARGET_LENGTH
             )
             expected_tail = resample_signals(
                 frames[:, channel, config.tail_start :], TARGET_LENGTH
             )
-            if not np.array_equal(main_block[channel::channel_count], expected_main):
+            if not np.array_equal(main_block[:, channel, :], expected_main):
                 problems.append(f"{point} ch{channel}: main branch is not a pure slice")
-            if not np.array_equal(tail_block[channel::channel_count], expected_tail):
+            if not np.array_equal(tail_block[:, channel, :], expected_tail):
                 problems.append(f"{point} ch{channel}: tail branch is not a pure slice")
             if not np.array_equal(
                 reference[point]["main_signal"][:, channel, :],

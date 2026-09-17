@@ -209,6 +209,13 @@ class EMDConfig:
     # at len(feature_names) dimensions. Branches remain independent and are
     # concatenated by sample_feature_vector.
     stream_aggregation: str = "pooled"
+    # ``per_channel`` extracts one feature group per selected channel and
+    # concatenates the groups, so ``--channel-mode 3`` no longer averages its
+    # two channels together.  ``pooled`` reproduces the historical behaviour,
+    # where the channel axis was folded into the stream axis before pooling.
+    # With a single channel the two settings are identical, so modes 1 and 2
+    # produce the same features under either value.
+    channel_aggregation: str = "per_channel"
     feature_names: tuple[str, ...] = (
         "mean",
         "std",
@@ -229,6 +236,8 @@ class EMDConfig:
             raise ValueError("sift_sd_threshold must be positive")
         if self.stream_aggregation not in {"pooled", "flatten", "stats"}:
             raise ValueError("stream_aggregation must be 'pooled', 'flatten', or 'stats'")
+        if self.channel_aggregation not in {"pooled", "per_channel"}:
+            raise ValueError("channel_aggregation must be 'pooled' or 'per_channel'")
 
 
 @dataclass(frozen=True)
@@ -284,6 +293,30 @@ def parse_regions(value: str | Sequence[Sequence[float]]) -> list[RegionSpec]:
     return regions
 
 
+# ``channel_mode -> (start, stop)`` half-open slice over the *physical* channel
+# axis.  A single table feeds both :func:`select_channels` and
+# :func:`channel_physical_indices` so a selected column and the physical channel
+# it came from can never drift apart.  This matters because the dynamic-envelope
+# locator runs on the already-selected block while ``MANUAL_CORRECTIONS`` is
+# keyed by physical channel: the two index spaces coincide for mode 3 but not
+# for modes 1 and 2.
+CHANNEL_MODE_SLICES: dict[int, tuple[int, int]] = {1: (0, 1), 2: (1, 2), 3: (0, 2)}
+
+
+def channel_physical_indices(channel_mode: int) -> tuple[int, ...]:
+    """Physical channel indices (0-based) that ``channel_mode`` selects.
+
+    Column ``i`` of the block returned by :func:`select_channels` is physical
+    channel ``channel_physical_indices(channel_mode)[i]``.
+    """
+
+    try:
+        start, stop = CHANNEL_MODE_SLICES[channel_mode]
+    except KeyError:
+        raise ValueError("channel_mode must be 1, 2, or 3") from None
+    return tuple(range(start, stop))
+
+
 def select_channels(frames: np.ndarray, channel_mode: int) -> np.ndarray:
     """Select physical channels from ``[frames, channels, samples]`` data."""
 
@@ -291,13 +324,11 @@ def select_channels(frames: np.ndarray, channel_mode: int) -> np.ndarray:
         raise ValueError(f"Expected [frames, channels, samples], got {frames.shape}")
     if frames.shape[1] < 2:
         raise ValueError("The current dataset must contain physical channels 1 and 2")
-    if channel_mode == 1:
-        return frames[:, 0:1, :]
-    if channel_mode == 2:
-        return frames[:, 1:2, :]
-    if channel_mode == 3:
-        return frames[:, 0:2, :]
-    raise ValueError("channel_mode must be 1, 2, or 3")
+    try:
+        start, stop = CHANNEL_MODE_SLICES[channel_mode]
+    except KeyError:
+        raise ValueError("channel_mode must be 1, 2, or 3") from None
+    return frames[:, start:stop, :]
 
 
 def _rms_scores(frames: np.ndarray, start: int, end: int) -> np.ndarray:
@@ -387,6 +418,35 @@ def tukey_window(length: int, alpha: float = 0.3) -> np.ndarray:
     return window.astype(np.float32)
 
 
+def prepare_branch_block(
+    processed: np.ndarray,
+    region: RegionSpec,
+    mapper: DepthMapper,
+    target_length: int = 512,
+    tukey_alpha: float = 0.3,
+    apply_tukey: bool = True,
+) -> np.ndarray:
+    """Cut/resample one depth region, keeping the channel axis.
+
+    Returns ``[streams, channels, target_length]``.  The channel axis survives
+    because ``EMDConfig.channel_aggregation="per_channel"`` decomposes every
+    channel on its own and hands each channel's features to a separate
+    classifier tower.
+    """
+
+    if processed.ndim != 3:
+        raise ValueError(f"Expected [streams, channels, samples], got {processed.shape}")
+    start, end = mapper.slice_bounds(region)
+    return prepare_interval_block(
+        processed,
+        start,
+        end,
+        target_length=target_length,
+        tukey_alpha=tukey_alpha,
+        apply_tukey=apply_tukey,
+    )
+
+
 def prepare_branch_signals(
     processed: np.ndarray,
     region: RegionSpec,
@@ -395,19 +455,53 @@ def prepare_branch_signals(
     tukey_alpha: float = 0.3,
     apply_tukey: bool = True,
 ) -> np.ndarray:
-    """Cut/resample one branch and optionally apply its Tukey window."""
+    """Cut/resample one branch and flatten the channel axis.
 
-    if processed.ndim != 3:
-        raise ValueError(f"Expected [streams, channels, samples], got {processed.shape}")
-    start, end = mapper.slice_bounds(region)
-    return prepare_interval_signals(
+    Kept for the visualisation helpers, which draw one row per
+    ``(stream, channel)`` pair.
+    """
+
+    block = prepare_branch_block(
         processed,
-        start,
-        end,
+        region,
+        mapper,
         target_length=target_length,
         tukey_alpha=tukey_alpha,
         apply_tukey=apply_tukey,
     )
+    return block.reshape(-1, block.shape[-1])
+
+
+def prepare_interval_block(
+    processed: np.ndarray,
+    start: int,
+    end: int,
+    target_length: int = 512,
+    tukey_alpha: float = 0.3,
+    apply_tukey: bool = True,
+) -> np.ndarray:
+    """Cut/resample an explicit interval and optionally apply Tukey.
+
+    Returns ``[streams, channels, target_length]``; the row order of the
+    historical flat form is ``(stream, channel)``, which is what
+    ``prepare_interval_signals`` still exposes.
+    """
+
+    if processed.ndim != 3:
+        raise ValueError(f"Expected [streams, channels, samples], got {processed.shape}")
+    sample_count = processed.shape[-1]
+    if not (0 <= start < end <= sample_count):
+        raise ValueError(
+            f"Invalid sample interval [{start}, {end}) for length {sample_count}"
+        )
+    segment = processed[..., start:end]
+    stream_count, channel_count = segment.shape[0], segment.shape[1]
+    streams = segment.reshape(-1, segment.shape[-1])
+    resampled = resample_signals(streams, target_length)
+    block = resampled.reshape(stream_count, channel_count, target_length)
+    if not apply_tukey:
+        return block
+    return block * tukey_window(target_length, tukey_alpha)[None, None, :]
 
 
 def prepare_interval_signals(
@@ -418,28 +512,27 @@ def prepare_interval_signals(
     tukey_alpha: float = 0.3,
     apply_tukey: bool = True,
 ) -> np.ndarray:
-    """Cut/resample an explicit interval and optionally apply Tukey."""
+    """Cut/resample an explicit interval and flatten the channel axis."""
 
-    if processed.ndim != 3:
-        raise ValueError(f"Expected [streams, channels, samples], got {processed.shape}")
-    sample_count = processed.shape[-1]
-    if not (0 <= start < end <= sample_count):
-        raise ValueError(
-            f"Invalid sample interval [{start}, {end}) for length {sample_count}"
-        )
-    segment = processed[..., start:end]
-    streams = segment.reshape(-1, segment.shape[-1])
-    resampled = resample_signals(streams, target_length)
-    if not apply_tukey:
-        return resampled
-    return resampled * tukey_window(target_length, tukey_alpha)[None, :]
+    block = prepare_interval_block(
+        processed,
+        start,
+        end,
+        target_length=target_length,
+        tukey_alpha=tukey_alpha,
+        apply_tukey=apply_tukey,
+    )
+    return block.reshape(-1, block.shape[-1])
 
 
 # Manual per-channel corrections ported verbatim from
 # ``reference_code/pipeline.py``.  Keys are ``(point_id, channel_index)`` with
-# 0-based channel indices.  The reference refuses to apply a correction when
-# the automatic result no longer matches the recorded one, so a changed input
-# cannot silently inherit a stale hand fix.
+# 0-based **physical** channel indices: the reference asserted a fixed ``(2,896)``
+# input, so its ``for c in range(2)`` index was always the physical channel.
+# Callers that hand the locator an already-selected block must pass
+# ``physical_channels`` to preserve that mapping.  The reference refuses to
+# apply a correction when the automatic result no longer matches the recorded
+# one, so a changed input cannot silently inherit a stale hand fix.
 MANUAL_CORRECTIONS: dict[tuple[str, int], tuple[int, int]] = {
     ("N32_P3_01", 0): (249, 163),
     ("N35_P2_01", 0): (324, 272),
@@ -564,6 +657,7 @@ def locate_dynamic_span(
     smoothed: np.ndarray,
     config: DynamicEnvelopeConfig = DynamicEnvelopeConfig(),
     point_id: str | None = None,
+    physical_channels: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     """Port of ``reference_code/pipeline.py::segment`` (per-channel locator).
 
@@ -586,6 +680,12 @@ def locate_dynamic_span(
 
     The tail is the fixed ``[tail_start, signal_length)`` slice, so it may
     overlap the main window or leave a gap.
+
+    ``physical_channels`` maps each column of ``smoothed`` back to its physical
+    channel index and defaults to the identity mapping.  The manual-correction
+    table is keyed by physical channel, so a caller that already dropped
+    channels (``--channel-mode`` 1 or 2) must supply the mapping; otherwise the
+    surviving column would inherit the other channel's hand fix.
     """
 
     config.validate()
@@ -597,6 +697,15 @@ def locate_dynamic_span(
         raise ValueError(
             f"dynamic envelope expects {config.signal_length} samples, got {sample_count}"
         )
+    if physical_channels is None:
+        physical_channels = tuple(range(channel_count))
+    else:
+        physical_channels = tuple(int(c) for c in physical_channels)
+        if len(physical_channels) != channel_count:
+            raise ValueError(
+                "physical_channels must have one entry per selected channel; got "
+                f"{len(physical_channels)} for {channel_count} channels"
+            )
 
     direct = np.array(
         [_first_crossing(row, config.weak_threshold, config.noise_start) for row in smoothed],
@@ -683,13 +792,14 @@ def locate_dynamic_span(
     for channel in range(channel_count):
         if point_id is None or not config.apply_manual_corrections:
             continue
-        fix = MANUAL_CORRECTIONS.get((point_id, channel))
+        physical = int(physical_channels[channel])
+        fix = MANUAL_CORRECTIONS.get((point_id, physical))
         if fix is None:
             continue
         recorded, manual = fix
         if int(automatic[channel]) != recorded:
             raise ValueError(
-                f"dynamic envelope: {point_id} channel {channel + 1} automatic result "
+                f"dynamic envelope: {point_id} channel {physical + 1} automatic result "
                 f"changed (expected {recorded}, got {int(automatic[channel])}); "
                 "the recorded manual correction no longer applies"
             )
@@ -703,8 +813,30 @@ def locate_dynamic_span(
     starts[:] = np.maximum(automatic - config.lead_back, config.main_start_min)
     ends[:] = starts + config.main_length
     if np.any(ends > sample_count):
+        offenders = np.flatnonzero(ends > sample_count)
+        detail = "; ".join(
+            f"channel {int(physical_channels[c]) + 1} start={int(starts[c])} "
+            f"end={int(ends[c])} reference_rule={rules[c]}"
+            for c in offenders
+        )
+        # A fallback reference point is the usual cause and the usual surprise:
+        # with a single selected channel the paired fallback is unavailable, so
+        # a trace that never exceeds ``weak_threshold`` drops into the joint-RMS
+        # rule, which is guaranteed to find *some* crossing (0.5 * its own max)
+        # but may place it arbitrarily late.  Name that explicitly instead of
+        # reporting a bare window overflow.
+        failed_rule = str(rules[int(offenders[0])])
+        if failed_rule == "rms_joint_fallback":
+            hint = (
+                "; the reference point came from the joint-RMS fallback because no "
+                f"envelope sample exceeded weak_threshold={config.weak_threshold}, "
+                "so the boundary is not reliable"
+            )
+        else:
+            hint = ""
         raise ValueError(
-            "dynamic envelope: main window exceeds the signal, refusing to shift it"
+            f"dynamic envelope: main window exceeds the {sample_count}-sample "
+            f"signal, refusing to shift it -- {detail}{hint}"
         )
     tail_end = sample_count
     return {
@@ -712,6 +844,7 @@ def locate_dynamic_span(
         "ends": ends,
         "tail_start": int(config.tail_start),
         "tail_end": int(tail_end),
+        "physical_channels": [int(c) for c in physical_channels],
         "crossing_index": automatic,
         "automatic_crossing_index": automatic_before_manual,
         "manual_correction_applied": corrected,
@@ -740,6 +873,7 @@ def prepare_dynamic_envelope_branches(
     tukey_alpha: float = 0.3,
     apply_tukey: bool = True,
     point_id: str | None = None,
+    physical_channels: Sequence[int] | None = None,
 ) -> tuple[list[np.ndarray], dict[str, Any]]:
     """Create the two dynamic-envelope branches for one processed sample.
 
@@ -756,6 +890,10 @@ def prepare_dynamic_envelope_branches(
     are resampled to ``target_length`` and optionally Tukey-windowed by the
     existing feature pipeline, then flattened to
     ``[streams * channels, target_length]``.
+
+    ``physical_channels`` is forwarded to :func:`locate_dynamic_span` so the
+    manual-correction table keeps addressing physical channels even when the
+    caller has already applied ``--channel-mode``.
     """
 
     config.validate()
@@ -783,7 +921,12 @@ def prepare_dynamic_envelope_branches(
         envelope[:, config.noise_start :], config.smooth_window
     )
 
-    span = locate_dynamic_span(smoothed, config=config, point_id=point_id)
+    span = locate_dynamic_span(
+        smoothed,
+        config=config,
+        point_id=point_id,
+        physical_channels=physical_channels,
+    )
     starts = span["starts"]
     ends = span["ends"]
     tail_start = span["tail_start"]
@@ -799,16 +942,13 @@ def prepare_dynamic_envelope_branches(
         return resampled * tukey_window(target_length, tukey_alpha)[None, :]
 
     # Channel boundaries differ, so each channel is cut on its own and the
-    # pieces are stacked back into a single branch block.
+    # pieces are stacked back into a single ``[streams, channels, length]``
+    # branch block.  The channel axis is preserved here (rather than flattened)
+    # so that per-channel feature groups stay separable downstream.
     main_parts = [cut(c, int(starts[c]), int(ends[c])) for c in range(channel_count)]
     tail_parts = [cut(c, int(tail_start), int(tail_end)) for c in range(channel_count)]
-    branch_stream_count = int(processed.shape[0])
-    main_block = np.stack(
-        [part.reshape(branch_stream_count, target_length) for part in main_parts], axis=1
-    ).reshape(-1, target_length)
-    tail_block = np.stack(
-        [part.reshape(branch_stream_count, target_length) for part in tail_parts], axis=1
-    ).reshape(-1, target_length)
+    main_block = np.stack(main_parts, axis=1)
+    tail_block = np.stack(tail_parts, axis=1)
 
     branch_info = [
         {
@@ -836,6 +976,7 @@ def prepare_dynamic_envelope_branches(
         "algorithm": "reference_code.pipeline.segment",
         "point_id": point_id,
         "channel_count": channel_count,
+        "physical_channels": span["physical_channels"],
         "sample_length": sample_count,
         "locator_top_k": int(config.locator_top_k),
         "main_length": int(config.main_length),
@@ -1003,6 +1144,41 @@ def emd_feature_vector(streams: np.ndarray, config: EMDConfig) -> np.ndarray:
     ).astype(np.float32)
 
 
+def emd_feature_groups(
+    block: np.ndarray, config: EMDConfig
+) -> tuple[np.ndarray, tuple[int, ...]]:
+    """Extract one branch's EMD features, keeping channels as separate groups.
+
+    ``block`` is ``[streams, channels, samples]``.  With
+    ``channel_aggregation="per_channel"`` (the default) each channel is
+    decomposed and pooled on its own and the resulting segments are
+    concatenated; ``"pooled"`` reproduces the historical behaviour, where the
+    channel axis was folded into the stream axis before pooling.
+
+    Returns the concatenated vector plus the width of every group in order, so
+    the caller knows where one channel's features end and the next one's begin.
+    """
+
+    config.validate()
+    block = np.asarray(block, dtype=np.float32)
+    if block.ndim != 3:
+        raise ValueError(f"Expected [streams, channels, samples], got {block.shape}")
+    if config.channel_aggregation == "pooled":
+        # Fold the channel axis into the stream axis, exactly like the flat
+        # ``[streams * channels, samples]`` form used before per-channel
+        # grouping existed.
+        groups = [emd_feature_vector(block.reshape(-1, block.shape[-1]), config)]
+    else:
+        groups = [
+            emd_feature_vector(block[:, channel, :], config)
+            for channel in range(block.shape[1])
+        ]
+    widths = tuple(int(group.size) for group in groups)
+    if len(set(widths)) > 1:
+        raise ValueError(f"per-channel feature widths differ: {widths}")
+    return np.concatenate(groups).astype(np.float32), widths
+
+
 def sample_feature_vector(
     sample: np.ndarray,
     form: str,
@@ -1021,6 +1197,7 @@ def sample_feature_vector(
     if sample.ndim != 3:
         raise ValueError(f"Expected sample [50, 2, 896], got {sample.shape}")
     selected_channels = select_channels(sample, channel_mode)
+    physical_channels = channel_physical_indices(channel_mode)
     processed, selected_frames = process_frames(
         selected_channels, form, mapper=mapper, score_region=score_region
     )
@@ -1037,6 +1214,7 @@ def sample_feature_vector(
             target_length=target_length,
             tukey_alpha=tukey_alpha,
             point_id=point_id,
+            physical_channels=physical_channels,
         )
         branch_specs: list[tuple[str, np.ndarray, int, int, float | None, float | None]] = []
         for branch_index, branch_signals in enumerate(branch_signals_list):
@@ -1058,7 +1236,7 @@ def sample_feature_vector(
             branch_specs.append(
                 (
                     region.label,
-                    prepare_branch_signals(
+                    prepare_branch_block(
                         processed,
                         region,
                         mapper=mapper,
@@ -1072,8 +1250,11 @@ def sample_feature_vector(
                 )
             )
 
+    branch_widths: list[tuple[int, ...]] = []
     for name, branch_signals, start, end, start_mm, end_mm in branch_specs:
-        branch_features.append(emd_feature_vector(branch_signals, emd_config))
+        features, widths = emd_feature_groups(branch_signals, emd_config)
+        branch_features.append(features)
+        branch_widths.append(widths)
         branch_info.append(
             {
                 "name": name,
@@ -1081,20 +1262,46 @@ def sample_feature_vector(
                 "end_mm": end_mm,
                 "start_index": start,
                 "end_index_exclusive": end,
-                "input_streams": int(branch_signals.shape[0]),
-                "feature_length": int(branch_features[-1].size),
+                "input_streams": int(np.prod(branch_signals.shape[:2])),
+                "feature_length": int(features.size),
+                "feature_groups": len(widths),
+                "group_widths": [int(width) for width in widths],
             }
         )
+
+    # Features are laid out group-major: everything a channel contributes is
+    # contiguous across branches, so the classifier can slice one group per
+    # tower.  With ``channel_aggregation="pooled"`` there is a single group and
+    # the layout collapses to the historical branch-major concatenation.
+    group_count = len(branch_widths[0])
+    for widths in branch_widths:
+        if len(widths) != group_count:
+            raise ValueError(
+                "every branch must yield the same number of feature groups; got "
+                f"{[len(w) for w in branch_widths]}"
+            )
+    per_group: list[list[np.ndarray]] = [[] for _ in range(group_count)]
+    for features, widths in zip(branch_features, branch_widths):
+        offset = 0
+        for group, width in enumerate(widths):
+            per_group[group].append(features[offset : offset + width])
+            offset += width
+    group_dims = tuple(
+        int(sum(widths[group] for widths in branch_widths)) for group in range(group_count)
+    )
     info = {
         "form": canonical_form(form),
         "channel_mode": channel_mode,
+        "channel_aggregation": emd_config.channel_aggregation,
         "selected_frames": None if selected_frames is None else selected_frames.tolist(),
         "region_mode": "dyn_envelope" if dynamic_envelope_config is not None else "fixed",
         "branches": branch_info,
+        "feature_groups": group_count,
+        "feature_group_dims": list(group_dims),
     }
     if dynamic_info is not None:
         info["dynamic_envelope"] = dynamic_info
-    return np.concatenate(branch_features).astype(np.float32), info
+    return np.concatenate([np.concatenate(parts) for parts in per_group]).astype(np.float32), info
 
 
 # The source ADC stores raw codes, and both 127 and 128 mean "zero": they
@@ -1289,16 +1496,64 @@ def _roc_auc(y_true: np.ndarray, scores: np.ndarray) -> float | None:
 
 
 class NumpyMLPClassifier:
-    """A compact ReLU MLP classifier with Adam optimization."""
+    """A compact ReLU MLP classifier with Adam optimization.
 
-    def __init__(self, input_dim: int, config: MLPConfig) -> None:
+    When ``group_dims`` holds more than one entry the network becomes a
+    two-phase model: one small **tower** per feature group (i.e. per ultrasound
+    channel under ``channel_aggregation="per_channel"``) maps that group to
+    ``hidden_dims[0]`` units, the towers are concatenated, and a shared **head**
+    (``hidden_dims[1:]`` followed by the 2-way output) fuses them.  With a
+    single group the towers collapse into the first dense layer, so the network
+    is exactly the historical ``in -> 64 -> 32 -> 2`` MLP.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        config: MLPConfig,
+        group_dims: Sequence[int] | None = None,
+    ) -> None:
         config.validate()
         self.config = config
+        self.input_dim = int(input_dim)
+        if group_dims is None:
+            group_dims = (self.input_dim,)
+        group_dims = tuple(int(width) for width in group_dims)
+        if any(width <= 0 for width in group_dims):
+            raise ValueError("group_dims must contain positive widths")
+        if sum(group_dims) != self.input_dim:
+            raise ValueError(
+                f"group_dims sum to {sum(group_dims)} but input_dim is {self.input_dim}"
+            )
+        self.group_dims = group_dims
+        self.tower_count = len(group_dims)
+        # ``_group_slices`` indexes the input vector (one slice per feature
+        # group, widths = group_dims); ``_tower_slices`` indexes the fused
+        # activation, where every tower contributes exactly ``tower_width``.
+        bounds = np.cumsum((0, *group_dims))
+        self._group_slices = [
+            slice(int(bounds[index]), int(bounds[index + 1]))
+            for index in range(self.tower_count)
+        ]
         self.rng = np.random.default_rng(config.seed)
-        dimensions = [input_dim, *config.hidden_dims, 2]
+        # hidden_dims[0] is the per-group tower width; the remaining hidden
+        # dims and the output form the shared head, whose input is the
+        # concatenation of every tower.
+        tower_width = int(config.hidden_dims[0])
+        self._tower_slices = [
+            slice(index * tower_width, (index + 1) * tower_width)
+            for index in range(self.tower_count)
+        ]
+        head_dims = [*config.hidden_dims[1:], 2]
+        dimensions = [(width, tower_width) for width in group_dims]
+        fan_in = tower_width * self.tower_count
+        for fan_out in head_dims:
+            dimensions.append((fan_in, fan_out))
+            fan_in = fan_out
+        self.head_layer_count = len(head_dims)
         self.weights: list[np.ndarray] = []
         self.biases: list[np.ndarray] = []
-        for fan_in, fan_out in zip(dimensions[:-1], dimensions[1:]):
+        for fan_in, fan_out in dimensions:
             scale = math.sqrt(2.0 / fan_in)
             self.weights.append((self.rng.standard_normal((fan_in, fan_out)) * scale).astype(np.float32))
             self.biases.append(np.zeros(fan_out, dtype=np.float32))
@@ -1311,15 +1566,53 @@ class NumpyMLPClassifier:
         self.weights = [w.copy() for w in state[0]]
         self.biases = [b.copy() for b in state[1]]
 
+    def parameter_layout(self) -> dict[str, Any]:
+        """Describe the two-phase topology, for ``config.json``/``metrics.json``."""
+
+        head_layers = [
+            {"fan_in": int(self.weights[index].shape[0]), "fan_out": int(self.weights[index].shape[1])}
+            for index in range(self.tower_count, len(self.weights))
+        ]
+        return {
+            "tower_count": self.tower_count,
+            "tower_dims": [int(width) for width in self.group_dims],
+            "tower_outputs": int(self.config.hidden_dims[0]),
+            "head_layers": head_layers,
+        }
+
     def _forward(self, x: np.ndarray, training: bool) -> tuple[np.ndarray, list[tuple[np.ndarray, np.ndarray, np.ndarray | None]]]:
-        activation = x.astype(np.float32)
+        x = np.asarray(x, dtype=np.float32)
+        if x.ndim != 2 or x.shape[1] != self.input_dim:
+            raise ValueError(f"Expected [batch, {self.input_dim}] input, got {x.shape}")
         cache: list[tuple[np.ndarray, np.ndarray, np.ndarray | None]] = []
-        for layer, (weight, bias) in enumerate(zip(self.weights, self.biases)):
+        tower_outputs: list[np.ndarray] = []
+        # Phase 1: every group gets its own tower.  A single group skips the
+        # concatenation entirely, which keeps the historical layer topology.
+        for tower in range(self.tower_count):
+            previous = x[:, self._group_slices[tower]]
+            weight, bias = self.weights[tower], self.biases[tower]
+            z = previous @ weight + bias
+            hidden = np.maximum(z, 0.0)
+            mask = None
+            if training and self.config.dropout > 0:
+                mask = (self.rng.random(hidden.shape) >= self.config.dropout).astype(np.float32)
+                hidden = hidden * mask / (1.0 - self.config.dropout)
+            cache.append((previous, z, mask))
+            tower_outputs.append(hidden)
+        activation = (
+            tower_outputs[0]
+            if self.tower_count == 1
+            else np.concatenate(tower_outputs, axis=1)
+        )
+        # Phase 2: the shared head fuses the concatenated tower outputs.
+        for layer in range(self.head_layer_count):
+            index = self.tower_count + layer
+            weight, bias = self.weights[index], self.biases[index]
             previous = activation
             z = previous @ weight + bias
-            if layer == len(self.weights) - 1:
-                activation = z
+            if layer == self.head_layer_count - 1:
                 cache.append((previous, z, None))
+                activation = z
                 continue
             activation = np.maximum(z, 0.0)
             mask = None
@@ -1328,6 +1621,55 @@ class NumpyMLPClassifier:
                 activation = activation * mask / (1.0 - self.config.dropout)
             cache.append((previous, z, mask))
         return activation, cache
+
+    def _backward(
+        self,
+        cache: list[tuple[np.ndarray, np.ndarray, np.ndarray | None]],
+        delta: np.ndarray,
+    ) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        """Backpropagate the softmax-cross-entropy gradient through both phases.
+
+        ``delta`` is the gradient with respect to the output logits (already
+        divided by the batch size).  Returns the weight and bias gradients in
+        the same order as :attr:`weights`, with the L2 penalty folded into the
+        weight gradients.
+        """
+
+        delta = np.asarray(delta, dtype=np.float32)
+        grad_w: list[np.ndarray] = [np.zeros_like(w) for w in self.weights]
+        grad_b: list[np.ndarray] = [np.zeros_like(b) for b in self.biases]
+        # Shared head first, from the output back through the fusion layer.
+        # Unlike a plain MLP the fusion layer is not the bottom of the stack,
+        # so its own nonlinearity is applied below, per tower, rather than to
+        # ``cache[index - 1]``.
+        for layer in range(self.head_layer_count - 1, -1, -1):
+            index = self.tower_count + layer
+            previous, _, _ = cache[index]
+            grad_w[index] = previous.T @ delta + self.config.weight_decay * self.weights[index]
+            grad_b[index] = np.sum(delta, axis=0)
+            delta = delta @ self.weights[index].T
+            if layer == 0:
+                continue
+            # The derivative belongs to the previous hidden layer, not to the
+            # layer whose weights were just differentiated.
+            previous_z = cache[index - 1][1]
+            previous_mask = cache[index - 1][2]
+            delta = delta * (previous_z > 0.0)
+            if previous_mask is not None:
+                delta = delta * previous_mask / (1.0 - self.config.dropout)
+        # ``delta`` now holds the gradient of the fused activation; each tower
+        # owns the slice it contributed to it.
+        for tower in range(self.tower_count):
+            previous, z, mask = cache[tower]
+            group_delta = delta[:, self._tower_slices[tower]]
+            group_delta = group_delta * (z > 0.0)
+            if mask is not None:
+                group_delta = group_delta * mask / (1.0 - self.config.dropout)
+            grad_w[tower] = (
+                previous.T @ group_delta + self.config.weight_decay * self.weights[tower]
+            )
+            grad_b[tower] = np.sum(group_delta, axis=0)
+        return grad_w, grad_b
 
     def predict_proba(self, x: np.ndarray) -> np.ndarray:
         logits, _ = self._forward(np.asarray(x, dtype=np.float32), training=False)
@@ -1384,22 +1726,7 @@ class NumpyMLPClassifier:
                 delta = probabilities
                 delta[np.arange(yb.size), yb] -= 1.0
                 delta /= yb.size
-                grad_w: list[np.ndarray] = [np.zeros_like(w) for w in self.weights]
-                grad_b: list[np.ndarray] = [np.zeros_like(b) for b in self.biases]
-                for layer in range(len(self.weights) - 1, -1, -1):
-                    previous, z, mask = cache[layer]
-                    grad_w[layer] = previous.T @ delta + self.config.weight_decay * self.weights[layer]
-                    grad_b[layer] = np.sum(delta, axis=0)
-                    if layer > 0:
-                        delta = delta @ self.weights[layer].T
-                        # The derivative belongs to the previous hidden
-                        # layer, not to the layer whose weights were just
-                        # differentiated.
-                        previous_z = cache[layer - 1][1]
-                        previous_mask = cache[layer - 1][2]
-                        delta = delta * (previous_z > 0.0)
-                        if previous_mask is not None:
-                            delta = delta * previous_mask / (1.0 - self.config.dropout)
+                grad_w, grad_b = self._backward(cache, delta)
                 step += 1
                 beta1, beta2 = 0.9, 0.999
                 for layer in range(len(self.weights)):
@@ -1457,6 +1784,10 @@ class NumpyMLPClassifier:
             arrays[f"weight_{index}"] = weight
         for index, bias in enumerate(self.biases):
             arrays[f"bias_{index}"] = bias
+        # Parameter order is ``tower_0 .. tower_{T-1}, head_0 .. head_{H-1}``,
+        # so the topology has to travel with the weights.
+        arrays["group_dims"] = np.asarray(self.group_dims, dtype=np.int64)
+        arrays["tower_count"] = np.asarray(self.tower_count, dtype=np.int64)
         np.savez(path, **arrays)
 
 

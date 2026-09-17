@@ -105,9 +105,73 @@ python run_emd_experiments.py `
 
 - `1`：只使用物理通道 1。
 - `2`：只使用物理通道 2。
-- `3`：同时使用通道 1 和 2，分别处理，不做数值相加。
+- `3`：同时使用通道 1 和 2。
 
 通道选择与深度 branch 是两个独立维度；物理通道不会被误当成深度 branch。
+
+### 通道 3 如何处理两个通道
+
+两个通道**各自独立**切片、重采样、做 EMD，各得一组特征；两组特征**拼接**后进入分类头，
+而且**每组特征各有一座独立的 MLP 塔**，塔的输出再拼接起来交给共享头。
+分组方式由 `--channel-aggregation` 控制：
+
+| 取值 | 含义 |
+|---|---|
+| `per_channel`（默认） | 每个通道一组特征，组间拼接，每组一座 MLP 塔 |
+| `pooled` | 通道轴与分量轴一起平均成一组，复现历史行为 |
+
+```text
+channel_mode=1 / 2                    channel_mode=3 (per_channel)
+[1,512]  1 条流                       [2,512]  2 条流
+   ↓ EMD 跑 1 次                         ↓ EMD 跑 2 次（每通道各 1 次）
+ 8 维特征（1 组）                       8 + 8 = 16 维特征（2 组）
+   ↓                                     ↓
+ 1 座塔 8→64                           2 座塔 8→64 -> 拼成 128 -> 共享头 128→32→2
+```
+
+所以通道 3 每个 branch 的特征宽度是 **16 维**（`8 ⅹ 2`），通道 1 / 2 仍是 8 维。
+两个通道不再在分类头之前被平均掉，而是各自经过一层非线性后才融合。
+
+**不是相加。** 两组特征来自**两次独立的 EMD**。EMD 是非线性分解，
+"两通道先相加再做 EMD"的结果与分别分解相差 $10^{-2}$ 量级，完全不是一回事。
+
+### 历史行为：`--channel-aggregation pooled`
+
+历史版本的通道 3 会把「通道轴 × 分量轴」一起取平均，得到单组 8 维特征：
+
+```text
+[2,6,8]  2 通道 × 6 分量
+   ↓ np.mean(component_matrix, axis=(0, 1))
+ 8 维特征  ← 维度不翻倍，两个通道的个性被平均掉
+```
+
+实测同帧、同选帧下满足 $f_{\text{ch3}}^{\text{pooled}} = \tfrac{1}{2}(f_{\text{ch1}} + f_{\text{ch2}})$
+（误差 $7.5\times10^{-9}$）。该选项现在仅用于复现历史结果和消融对照。
+
+### 选帧随通道模式变化
+
+`max1` / `top3_mean` 用 RMS 排名选帧，而 RMS 是对**通道轴和采样轴一起**求的，
+所以通道集不同 → 得分不同 → 可能选中不同帧。实测同一样本：
+
+| `--channel-mode` | `selected_frames` |
+|---|---|
+| 1 | `[13 11 12]` |
+| 2 | `[28 27 26]` |
+| 3 | `[26 27 24]` |
+
+即通道 1 单独跑时选的帧，和通道 3 里第一个通道用的帧**不是同一帧**。因此上面那个
+严格平均关系只在帧选择相同时成立：
+
+| form | 是否选帧 | 与平均关系的偏差 |
+|---|---|---|
+| `mean_std` | 否 | $1.5\times10^{-8}$（严格成立） |
+| `raw50` | 否 | $7.5\times10^{-8}$（严格成立） |
+| `max1` | 是 | $1.2\times10^{-2}$（偏离） |
+| `top3_mean` | 是 | $6.6\times10^{-3}$（偏离） |
+
+> 对比 `channels_1` 与 `channels_3` 的实验时，"多了通道 2"和"选帧变了"两个因素混在一起
+> 无法分离。需要干净的消融对照时，固定 `--selection-region-json`，或改用不选帧的
+> `mean_std` / `raw50`。
 
 ## EMD 特征
 
@@ -122,13 +186,27 @@ python run_emd_experiments.py `
 - Zero-crossing rate
 - Spectral centroid
 
-默认使用 `--stream-aggregation pooled`：对每个 branch 内的所有 EMD 分量和信号流做均值池化，每个 branch 得到 8 个统计量；多个 branch 之间不做均值，而是直接拼接。因此最终输入维度为 `8 × branch 数`。例如 `bone_plus_post` 有两个 branch，最终为 16 维。
+默认使用 `--stream-aggregation pooled`：对每个 branch 内的所有 EMD 分量和信号流做均值池化，每个 branch 的每组特征得到 8 个统计量；多个 branch 之间不做均值，而是直接拼接。
+
+通道方向由 `--channel-aggregation` 决定：`per_channel`（默认）让每个通道各成一组，组间拼接；`pooled` 把通道轴并入流轴一起池化，只剩一组。
+
+因此每个 branch 的宽度是 `8 × 通道组数 × branch 数`：
+
+| 区域组合 | `--channel-mode 1` / `2` | 通道 3（`per_channel`） | 通道 3（`pooled`） |
+|---|---:|---:|---:|
+| `full` / `bone` | 8 | 16 | 8 |
+| `bone_plus_post` | 16 | 32 | 16 |
+| `dyn_envelope` | 16 | 32 | 16 |
+
+这里的"信号流"既包括 `mean_std` 的两条流（均值/标准差）或 `raw50` 的 50 帧，也包括通道 3 展开出的两个通道——在 `pooled` 下它们都被同一个均值池化掉。
 
 `flatten` 和 `stats` 仍保留作对照实验，不再设置最终特征维数上限。
 
 ## MLP 分类头
 
-默认使用轻量 MLP：
+NumPy 实现的轻量 MLP，不使用 CNN。
+
+**单组特征**（通道 1 / 2，或通道 3 加 `--channel-aggregation pooled`）时就是历史结构：
 
 ```text
 Linear(input_dim, 64)
@@ -137,6 +215,20 @@ Linear(input_dim, 64)
 -> ReLU + Dropout(0.1)
 -> Linear(32, 2)
 ```
+
+**多组特征**（通道 3，默认 `per_channel`）时改为「每组建一座塔 + 共享头」：
+
+```text
+组0 (8 维) -> Linear(8, 64) -> ReLU + Dropout(0.1) -┐
+组1 (8 维) -> Linear(8, 64) -> ReLU + Dropout(0.1) -┤ concat -> 128 维
+                                                    ↓
+                                       Linear(128, 32) -> ReLU + Dropout(0.1)
+                                                    ↓
+                                                 Linear(32, 2)
+```
+
+塔的宽度取 `hidden_dims[0]`，共享头取 `hidden_dims[1:]` 再接 2 类输出。只有一组时塔会塌缩成第一层
+全连接，网络与历史结构**完全等价**（已用逐位回归验证）。
 
 MLP 只负责 branch 特征融合和二分类，不使用 CNN。标准化参数只在训练集上拟合，验证集用于早停；测试集不参与训练或模型选择，每个 epoch 的 test loss 仅用于曲线观察。
 
@@ -185,9 +277,28 @@ python run_emd_experiments.py `
   --output-dir smoke_test
 ```
 
+### 自检脚本
+
+三个脚本不依赖 `experiments/` 里的历史产物，可用当前代码直接重跑：
+
+```powershell
+python verify_dyn_envelope.py         # 动态包络切分与参考实现逐位一致
+python verify_mlp_gradients.py        # 双塔 MLP 的解析梯度（数值梯度对照）
+python verify_channel_aggregation.py  # 通道聚合语义与网络拓扑
+```
+
+`verify_channel_aggregation.py` 会真实调用 CLI 跑 6 次小规模训练，验证：单通道下
+`per_channel` 与 `pooled` 逐位相同；通道 3 下 `per_channel` 的特征宽度是 `pooled` 的两倍、
+`tower_count=2`、共享头首层输入翻倍。加 `--keep` 可保留临时目录 `_agg_regress/`。
+
 ## 输出文件
 
-默认输出到 `experiments/`，每组实验一个目录，例如：
+默认输出到 `experiments/`，每组实验一个目录：
+
+- `--channel-aggregation per_channel`（默认）：`form_<form>__regions_<region>__channels_<channel>/`
+- `--channel-aggregation pooled`（历史行为/消融对照）：同名 + `__pooled` 后缀
+
+单个通道下两种设置等价，但仍分开存放，便于对照。
 
 ```text
 experiments/
