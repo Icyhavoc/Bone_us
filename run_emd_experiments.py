@@ -21,6 +21,8 @@ from typing import Sequence
 import numpy as np
 
 from emd_pipeline import (
+    AFTER_SPLIT_BRANCHES,
+    DatasetSpec,
     DepthMapper,
     DynamicEnvelopeConfig,
     EMDConfig,
@@ -29,9 +31,14 @@ from emd_pipeline import (
     RegionSpec,
     StandardScaler,
     binary_metrics,
+    build_after_split_feature_matrix,
+    build_after_split_pair_feature_matrix,
     build_feature_matrix,
     canonical_form,
+    detect_dataset_kind,
     json_ready,
+    load_after_split_pair,
+    load_dataset_split,
     load_split,
     parse_regions,
     write_json,
@@ -45,7 +52,19 @@ REGION_PRESETS: dict[str, list[list[float]]] = {
     "bone_plus_post": [[0.2, 1.5], [1.5, 5.0]],
 }
 DYNAMIC_REGION_NAME = "dyn_envelope"
-REGION_CHOICES = ["all", *REGION_PRESETS.keys(), DYNAMIC_REGION_NAME]
+# ``after_split_pair`` concatenates both pre-cut branches into one 16-dim
+# sample feature vector; ``main``/``tail`` keep them separate for comparison.
+# Treating all three as region names keeps experiment directory names, the GUI
+# filter, and the visualization scripts working unchanged.
+AFTER_SPLIT_PAIR_NAME = "after_split_pair"
+LEGACY_REGION_CHOICES = ["all", *REGION_PRESETS.keys(), DYNAMIC_REGION_NAME]
+REGION_CHOICES = [*LEGACY_REGION_CHOICES, AFTER_SPLIT_PAIR_NAME, *AFTER_SPLIT_BRANCHES]
+DATASET_CHOICES = ["auto", "legacy", "after_split"]
+# Both datasets use the same four frame forms.  ``raw50`` is by far the
+# slowest because both branches then carry 50 frames x 2 channels = 100
+# streams each, so every sample runs 200 EMD decompositions.
+DEFAULT_FORMS = "all"
+
 def _parse_forms(value: str) -> list[str]:
     if value.strip().lower() == "all":
         return list(FORM_ORDER)
@@ -59,8 +78,30 @@ def _parse_forms(value: str) -> list[str]:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="EMD feature extraction + MLP classifier")
     parser.add_argument("--data-dir", type=Path, default=Path("raw_data"))
+    parser.add_argument(
+        "--dataset",
+        choices=DATASET_CHOICES,
+        default="auto",
+        help="auto detects after_split_data branches, otherwise uses legacy raw_data",
+    )
+    parser.add_argument(
+        "--branch",
+        choices=["all", AFTER_SPLIT_PAIR_NAME, *AFTER_SPLIT_BRANCHES],
+        default="all",
+        help=(
+            "after_split_data target: after_split_pair concatenates both "
+            "branches into one 16-dim vector (default), main/tail run a single branch"
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("experiments"))
-    parser.add_argument("--forms", default="all", help="all or comma-separated forms")
+    parser.add_argument(
+        "--forms",
+        default=None,
+        help=(
+            "all or comma-separated forms. Defaults to all for both datasets; "
+            "raw50 is much slower because every frame becomes an EMD stream"
+        ),
+    )
     parser.add_argument(
         "--region-set",
         choices=REGION_CHOICES,
@@ -130,7 +171,44 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _region_experiments(args: argparse.Namespace) -> list[tuple[str, list[RegionSpec]]]:
+def _resolve_dataset_kind(args: argparse.Namespace) -> str:
+    if args.dataset == "auto":
+        return detect_dataset_kind(args.data_dir)
+    return args.dataset
+
+
+def _after_split_targets(args: argparse.Namespace) -> list[str]:
+    """Resolve which targets an ``after_split_data`` run produces.
+
+    ``after_split_pair`` is the main path: both branches are resampled,
+    windowed, decomposed, and their features concatenated into one vector.
+    ``main`` / ``tail`` remain available for single-branch comparison.
+    """
+
+    valid = [AFTER_SPLIT_PAIR_NAME, *AFTER_SPLIT_BRANCHES]
+    if args.branch != "all":
+        if args.branch not in valid:
+            raise ValueError(f"--branch must be one of {valid}")
+        return [args.branch]
+    if args.region_set in valid:
+        return [args.region_set]
+    if args.region_set == "all":
+        # Default to the combined two-branch experiment only; run the
+        # individual branches explicitly with --branch main/tail.
+        return [AFTER_SPLIT_PAIR_NAME]
+    raise ValueError(
+        f"Dataset after_split_data supports {valid}; got --region-set "
+        f"{args.region_set!r}."
+    )
+
+
+def _region_experiments(
+    args: argparse.Namespace, dataset_kind: str
+) -> list[tuple[str, list[RegionSpec]]]:
+    if dataset_kind == "after_split":
+        # Branch boundaries are already encoded in the dataset; no depth
+        # regions are involved.
+        return [(name, []) for name in _after_split_targets(args)]
     if args.regions_json is not None:
         return [("custom", parse_regions(args.regions_json))]
     if args.region_set == "all":
@@ -141,6 +219,7 @@ def _region_experiments(args: argparse.Namespace) -> list[tuple[str, list[Region
         (name, [] if name == DYNAMIC_REGION_NAME else parse_regions(REGION_PRESETS[name]))
         for name in names
     ]
+
 
 
 def _experiment_name(form: str, region_name: str, channel_mode: int) -> str:
@@ -178,15 +257,35 @@ def run_one(
     region_name: str,
     regions: Sequence[RegionSpec],
     args: argparse.Namespace,
+    dataset_kind: str = "legacy",
 ) -> dict[str, object]:
     start_time = time.time()
     output_dir.mkdir(parents=True, exist_ok=True)
+    single_branch = dataset_kind == "after_split" and region_name in AFTER_SPLIT_BRANCHES
+    pair_mode = dataset_kind == "after_split" and region_name == AFTER_SPLIT_PAIR_NAME
+    branch = region_name if single_branch else "main"
+    spec = DatasetSpec(kind=dataset_kind, root=data_dir, branch=branch)
+    # ``after_split_data`` branches are shorter than 896 samples, so the depth
+    # mapper must use the branch's native length to keep frame-form RMS scoring
+    # inside the array.  The combined mode rebuilds the full 896-sample axis and
+    # scores frames there instead.
+    if dataset_kind == "after_split" and not pair_mode:
+        native_length = int(load_dataset_split(spec, "train")[0].shape[-1])
+    else:
+        native_length = args.signal_length
     mapper = DepthMapper(
         max_depth_mm=args.max_depth_mm,
-        signal_length=args.signal_length,
+        signal_length=native_length,
         rounding=args.rounding,
     )
     selection_region = parse_regions(args.selection_region_json)[0]
+    if pair_mode:
+        # Frames must be scored on the covered part of the axis only: samples
+        # before the earliest branch start are structural zeros.
+        pair_probe = load_after_split_pair(data_dir, "train")
+        low, high = pair_probe.absolute_range(args.channel_mode)
+        scale = args.max_depth_mm / float(native_length)
+        selection_region = RegionSpec(low * scale, high * scale, "after_split_covered")
     emd_config = EMDConfig(
         max_imfs=args.max_imfs,
         max_sift_iterations=args.max_sift_iterations,
@@ -200,7 +299,7 @@ def run_one(
             prominence_sigma=args.dyn_prominence_sigma,
             min_peak_width=args.dyn_min_peak_width,
         )
-        if region_name == DYNAMIC_REGION_NAME
+        if dataset_kind == "legacy" and region_name == DYNAMIC_REGION_NAME
         else None
     )
     hidden_dims = tuple(int(item) for item in args.hidden_dims.split(",") if item.strip())
@@ -213,6 +312,10 @@ def run_one(
         seed=args.seed,
     )
     experiment_config = {
+        "dataset": dataset_kind,
+        "target": region_name if dataset_kind == "after_split" else None,
+        "branch": branch if single_branch else None,
+        "combined_branches": ["main", "tail"] if pair_mode else None,
         "form": form,
         "region_name": region_name,
         "regions": regions,
@@ -233,30 +336,62 @@ def run_one(
     feature_data: dict[str, np.ndarray] = {}
     feature_info: dict[str, object] = {}
     for split in ("train", "val", "test"):
-        x, y, samples = load_split(data_dir, split)
+        if pair_mode:
+            pair = load_after_split_pair(data_dir, split)
+            x, y, samples = pair.full, pair.y, pair.samples
+        else:
+            x, y, samples = load_dataset_split(spec, split)
+            pair = None
         if args.max_samples is not None:
             y = y[: args.max_samples]
             samples = samples[: args.max_samples]
         split_data[split] = (x, y, samples)
         print(f"[{form}/{region_name}] extracting {split}: {x.shape[0]} samples")
-        features, info = build_feature_matrix(
-            x,
-            form=form,
-            regions=regions,
-            channel_mode=args.channel_mode,
-            mapper=mapper,
-            target_length=args.target_length,
-            tukey_alpha=args.tukey_alpha,
-            dynamic_envelope_config=dynamic_envelope_config,
-            emd_config=emd_config,
-            score_region=selection_region,
-            limit=args.max_samples,
-        )
+        if pair_mode:
+            features, info = build_after_split_pair_feature_matrix(
+                pair,
+                channel_mode=args.channel_mode,
+                target_length=args.target_length,
+                tukey_alpha=args.tukey_alpha,
+                emd_config=emd_config,
+                form=form,
+                score_region=selection_region,
+                mapper=mapper,
+                limit=args.max_samples,
+            )
+        elif dataset_kind == "after_split":
+            features, info = build_after_split_feature_matrix(
+                x,
+                branch=branch,
+                channel_mode=args.channel_mode,
+                target_length=args.target_length,
+                tukey_alpha=args.tukey_alpha,
+                emd_config=emd_config,
+                form=form,
+                score_region=selection_region,
+                mapper=mapper,
+                limit=args.max_samples,
+            )
+        else:
+            features, info = build_feature_matrix(
+                x,
+                form=form,
+                regions=regions,
+                channel_mode=args.channel_mode,
+                mapper=mapper,
+                target_length=args.target_length,
+                tukey_alpha=args.tukey_alpha,
+                dynamic_envelope_config=dynamic_envelope_config,
+                emd_config=emd_config,
+                score_region=selection_region,
+                limit=args.max_samples,
+            )
         feature_data[split] = features
         feature_info[split] = info
         np.save(output_dir / f"features_{split}.npy", features)
         np.save(output_dir / f"labels_{split}.npy", y)
         write_json(output_dir / f"samples_{split}.json", samples)
+
 
     train_features = feature_data["train"]
     scaler = StandardScaler().fit(train_features)
@@ -309,16 +444,23 @@ def main() -> None:
     args = _parse_args()
     data_dir = args.data_dir.resolve()
     output_dir = args.output_dir.resolve()
-    forms = _parse_forms(args.forms)
-    region_experiments = _region_experiments(args)
+    dataset_kind = _resolve_dataset_kind(args)
+    forms = _parse_forms(args.forms if args.forms is not None else DEFAULT_FORMS)
+    region_experiments = _region_experiments(args, dataset_kind)
     all_results: dict[str, object] = {
         "data_dir": data_dir,
+        "dataset": dataset_kind,
+        "branch": args.branch if dataset_kind == "after_split" else None,
         "output_dir": output_dir,
         "forms": forms,
         "regions": {name: regions for name, regions in region_experiments},
         "channel_mode": args.channel_mode,
         "results": {},
     }
+    print(
+        f"dataset={dataset_kind}, data_dir={data_dir}, "
+        f"targets={[name for name, _ in region_experiments]}"
+    )
     for form in forms:
         for region_name, regions in region_experiments:
             experiment_name = _experiment_name(form, region_name, args.channel_mode)
@@ -330,6 +472,7 @@ def main() -> None:
                 region_name=region_name,
                 regions=regions,
                 args=args,
+                dataset_kind=dataset_kind,
             )
             all_results["results"][experiment_name] = result
     output_dir.mkdir(parents=True, exist_ok=True)

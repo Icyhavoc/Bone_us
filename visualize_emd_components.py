@@ -18,29 +18,42 @@ from typing import Any, Sequence
 import numpy as np
 
 from emd_pipeline import (
+    AFTER_SPLIT_BRANCHES,
     FORM_ORDER,
     DepthMapper,
     DynamicEnvelopeConfig,
     EMDConfig,
     RegionSpec,
     canonical_form,
+    detect_dataset_kind,
     emd_decompose,
     json_ready,
     parse_regions,
     prepare_branch_signals,
     prepare_dynamic_envelope_branches,
     process_frames,
-    select_channels,
 )
-from run_emd_experiments import DYNAMIC_REGION_NAME, REGION_CHOICES, REGION_PRESETS
+from run_emd_experiments import (
+    AFTER_SPLIT_PAIR_NAME,
+    DYNAMIC_REGION_NAME,
+    REGION_CHOICES,
+    REGION_PRESETS,
+)
 from visualize_preprocessing import (
     CLASS_NAMES,
     CHANNEL_COLORS,
+    _branch_title,
     _draw_plot_cell,
     _font,
     _resolve_region_experiments,
     _safe_name,
+    branch_count_for,
+    branch_depth_range_from_record,
+    load_branch_records,
+    load_pair_records,
     load_split_records,
+    prepare_branch_items,
+    prepare_pair_branch_items,
     select_class_indices,
 )
 
@@ -48,9 +61,19 @@ from visualize_preprocessing import (
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize EMD IMFs and residue")
     parser.add_argument("--data-dir", type=Path, default=Path("raw_data"))
+    parser.add_argument(
+        "--dataset",
+        choices=["auto", "legacy", "after_split"],
+        default="auto",
+        help="auto detects after_split_data branches, otherwise uses legacy raw_data",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("visualizations/emd"))
     parser.add_argument("--split", choices=["all", "train", "val", "test"], default="all")
-    parser.add_argument("--forms", default="all", help="all or comma-separated forms")
+    parser.add_argument(
+        "--forms",
+        default="all",
+        help="all or comma-separated forms; raw50 is much slower to render",
+    )
     parser.add_argument("--region-set", choices=REGION_CHOICES, default="all")
     parser.add_argument("--regions-json", default=None)
     parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3], default=3)
@@ -130,7 +153,8 @@ def _make_component_sheet(
     target_length: int,
     component_limits: Sequence[Sequence[tuple[float, float]]],
     include_residue: bool,
-    branch_ranges: Sequence[tuple[float, float]] | None,
+    branch_ranges: Sequence[tuple[float, float]],
+    branch_titles: Sequence[str],
     output_path: Path,
 ) -> None:
     cell_width = 500
@@ -168,16 +192,8 @@ def _make_component_sheet(
     )
     for column in range(branch_count):
         x0 = left_margin + column * cell_width
-        if branch_ranges is None:
-            branch_title = f"Branch {column + 1}: {regions[column].label}"
-            start_mm, end_mm = regions[column].start_mm, regions[column].end_mm
-        else:
-            branch_title = (
-                "Branch 1: first envelope-peak window (a samples)"
-                if column == 0
-                else "Branch 2: remaining signal"
-            )
-            start_mm, end_mm = branch_ranges[column]
+        branch_title = branch_titles[column]
+        start_mm, end_mm = branch_ranges[column]
         draw.text(
             (x0 + 8, 80),
             branch_title,
@@ -220,18 +236,13 @@ def _make_component_sheet(
 
 def main() -> None:
     args = _parse_args()
+    dataset_kind = detect_dataset_kind(args.data_dir) if args.dataset == "auto" else args.dataset
     forms = list(FORM_ORDER) if args.forms.strip().lower() == "all" else [
         canonical_form(item) for item in args.forms.split(",") if item.strip()
     ]
-    region_experiments = _resolve_region_experiments(args.region_set, args.regions_json)
-    x, labels, records, split_names = load_split_records(args.data_dir, args.split)
-    selected = select_class_indices(
-        labels,
-        [args.imminent_label, args.safe_label],
-        samples_per_class=1,
-        seed=args.seed,
+    region_experiments = _resolve_region_experiments(
+        args.region_set, args.regions_json, dataset_kind
     )
-    mapper = DepthMapper(args.max_depth_mm, args.signal_length, args.rounding)
     dynamic_envelope_config = DynamicEnvelopeConfig(
         branch_length_mm=args.dyn_a_mm,
         smooth_window=args.dyn_smooth_window,
@@ -247,96 +258,130 @@ def main() -> None:
     output_dir = args.output_dir.resolve()
     manifest: dict[str, Any] = {
         "data_dir": args.data_dir.resolve(),
+        "dataset": dataset_kind,
         "split": args.split,
         "seed": args.seed,
         "class_labels": {"imminent": args.imminent_label, "safe": args.safe_label},
         "forms": forms,
         "regions": {name: regions for name, regions in region_experiments},
-        "mapper": mapper,
         "target_length": args.target_length,
         "tukey_alpha": args.tukey_alpha,
         "dynamic_envelope": dynamic_envelope_config,
         "emd": emd_config,
         "selections": {},
     }
-    for label, indices in selected.items():
-        name = "imminent" if label == args.imminent_label else "safe"
-        index = int(indices[0])
-        manifest["selections"][name] = {
-            "index": index,
-            "sample_id": records[index].get("sample_id"),
-            "depth_value": records[index].get("depth_value"),
-            "split": split_names[index],
-        }
 
-    for form in forms:
-        for region_name, regions in region_experiments:
+    for region_name, regions in region_experiments:
+        main_index = tail_index = None
+        if dataset_kind == "after_split" and region_name == AFTER_SPLIT_PAIR_NAME:
+            x, labels, records, split_names, main_index, tail_index = load_pair_records(
+                args.data_dir, args.split
+            )
+            mapper = DepthMapper(args.max_depth_mm, int(x.shape[-1]), args.rounding)
+            effective_regions: list[RegionSpec] = []
+        elif dataset_kind == "after_split":
+            x, labels, records, split_names = load_branch_records(
+                args.data_dir, args.split, region_name
+            )
+            mapper = DepthMapper(args.max_depth_mm, int(x.shape[-1]), args.rounding)
+            effective_regions = [RegionSpec(0.0, args.max_depth_mm, region_name)]
+        else:
+            x, labels, records, split_names = load_split_records(args.data_dir, args.split)
+            mapper = DepthMapper(args.max_depth_mm, args.signal_length, args.rounding)
+            effective_regions = regions
+        selected = select_class_indices(
+            labels,
+            [args.imminent_label, args.safe_label],
+            samples_per_class=1,
+            seed=args.seed,
+        )
+        if not manifest["selections"]:
+            for label, indices in selected.items():
+                name = "imminent" if label == args.imminent_label else "safe"
+                index = int(indices[0])
+                manifest["selections"][name] = {
+                    "index": index,
+                    "sample_id": records[index].get("sample_id"),
+                    "depth_value": records[index].get("depth_value"),
+                    "split": split_names[index],
+                }
+        use_dynamic = dataset_kind == "legacy" and region_name == DYNAMIC_REGION_NAME
+        pair_mode = region_name == AFTER_SPLIT_PAIR_NAME
+        for form in forms:
             selected_components: dict[int, list[np.ndarray]] = {}
-            selected_ranges: dict[int, list[tuple[float, float]] | None] = {}
+            selected_ranges: dict[int, list[tuple[float, float]]] = {}
+            selected_titles: dict[int, list[str]] = {}
             for label, indices in selected.items():
                 index = int(indices[0])
-                selected_channels = select_channels(x[index], args.channel_mode)
-                processed, selected_frames = process_frames(
-                    selected_channels,
-                    form,
-                    mapper=mapper,
-                    score_region=RegionSpec(0.0, mapper.max_depth_mm, "selection_full"),
+                record = records[index]
+                sample_mapper = DepthMapper(
+                    args.max_depth_mm, int(x[index].shape[-1]), args.rounding
                 )
-                branch_components: list[np.ndarray] = []
-                branch_ranges: list[tuple[float, float]] = []
-                if region_name == DYNAMIC_REGION_NAME:
-                    dynamic_branches, dynamic_info = prepare_dynamic_envelope_branches(
-                        processed,
-                        config=dynamic_envelope_config,
-                        target_length=args.target_length,
-                        tukey_alpha=args.tukey_alpha,
-                        max_depth_mm=mapper.max_depth_mm,
+                if pair_mode:
+                    if main_index is None or tail_index is None:
+                        raise ValueError("pair mode requires main_index and tail_index")
+                    low = min(
+                        int(np.min(main_index[index])), int(np.min(tail_index[index]))
                     )
-                    branch_items = zip(dynamic_branches, dynamic_info["branches"])
-                    for branch_flat, branch_info in branch_items:
-                        branch_ranges.append(
-                            (
-                                mapper.index_to_depth(int(branch_info["start_index"])),
-                                mapper.index_to_depth(int(branch_info["end_index_exclusive"])),
-                            )
-                        )
-                        branch_components.append(
-                            _decompose_streams(
-                                branch_flat.reshape(-1, args.target_length), emd_config
-                            )
-                        )
-                    manifest.setdefault("dynamic_envelope_details", {})[
-                        f"{form}/{region_name}/{label}"
-                    ] = dynamic_info
+                    high = max(
+                        int(np.max(main_index[index])), int(np.max(tail_index[index]))
+                    )
+                    scale = args.max_depth_mm / float(mapper.signal_length)
+                    items = prepare_pair_branch_items(
+                        x[index],
+                        main_index[index],
+                        tail_index[index],
+                        form,
+                        args.channel_mode,
+                        sample_mapper,
+                        args.target_length,
+                        args.tukey_alpha,
+                        score_region=RegionSpec(low * scale, (high + 1) * scale, "covered"),
+                        apply_tukey=True,
+                    )
                 else:
-                    branch_items = ((
-                        prepare_branch_signals(
-                            processed,
-                            region,
-                            mapper,
-                            args.target_length,
-                            tukey_alpha=args.tukey_alpha,
+                    items = prepare_branch_items(
+                        x[index],
+                        form,
+                        args.channel_mode,
+                        region_name,
+                        effective_regions,
+                        sample_mapper,
+                        args.target_length,
+                        args.tukey_alpha,
+                        dynamic_envelope_config if use_dynamic else None,
+                        branch_depth_range=branch_depth_range_from_record(
+                            record, args.signal_length, args.max_depth_mm
                         ),
-                        None,
-                    ) for region in regions)
-                    for branch_flat, _ in branch_items:
-                        branch_components.append(
-                            _decompose_streams(
-                                branch_flat.reshape(-1, args.target_length), emd_config
-                            )
+                        apply_tukey=True,
+                    )
+                branch_components: list[np.ndarray] = []
+                branch_components_count = branch_count_for(
+                    region_name, effective_regions, use_dynamic
+                )
+                manifest.setdefault("frame_selections", {})[f"{form}/{region_name}/{label}"] = None
+                for column in range(branch_components_count):
+                    branch_flat = items[column][0]
+                    branch_components.append(
+                        _decompose_streams(
+                            np.asarray(branch_flat).reshape(-1, args.target_length),
+                            emd_config,
                         )
-                    branch_ranges = [(region.start_mm, region.end_mm) for region in regions]
+                    )
                 selected_components[label] = branch_components
-                selected_ranges[label] = None if region_name != DYNAMIC_REGION_NAME else branch_ranges
-                manifest.setdefault("frame_selections", {})[
-                    f"{form}/{region_name}/{label}"
-                ] = None if selected_frames is None else selected_frames.tolist()
+                selected_ranges[label] = [(float(item[1]), float(item[2])) for item in items]
+                selected_titles[label] = [
+                    _branch_title(region_name, column, effective_regions)
+                    for column in range(len(items))
+                ]
 
             component_limits = [
                 _component_y_limits(
                     [selected_components[label][branch_index] for label in selected_components]
                 )
-                for branch_index in range(len(selected_components[next(iter(selected_components))]))
+                for branch_index in range(
+                    len(selected_components[next(iter(selected_components))])
+                )
             ]
             for label, indices in selected.items():
                 class_name = "imminent" if label == args.imminent_label else "safe"
@@ -349,7 +394,7 @@ def main() -> None:
                 _make_component_sheet(
                     form,
                     region_name,
-                    regions,
+                    effective_regions,
                     label,
                     index,
                     records[index],
@@ -361,6 +406,7 @@ def main() -> None:
                     component_limits,
                     args.include_residue,
                     selected_ranges[label],
+                    selected_titles[label],
                     output_dir / file_name,
                 )
     output_dir.mkdir(parents=True, exist_ok=True)

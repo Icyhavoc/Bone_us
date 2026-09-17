@@ -22,13 +22,26 @@ from typing import Any, Iterable
 
 from PIL import Image, ImageTk
 
-from emd_pipeline import DynamicEnvelopeConfig
+from emd_pipeline import AFTER_SPLIT_BRANCHES, DynamicEnvelopeConfig
 
 
 APP_DIR = Path(__file__).resolve().parent
 EXPERIMENTS_DIR = APP_DIR / "experiments"
 VISUALIZATIONS_DIR = APP_DIR / "visualizations"
+LEGACY_DATA_DIR = APP_DIR / "raw_data"
+AFTER_SPLIT_DATA_DIR = APP_DIR / "after_split_data"
 
+DATASET_LABELS = {
+    "after_split": "新数据集 after_split_data（两分支拼接）",
+    "raw": "旧数据集 raw_data（深度区域）",
+}
+# after_split_data flow: both branches -> resample 512 -> Tukey -> EMD ->
+# concatenate 8+8 dims -> one MLP.  No depth regions are involved.
+AFTER_SPLIT_REGION_LABELS = {
+    "after_split_pair": "两分支拼接 (16 维)",
+    "main": "仅 main 分支 (8 维)",
+    "tail": "仅 tail 分支 (8 维)",
+}
 FORM_LABELS = {
     "all": "全部预处理方式",
     "mean_std": "Mean + Std",
@@ -44,6 +57,8 @@ REGION_LABELS = {
     "dyn_envelope": "Dynamic Envelope",
     "custom": "自定义区域",
 }
+DEFAULT_DATASET = "after_split"
+DEFAULT_FORM = "all"
 def _read_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
@@ -674,39 +689,70 @@ class EMDViewerApp(tk.Tk):
         ttk.Label(header, text="EMD + MLP 实验查看器", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             header,
-            text="选择全部方法查看汇总；选择单一方法查看对应指标、预处理信号和 EMD 分量。",
+            text=(
+                "选择数据集与预处理方式；after_split_data 的两条分支均重采样到 512 点后进入 EMD。"
+                "选择「全部」查看汇总，选择单一组合查看指标、预处理信号和 EMD 分量。"
+            ),
             style="Hint.TLabel",
         ).pack(anchor="w", pady=(3, 0))
 
         controls = ttk.Frame(self, padding=(16, 4, 16, 10))
         controls.pack(fill="x")
-        self.form_var = tk.StringVar(value="all")
-        self.region_var = tk.StringVar(value="all")
+        self.dataset_var = tk.StringVar(value=DEFAULT_DATASET)
+        self.form_var = tk.StringVar(value=DEFAULT_FORM)
+        self.region_var = tk.StringVar(value="")
         self.channel_var = tk.StringVar(value="3")
         self.status_var = tk.StringVar(value="")
-        self._add_combo(controls, "预处理方式", self.form_var, list(FORM_LABELS), 0, "form")
-        self._add_combo(controls, "区域组合", self.region_var, list(REGION_LABELS), 2, "region")
-        self._add_combo(controls, "通道", self.channel_var, ["all", "1", "2", "3"], 4, "channel")
-        ttk.Button(controls, text="刷新", command=self.refresh).grid(row=0, column=6, padx=(18, 4))
+        self._add_combo(controls, "数据集", self.dataset_var, list(DATASET_LABELS), 0, "dataset")
+        self._add_combo(controls, "预处理方式", self.form_var, list(FORM_LABELS), 2, "form")
+        self._add_combo(controls, "分支/区域", self.region_var, list(REGION_LABELS), 4, "region")
+        self._add_combo(controls, "通道", self.channel_var, ["all", "1", "2", "3"], 6, "channel")
+        ttk.Button(controls, text="刷新", command=self.refresh).grid(row=0, column=8, padx=(18, 4))
         ttk.Button(controls, text="打开实验目录", command=self._open_experiment_dir).grid(
-            row=0, column=7, padx=4
+            row=0, column=9, padx=4
         )
         self.train_button = ttk.Button(controls, text="开始训练", command=self.start_training)
-        self.train_button.grid(row=0, column=8, padx=4)
+        self.train_button.grid(row=0, column=10, padx=4)
         self.auto_visualize_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             controls,
             text="训练后生成图像",
             variable=self.auto_visualize_var,
-        ).grid(row=0, column=9, padx=(4, 0))
-        for column in (1, 3, 5):
+        ).grid(row=0, column=11, padx=(4, 0))
+        for column in (1, 3, 5, 7):
             controls.columnconfigure(column, weight=1)
+        self.dataset_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_dataset_change())
         self.form_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
         self.region_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
         self.channel_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
         ttk.Label(controls, textvariable=self.status_var, style="Hint.TLabel").grid(
-            row=1, column=0, columnspan=10, sticky="w", pady=(8, 0)
+            row=1, column=0, columnspan=12, sticky="w", pady=(8, 0)
         )
+        self._on_dataset_change(refresh=False)
+
+    def _region_labels(self) -> dict[str, str]:
+        """Region/branch choices depend on the selected dataset layout."""
+
+        if self.dataset_var.get() == "after_split":
+            return AFTER_SPLIT_REGION_LABELS
+        return REGION_LABELS
+
+    def _data_dir(self) -> Path:
+        if self.dataset_var.get() == "after_split":
+            return AFTER_SPLIT_DATA_DIR
+        return LEGACY_DATA_DIR
+
+    def _on_dataset_change(self, refresh: bool = True) -> None:
+        labels = self._region_labels()
+        self.region_combo.configure(values=list(labels))
+        if self.region_var.get() not in labels:
+            # ``after_split_pair`` is the main two-branch flow for the new
+            # dataset; the legacy dataset starts from the aggregated view.
+            self.region_var.set(
+                "after_split_pair" if self.dataset_var.get() == "after_split" else "all"
+            )
+        if refresh:
+            self.refresh()
 
     def _add_combo(
         self,
@@ -952,7 +998,12 @@ class EMDViewerApp(tk.Tk):
     def _set_controls_during_training(self, active: bool) -> None:
         self.training_active = active
         state = "disabled" if active else "readonly"
-        for combo in (self.form_combo, self.region_combo, self.channel_combo):
+        for combo in (
+            self.dataset_combo,
+            self.form_combo,
+            self.region_combo,
+            self.channel_combo,
+        ):
             combo.configure(state=state)
         self._update_train_button()
 
@@ -962,17 +1013,18 @@ class EMDViewerApp(tk.Tk):
         channel = self.channel_var.get()
         if channel == "all":
             raise ValueError("训练时请选择具体通道 1、2 或 3。")
+        dataset = self.dataset_var.get()
+        data_dir = str(self._data_dir())
+        dyn_a = str(DynamicEnvelopeConfig().branch_length_mm)
+        common = ["--data-dir", data_dir, "--forms", form, "--region-set", region]
         training_command = [
             sys.executable,
             str(APP_DIR / "run_emd_experiments.py"),
-            "--forms",
-            form,
-            "--region-set",
-            region,
+            *common,
             "--channel-mode",
             channel,
             "--dyn-a",
-            str(DynamicEnvelopeConfig().branch_length_mm),
+            dyn_a,
             "--output-dir",
             str(EXPERIMENTS_DIR),
         ]
@@ -983,28 +1035,22 @@ class EMDViewerApp(tk.Tk):
                     [
                         sys.executable,
                         str(APP_DIR / "visualize_preprocessing.py"),
-                        "--forms",
-                        form,
-                        "--region-set",
-                        region,
+                        *common,
                         "--channel-mode",
                         channel,
                         "--dyn-a",
-                        str(DynamicEnvelopeConfig().branch_length_mm),
+                        dyn_a,
                         "--output-dir",
                         str(VISUALIZATIONS_DIR / "preprocessing"),
                     ],
                     [
                         sys.executable,
                         str(APP_DIR / "visualize_emd_components.py"),
-                        "--forms",
-                        form,
-                        "--region-set",
-                        region,
+                        *common,
                         "--channel-mode",
                         channel,
                         "--dyn-a",
-                        str(DynamicEnvelopeConfig().branch_length_mm),
+                        dyn_a,
                         "--output-dir",
                         str(VISUALIZATIONS_DIR / "emd"),
                     ],
@@ -1053,8 +1099,8 @@ class EMDViewerApp(tk.Tk):
         self._set_controls_during_training(True)
         self._append_log("=" * 70)
         self._append_log(
-            f"开始训练：form={self.form_var.get()}, region={self.region_var.get()}, "
-            f"channel={self.channel_var.get()}"
+            f"开始训练：dataset={self.dataset_var.get()}, form={self.form_var.get()}, "
+            f"region={self.region_var.get()}, channel={self.channel_var.get()}"
         )
         if self.auto_visualize_var.get():
             self._append_log("训练完成后将自动生成预处理图、EMD 分量图、训练曲线图和混淆矩阵图。")

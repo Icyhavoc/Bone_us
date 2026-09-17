@@ -1,6 +1,70 @@
 # EMD 特征提取 + MLP 分类
 
-本目录实现当前阶段的完整实验管线：
+本目录支持两套数据集，共用同一套 EMD + MLP 管线和可视化流程。
+
+## 数据集 A：`after_split_data`（新，推荐）
+
+`after_split_data` 就是新版 `dynamic_envelop` 算法的输出：两条 branch 已经切好，
+**不需要再做深度区间切分**。帧处理方式与旧数据集完全一致，四种都支持。
+
+```text
+after_split_data
+  -> 用 absolute_index 还原整段 896 轴
+  -> 帧处理（四种方式之一：mean_std / raw50 / max1 / top3_mean）
+  -> 切出 main [.,.,170] 与 tail [.,.,645]
+  -> 各自线性重采样到 512
+  -> 各自 Tukey 窗
+  -> 各自 EMD 分解与特征提取（各 8 维）
+  -> 拼接为 16 维
+  -> 一个 NumPy MLP 分类头
+```
+
+四种帧处理方式：
+
+| 方式 | 每分支的 EMD 流数 | 说明 |
+|---|---:|---|
+| `mean_std` | 4 | 50 帧逐点求均值与标准差，各通道各一条 |
+| `raw50` | 100 | 保留全部 50 帧，最慢（每样本 200 次 EMD） |
+| `max1` | 2 | 按整段 RMS 选能量最大的 1 帧 |
+| `top3_mean` | 2 | 按整段 RMS 选能量最高的 3 帧求均值 |
+
+关键点：
+
+- **一个样本一个特征向量**：main 与 tail 各 8 维，拼接成 16 维，只训练一个 MLP。对应实验目录 `form_X__regions_after_split_pair__channels_Z`。
+- **帧选择是统一的**：先在还原出的 896 轴上做一次 `max1`/`top3_mean` 选帧，两分支从同一组 processed 流里切出，避免"两分支特征来自不同帧"。选帧区域取两分支覆盖范围（约 `[70,896)`），因为起点之前是结构性零。
+- **每条 branch 单独重采样到 512**：main 170→512（升采样），tail 645→512（降采样）。
+- 无结构性补零：`absolute_index` 可无损还原原始轴（已验证 1312 万元素零偏差），两分支重叠区数值完全一致；`tail` 中约 93% 的 0 是低幅值信号被量化到零。
+
+每个 split（`train` / `validation` / `test`）包含：
+
+- `arrays/main_signal.npy`：`[N, 50, 2, 170]`；`arrays/tail_signal.npy`：`[N, 50, 2, 645]`。
+- `arrays/main_absolute_index.npy` / `tail_absolute_index.npy`：两分支在原始 896 点轴上的绝对索引。
+- `y.npy`、`indices.npy`、`samples.json`、`samples.csv`：标签与点位元数据。
+
+运行示例：
+
+```powershell
+# 默认：四种帧处理方式 × 两分支拼接（16 维）
+python run_emd_experiments.py --data-dir after_split_data --channel-mode 3
+
+# 只跑某一种帧处理方式
+python run_emd_experiments.py --data-dir after_split_data --forms max1 --channel-mode 3
+python run_emd_experiments.py --data-dir after_split_data --forms mean_std --channel-mode 1
+
+# 单独跑某一分支做对照（8 维）
+python run_emd_experiments.py --data-dir after_split_data --branch main --channel-mode 3
+python run_emd_experiments.py --data-dir after_split_data --branch tail --channel-mode 3
+
+# 可视化（after_split_pair 会画双面板）
+python visualize_preprocessing.py --data-dir after_split_data --channel-mode 3
+python visualize_emd_components.py --data-dir after_split_data --channel-mode 3
+```
+
+`--dataset` 默认 `auto`，依据 `data_dir` 下是否存在 `arrays/main_signal.npy` 自动判定。
+`after_split_pair` / `main` / `tail` 都作为"区域名"处理，因此实验目录命名、GUI 过滤和
+训练曲线/混淆矩阵脚本无需特殊分支。
+
+## 数据集 B：`raw_data`（原有）
 
 ```text
 raw_data
@@ -12,21 +76,22 @@ raw_data
   -> NumPy MLP 分类头
 ```
 
-代码文件与 `raw_data` 同级：
+代码文件与两个数据集目录同级：
 
 - `emd_pipeline.py`：数据加载、帧处理、深度映射、重采样、EMD、特征和 MLP 实现。
-- `run_emd_experiments.py`：命令行入口，可运行单组或全部 16 组标准实验。
+- `run_emd_experiments.py`：命令行入口。
+- `gui_app.py`：Tkinter 查看器，可在"数据集"下拉框切换 `after_split_data` 与 `raw_data`。
 - `README.md`：使用说明。
 
-## 数据格式
+## 数据格式（`raw_data`）
 
-默认从 `raw_data` 读取数据。每个 `train`、`val`、`test` 子目录包含：
+每个 `train`、`val`、`test` 子目录包含：
 
 - `X.npy`：`[N, 50, 2, 896]`，依次为样本、帧、物理通道、采样点。
 - `y.npy`：二分类标签。
 - `samples.json`：样本编号、深度值和标签信息。
 
-当前数据集的标签保持不变：`label=0` 对应 `depth < 1 mm`，`label=1` 对应 `depth >= 1 mm`。
+两套数据集的标签约定一致：`label=0` 对应薄（`< 1 mm`），`label=1` 对应厚（`>= 1 mm`）。
 
 ## 四种帧处理方式
 

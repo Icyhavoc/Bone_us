@@ -46,6 +46,12 @@ FORM_ALIASES = {
 }
 FORM_ORDER = ("mean_std", "raw50", "max1", "top3_mean")
 
+# The new ``after_split_data`` dataset uses ``validation`` while the legacy
+# ``raw_data`` dataset uses ``val``.  Both names are accepted everywhere.
+_AFTER_SPLIT_DIR_NAMES = {"train": "train", "val": "validation", "test": "test"}
+_LEGACY_DIR_NAMES = {"train": "train", "val": "val", "test": "test"}
+AFTER_SPLIT_BRANCHES = ("main", "tail")
+
 
 def canonical_form(name: str) -> str:
     """Return the canonical name for one of the four frame forms."""
@@ -842,6 +848,398 @@ def load_split(data_dir: Path | str, split: str) -> tuple[np.ndarray, np.ndarray
     if len(samples) != x.shape[0]:
         raise ValueError(f"{samples_path} contains {len(samples)} records, expected {x.shape[0]}")
     return x, y, samples
+
+
+@dataclass(frozen=True)
+class DatasetSpec:
+    """Which dataset layout a run reads.
+
+    ``legacy``
+        ``raw_data``: full ``[N, 50, 2, 896]`` frames that are cut into depth
+        branches and then resampled.
+    ``after_split``
+        ``after_split_data``: pre-cut ``main``/``tail`` branches that are
+        resampled instead of depth-sliced; depth regions do not apply.
+    """
+
+    kind: str = "legacy"
+    root: Path = Path("raw_data")
+    branch: str = "main"
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"legacy", "after_split"}:
+            raise ValueError("kind must be 'legacy' or 'after_split'")
+        if self.kind == "after_split" and self.branch not in AFTER_SPLIT_BRANCHES:
+            raise ValueError(f"branch must be one of {AFTER_SPLIT_BRANCHES}")
+
+
+def detect_dataset_kind(data_dir: Path | str) -> str:
+    """Return ``after_split`` when ``data_dir`` holds branch arrays, else ``legacy``."""
+
+    root = Path(data_dir)
+    if not root.exists():
+        return "legacy"
+    for directory in root.iterdir():
+        if directory.is_dir() and (directory / "arrays" / "main_signal.npy").exists():
+            return "after_split"
+    return "legacy"
+
+
+def load_dataset_split(
+    spec: DatasetSpec, split: str
+) -> tuple[np.ndarray, np.ndarray, list[dict[str, Any]]]:
+    """Load one split for whichever dataset layout ``spec`` describes."""
+
+    if spec.kind == "after_split":
+        return load_after_split_split(spec.root, split, spec.branch)
+    return load_split(spec.root, split)
+
+
+def load_after_split_split(
+    data_dir: Path | str, split: str, branch: str
+) -> tuple[np.ndarray, np.ndarray, list[dict[str, Any]]]:
+    """Load one branch of the ``after_split_data`` dataset.
+
+    The dataset stores two independent, fixed-length branches per point:
+
+    * ``main_signal`` with shape ``[N, 50, 2, 170]``;
+    * ``tail_signal`` with shape ``[N, 50, 2, 645]``.
+
+    Both are raw (already normalized to ``[-1, 1]``) slices of the same
+    896-sample axis, so no depth mapping is required for either branch.
+    """
+
+    if branch not in {"main", "tail"}:
+        raise ValueError("branch must be 'main' or 'tail'")
+    split_dir = Path(data_dir) / (_AFTER_SPLIT_DIR_NAMES.get(split, split))
+    signal_path = split_dir / "arrays" / f"{branch}_signal.npy"
+    y_path = split_dir / "y.npy"
+    if not signal_path.exists() or not y_path.exists():
+        raise FileNotFoundError(f"Missing {branch}_signal.npy or y.npy under {split_dir}")
+    x = np.load(signal_path).astype(np.float32)
+    y = np.load(y_path).astype(np.int64)
+    if x.ndim != 4 or x.shape[1:3] != (50, 2):
+        raise ValueError(f"Expected {branch} signal [N,50,2,L], got {x.shape}")
+    if y.shape != (x.shape[0],):
+        raise ValueError(f"Expected y shape {(x.shape[0],)}, got {y.shape}")
+    samples_path = split_dir / "samples.json"
+    if samples_path.exists():
+        samples = json.loads(samples_path.read_text(encoding="utf-8"))
+    else:
+        samples = [{} for _ in range(x.shape[0])]
+    absolute_index_path = split_dir / "arrays" / f"{branch}_absolute_index.npy"
+    absolute_index = (
+        np.load(absolute_index_path) if absolute_index_path.exists() else None
+    )
+    for index, record in enumerate(samples):
+        record.setdefault("sample_id", record.get("point_id"))
+        record.setdefault("depth_value", record.get("thickness"))
+        record["branch"] = branch
+        if absolute_index is not None:
+            record["absolute_index_range"] = [
+                int(np.min(absolute_index[index])),
+                int(np.max(absolute_index[index])) + 1,
+            ]
+    return x, y, samples
+
+
+def _select_branch_indices(absolute_index: np.ndarray, channel_mode: int) -> np.ndarray:
+    """Pick the absolute-index rows matching the selected physical channels.
+
+    Works for a single sample ``[channels, length]`` and for a whole split
+    ``[samples, channels, length]``.
+    """
+
+    if absolute_index.ndim < 2 or absolute_index.shape[-2] != 2:
+        raise ValueError(
+            f"Expected absolute index [..., 2, length], got {absolute_index.shape}"
+        )
+    if channel_mode == 1:
+        return absolute_index[..., 0:1, :]
+    if channel_mode == 2:
+        return absolute_index[..., 1:2, :]
+    if channel_mode == 3:
+        return absolute_index
+    raise ValueError("channel_mode must be 1, 2, or 3")
+
+
+def _gather_branch(values: np.ndarray, index: np.ndarray) -> np.ndarray:
+    """Gather ``[streams, channels, L_full]`` at ``index [channels, L_branch]``."""
+
+    if values.ndim != 3:
+        raise ValueError(f"Expected [streams, channels, samples], got {values.shape}")
+    return np.take_along_axis(values, index[None, :, :], axis=2)
+
+
+@dataclass
+class AfterSplitPair:
+    """Both pre-cut branches of one split plus the reconstructed full axis."""
+
+    full: np.ndarray
+    main: np.ndarray
+    tail: np.ndarray
+    main_index: np.ndarray
+    tail_index: np.ndarray
+    y: np.ndarray
+    samples: list[dict[str, Any]]
+
+    @property
+    def count(self) -> int:
+        return int(self.full.shape[0])
+
+    def absolute_range(self, channel_mode: int) -> tuple[int, int]:
+        """Smallest/largest covered absolute sample, for the frame-scoring region."""
+
+        rows = [row for row in (self.main_index, self.tail_index)]
+        selected = [_select_branch_indices(row, channel_mode) for row in rows]
+        return (
+            int(min(int(np.min(item)) for item in selected)),
+            int(max(int(np.max(item)) for item in selected)) + 1,
+        )
+
+
+def load_after_split_pair(
+    data_dir: Path | str, split: str, absolute_length: int = 896
+) -> AfterSplitPair:
+    """Load both branches and rebuild the shared original axis.
+
+    ``main_absolute_index`` and ``tail_absolute_index`` record where each
+    branch sits on the original axis, so re-inserting both branches recovers
+    the original ``[N, 50, 2, 896]`` array.  The two branches overlap by a
+    median of 10-16 samples and were verified to be numerically identical
+    there, so the reconstruction is lossless inside ``[70, 896)``.  Samples
+    before the earliest branch start stay zero; frame scoring must therefore
+    use the covered range rather than the whole axis.
+    """
+
+    main, y, samples = load_after_split_split(data_dir, split, "main")
+    tail, _, _ = load_after_split_split(data_dir, split, "tail")
+    split_dir = Path(data_dir) / (_AFTER_SPLIT_DIR_NAMES.get(split, split))
+    main_index = np.load(split_dir / "arrays" / "main_absolute_index.npy").astype(np.int64)
+    tail_index = np.load(split_dir / "arrays" / "tail_absolute_index.npy").astype(np.int64)
+    if main.shape[0] != tail.shape[0] or main_index.shape[0] != tail_index.shape[0]:
+        raise ValueError("main and tail branches must share the same sample axis")
+    full = np.zeros(
+        (main.shape[0], main.shape[1], main.shape[2], absolute_length), dtype=np.float32
+    )
+    for index in range(main.shape[0]):
+        for channel in range(main.shape[2]):
+            # Fancy indexing moves the leading frame axis last, so transpose
+            # the frame block before assigning into the absolute positions.
+            full[index, :, channel, tail_index[index, channel]] = tail[index, :, channel].T
+            full[index, :, channel, main_index[index, channel]] = main[index, :, channel].T
+    return AfterSplitPair(
+        full=full,
+        main=main,
+        tail=tail,
+        main_index=main_index,
+        tail_index=tail_index,
+        y=y,
+        samples=samples,
+    )
+
+
+def load_after_split_pair_split(
+    data_dir: Path | str, split: str, absolute_length: int = 896
+) -> tuple[np.ndarray, np.ndarray, list[dict[str, Any]]]:
+    """Convenience wrapper returning ``(full_axis, y, samples)``."""
+
+    pair = load_after_split_pair(data_dir, split, absolute_length=absolute_length)
+    return pair.full, pair.y, pair.samples
+
+
+def _resample_branch(x: np.ndarray, target_length: int) -> np.ndarray:
+    """Linearly resample a branch array ``[N, 50, 2, L]`` along its last axis."""
+
+    if x.shape[-1] == target_length:
+        return np.asarray(x, dtype=np.float32)
+    return resample_signals(
+        x.reshape(-1, x.shape[-1]).astype(np.float32), target_length
+    ).reshape(*x.shape[:-1], target_length)
+
+
+def after_split_pair_feature_vector(
+    full_sample: np.ndarray,
+    main_index: np.ndarray,
+    tail_index: np.ndarray,
+    channel_mode: int,
+    target_length: int,
+    emd_config: EMDConfig,
+    tukey_alpha: float = 0.3,
+    form: str = "top3_mean",
+    score_region: RegionSpec | None = None,
+    mapper: DepthMapper | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Feature vector for one point using **both** pre-cut branches.
+
+    Frame processing happens **once** on the reconstructed full axis, so both
+    branches share the same processed streams (and the same selected frames
+    for ``max1`` / ``top3_mean``).  Each branch is then resampled to
+    ``target_length`` independently, windowed, decomposed, and the per-branch
+    feature vectors are concatenated.
+    """
+
+    if full_sample.ndim != 3:
+        raise ValueError(f"Expected [frames, channels, samples], got {full_sample.shape}")
+    if score_region is None:
+        score_region = RegionSpec(0.0, 5.0, "selection_full")
+    if mapper is None:
+        mapper = DepthMapper(max_depth_mm=5.0, signal_length=int(full_sample.shape[-1]))
+
+    selected_channels = select_channels(full_sample, channel_mode)
+    processed, selected_frames = process_frames(
+        selected_channels, form, mapper=mapper, score_region=score_region
+    )
+    branch_vectors: list[np.ndarray] = []
+    branch_info: list[dict[str, Any]] = []
+    for branch, absolute_index in (("main", main_index), ("tail", tail_index)):
+        branch_index = _select_branch_indices(absolute_index, channel_mode)
+        branch_signals = _gather_branch(processed, branch_index)
+        native_length = int(branch_signals.shape[-1])
+        resampled = _resample_branch(branch_signals, target_length)
+        windowed = resampled * tukey_window(target_length, tukey_alpha)[None, None, :]
+        vector = emd_feature_vector(windowed.reshape(-1, target_length), emd_config)
+        branch_vectors.append(vector)
+        branch_info.append(
+            {
+                "name": branch,
+                "native_length": native_length,
+                "target_length": int(target_length),
+                "resampled": native_length != int(target_length),
+                "absolute_start": int(np.min(branch_index)),
+                "absolute_end_exclusive": int(np.max(branch_index)) + 1,
+                "input_streams": int(branch_signals.shape[0] * branch_signals.shape[1]),
+                "feature_length": int(vector.size),
+            }
+        )
+    feature = np.concatenate(branch_vectors).astype(np.float32)
+    info = {
+        "form": canonical_form(form),
+        "channel_mode": channel_mode,
+        "branches": branch_info,
+        "selected_frames": None if selected_frames is None else selected_frames.tolist(),
+        "score_region": [score_region.start_mm, score_region.end_mm],
+        "feature_length": int(feature.size),
+    }
+    return feature, info
+
+
+def build_after_split_pair_feature_matrix(
+    pair: AfterSplitPair,
+    channel_mode: int,
+    target_length: int,
+    emd_config: EMDConfig,
+    tukey_alpha: float = 0.3,
+    form: str = "top3_mean",
+    score_region: RegionSpec | None = None,
+    mapper: DepthMapper | None = None,
+    limit: int | None = None,
+) -> tuple[np.ndarray, list[dict[str, Any]]]:
+    """Build concatenated two-branch features for a whole split."""
+
+    count = pair.count if limit is None else min(limit, pair.count)
+    vectors: list[np.ndarray] = []
+    infos: list[dict[str, Any]] = []
+    for index in range(count):
+        vector, info = after_split_pair_feature_vector(
+            pair.full[index],
+            pair.main_index[index],
+            pair.tail_index[index],
+            channel_mode=channel_mode,
+            target_length=target_length,
+            emd_config=emd_config,
+            tukey_alpha=tukey_alpha,
+            form=form,
+            score_region=score_region,
+            mapper=mapper,
+        )
+        vectors.append(vector)
+        infos.append(info)
+    matrix = np.stack(vectors, axis=0).astype(np.float32)
+    return matrix, infos
+
+
+def build_after_split_feature_matrix(
+    x: np.ndarray,
+    branch: str,
+    channel_mode: int,
+    target_length: int,
+    emd_config: EMDConfig,
+    tukey_alpha: float = 0.3,
+    form: str = "raw50",
+    score_region: RegionSpec = RegionSpec(0.0, 5.0, "selection_full"),
+    mapper: DepthMapper | None = None,
+    limit: int | None = None,
+) -> tuple[np.ndarray, list[dict[str, Any]]]:
+    """Build EMD features for every sample of one ``after_split_data`` branch.
+
+    Frame processing and channel selection are reused unchanged.  The branch
+    is then linearly resampled from its native length (170 or 645) to
+    ``target_length``, windowed, and decomposed exactly like the legacy
+    depth-region branches.
+    """
+
+    if limit is not None:
+        x = x[:limit]
+    vectors: list[np.ndarray] = []
+    infos: list[dict[str, Any]] = []
+    for index, sample in enumerate(x):
+        vector, info = after_split_feature_vector(
+            sample,
+            branch=branch,
+            channel_mode=channel_mode,
+            target_length=target_length,
+            emd_config=emd_config,
+            tukey_alpha=tukey_alpha,
+            form=form,
+            score_region=score_region,
+            mapper=mapper,
+        )
+        vectors.append(vector)
+        infos.append(info)
+    matrix = np.stack(vectors, axis=0).astype(np.float32)
+    return matrix, infos
+
+
+def after_split_feature_vector(
+    sample: np.ndarray,
+    branch: str,
+    channel_mode: int,
+    target_length: int,
+    emd_config: EMDConfig,
+    tukey_alpha: float = 0.3,
+    form: str = "raw50",
+    score_region: RegionSpec = RegionSpec(0.0, 5.0, "selection_full"),
+    mapper: DepthMapper | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Frame-process, resample one branch to ``target_length``, then run EMD."""
+
+    if sample.ndim != 3 or sample.shape[0] < 1 or sample.shape[1] != 2:
+        raise ValueError(f"Expected sample [50, 2, L], got {sample.shape}")
+    mapper = mapper if mapper is not None else DepthMapper(
+        max_depth_mm=5.0, signal_length=int(sample.shape[-1])
+    )
+    selected_channels = select_channels(sample, channel_mode)
+    processed, selected_frames = process_frames(
+        selected_channels, form, mapper=mapper, score_region=score_region
+    )
+    native_length = int(processed.shape[-1])
+    resampled = _resample_branch(processed[None, ...], target_length)[0]
+    windowed = resampled * tukey_window(target_length, tukey_alpha)[None, None, :]
+    streams = windowed.reshape(-1, target_length)
+    feature = emd_feature_vector(streams, emd_config)
+    info = {
+        "form": canonical_form(form),
+        "channel_mode": channel_mode,
+        "branch": branch,
+        "native_length": native_length,
+        "target_length": int(target_length),
+        "resampled": native_length != int(target_length),
+        "input_streams": int(streams.shape[0]),
+        "feature_length": int(feature.size),
+        "selected_frames": None if selected_frames is None else selected_frames.tolist(),
+    }
+    return feature.astype(np.float32), info
 
 
 def build_feature_matrix(

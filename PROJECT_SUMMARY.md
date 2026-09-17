@@ -2,21 +2,60 @@
 
 本文档用于发布到 Git 时说明当前版本已经完成的工作、实验约定、运行方式和已知注意事项。
 
+## 0. 数据集版本
+
+当前支持两套数据集，通过 `--data-dir` 选择，`--dataset auto`（默认）会自动判定：
+
+| 数据集 | 结构 | branch 来源 | 是否需要深度映射 |
+|---|---|---|---|
+| `after_split_data`（新） | `arrays/main_signal.npy [N,50,2,170]`、`arrays/tail_signal.npy [N,50,2,645]` | 已由新版 dynamic_envelop 算法预切 | 不需要切分，仅用于换算深度轴 |
+| `raw_data`（旧） | `X.npy [N,50,2,896]` | 运行期按深度区间切分 | 需要 |
+
+`after_split_data` 就是新版 `dynamic_envelop` 的输出，帧处理方式与旧数据集一致，四种都支持：
+
+```text
+main [N,50,2,170] ─┐
+                   ├─ 用 absolute_index 还原整段 896 轴
+tail [N,50,2,645] ─┘        │
+                            ├─ 帧处理（mean_std / raw50 / max1 / top3_mean）
+                            ├─ 切出 main / tail
+                            ├─ 各自重采样到 512 → 各自 Tukey 窗（α=0.3）
+                            ├─ 各自 EMD（5 IMF + residue）→ 各 8 维特征
+                            └─ 拼接 8+8 = 16 维 → 一个 MLP
+```
+
+各方式的每分支 EMD 流数：`mean_std` 4、`raw50` 100、`max1` 2、`top3_mean` 2
+（`stream_aggregation=pooled` 下均汇聚为 8 维，拼接后 16 维）。
+
+实验目录命名为 `form_X__regions_after_split_pair__channels_Z`（16 维，主流程）；
+`regions_main` / `regions_tail` 保留为单分支对照（各 8 维，在还原出的整段上统一选帧后切出）。
+三种目标都作为"区域名"处理，与旧数据的区域命名机制完全兼容。
+
+### 全轴还原与统一选帧
+
+`main_absolute_index` / `tail_absolute_index` 记录了两分支在原始 896 点轴上的位置，把两者
+重新插入即可无损还原原始轴（已验证 1312 万个元素零偏差；两分支重叠区 median 10–16 点，
+数值完全一致）。帧处理在还原轴上只做一次，因此：
+
+- `top3_mean` / `max1` 两分支一定来自同一组选中帧；
+- 选帧区域取两分支覆盖范围（约 `[70, 896)`），而不是整段 896 —— 起点之前是结构性零，不参与打分；
+- 每个样本的 `selected_frames` 会写入 `feature_info.json`。
+
 ## 1. 项目目标
 
 本项目针对 BMU 骨分层数据，完成以下实验流程：
 
 ```text
-raw_data
+after_split_data / raw_data
   -> 帧预处理
-  -> 深度区域 branch 划分
+  -> branch（预切的两段 / 深度区域）
   -> branch 重采样到 512 点
   -> EMD 分解
   -> EMD 特征提取
   -> NumPy MLP 二分类
 ```
 
-当前代码位于 `经验小波分解/`，与 `raw_data/` 并列。
+当前代码位于 `经验小波分解/`，与数据目录并列。
 
 ## 2. 数据集约定
 

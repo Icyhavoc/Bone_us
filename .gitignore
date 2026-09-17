@@ -4,6 +4,7 @@ __pycache__/
 
 # Raw/private data; keep the expected directory structure locally
 raw_data/
+after_split_data/
 
 # Reproducible generated experiment and visualization outputs
 experiments/
