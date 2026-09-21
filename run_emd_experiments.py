@@ -76,7 +76,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3], default=3)
     parser.add_argument("--target-length", type=int, default=512)
     parser.add_argument("--tukey-alpha", type=float, default=0.3)
-    # dyn_envelope mirrors reference_code/pipeline.py; see dyn_cli for the flags.
+    # dyn_envelope mirrors bin/reference_code/pipeline.py; see dyn_cli for the flags.
     add_dyn_arguments(parser)
     parser.add_argument("--max-depth-mm", type=float, default=5.0)
     parser.add_argument("--signal-length", type=int, default=896)

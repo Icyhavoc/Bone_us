@@ -132,7 +132,7 @@ class DepthMapper:
 class DynamicEnvelopeConfig:
     """Settings for the sample-wise envelope-defined two-branch split.
 
-    The defaults reproduce ``reference_code/pipeline.py``
+    The defaults reproduce ``bin/reference_code/pipeline.py``
     (:func:`segment`) exactly, including its index constants.  The detector is
     applied **per channel**: every channel gets its own reference crossing,
     local peak, merged leading packet and therefore its own main/tail
@@ -526,7 +526,7 @@ def prepare_interval_signals(
 
 
 # Manual per-channel corrections ported verbatim from
-# ``reference_code/pipeline.py``.  Keys are ``(point_id, channel_index)`` with
+# ``bin/reference_code/pipeline.py``.  Keys are ``(point_id, channel_index)`` with
 # 0-based **physical** channel indices: the reference asserted a fixed ``(2,896)``
 # input, so its ``for c in range(2)`` index was always the physical channel.
 # Callers that hand the locator an already-selected block must pass
@@ -659,7 +659,7 @@ def locate_dynamic_span(
     point_id: str | None = None,
     physical_channels: Sequence[int] | None = None,
 ) -> dict[str, Any]:
-    """Port of ``reference_code/pipeline.py::segment`` (per-channel locator).
+    """Port of ``bin/reference_code/pipeline.py::segment`` (per-channel locator).
 
     ``smoothed`` is the ``[channels, samples]`` smoothed Hilbert envelope.  The
     rules are reproduced exactly:
@@ -973,6 +973,8 @@ def prepare_dynamic_envelope_branches(
         },
     ]
     info: dict[str, Any] = {
+        # Provenance label kept verbatim: it identifies the ported algorithm in
+        # already written ``feature_info.json`` files, it is not a path.
         "algorithm": "reference_code.pipeline.segment",
         "point_id": point_id,
         "channel_count": channel_count,
@@ -1309,7 +1311,7 @@ def sample_feature_vector(
 # sides of the 127.5 midpoint.  Keeping that +-0.0039 jitter injects spurious
 # quantization noise, which is enough to move the ``dyn_envelope`` threshold
 # crossing by tens of samples (measured: 267 instead of 324 on ``N35_P2_01``).
-# ``after_split_data/`` was produced from the collapsed traces, so the loader
+# ``bin/after_split_data/`` was produced from the collapsed traces, so the loader
 # reproduces the collapse to keep ``--data-dir raw_data`` bit-exact.
 ADC_DC_MAGNITUDE = 0.5 / 127.5
 ADC_DC_ATOL = 1e-6

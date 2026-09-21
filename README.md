@@ -16,7 +16,16 @@ raw_data
 
 - `emd_pipeline.py`：数据加载、帧处理、深度映射、重采样、EMD、特征和 MLP 实现。
 - `run_emd_experiments.py`：命令行入口，可运行单组或全部 16 组标准实验。
+- `dyn_cli.py`：`--dyn-*` 参数的统一定义，供三个入口脚本和 GUI 共用。
+- `gui_app.py`：Tkinter 图形界面。
+- `visualize_*.py`：五张图的可视化脚本（预处理、EMD 分量、训练曲线、混淆矩阵、错分厚度分布）。
+- `verify_*.py`：三份可重跑的回归自检。
+- `bin/`：**归档区**（一次性脚本、历史快照、参考实现与参考数据），清单见 `bin/README.md`。
 - `README.md`：使用说明。
+
+> 根目录只保留仍在用的脚本：每次整理时把“已经用不到”的东西移入 `bin/`，
+> 而不是删除。`bin/` 里的内容被 `.gitignore` 忽略，但两个脚本文件（`bin/_recon.ps1`、
+> `bin/visualize_dyn_envelope_cases.py`）仍在版本控制中。
 
 ## 数据格式
 
@@ -41,7 +50,7 @@ Max 1 Frame 和 Top-3 Mean 默认在完整 0–5 mm 区间上选择帧，然后�
 
 ### 直流电平归零
 
-源 ADC 用 127 和 128 两个码值表示同一个零电平，归一化后分别是 $\pm 0.5/127.5 \approx \pm 0.003922$。`raw_data/` 保留了这一抖动，而 `after_split_data/` 来自抖动已抹平的信号；该抖动足以让 `dyn_envelope` 的过阈点偏移几十个采样点。`emd_pipeline.load_split()` 因此统一调用 `replace_adc_dc_level()` 把这对码值塌陷到 `0.0`，训练与四个可视化脚本共用同一入口；对已归零的 `after_split_data/` 该操作幂等。实验 `config.json` 用 `adc_dc_replacement` 记录该常数。
+源 ADC 用 127 和 128 两个码值表示同一个零电平，归一化后分别是 $\pm 0.5/127.5 \approx \pm 0.003922$。`raw_data/` 保留了这一抖动，而参考数据集（现位于 `bin/after_split_data/`）来自抖动已抹平的信号；该抖动足以让 `dyn_envelope` 的过阈点偏移几十个采样点。`emd_pipeline.load_split()` 因此统一调用 `replace_adc_dc_level()` 把这对码值塌陷到 `0.0`，训练与四个可视化脚本共用同一入口；对已归零的 `bin/after_split_data/` 该操作幂等。实验 `config.json` 用 `adc_dc_replacement` 记录该常数。
 
 ## 深度 branch
 
@@ -76,7 +85,7 @@ index = round(depth_mm / 5.0 * 896)
 
 ### 动态包络 branch
 
-`dyn_envelope` 不改变原始信号，只用包络分析结果确定 branch 边界。它是 `reference_code/pipeline.py` 中 `segment()` 的完整移植，与 `after_split_data/` 的产物逐位一致。
+`dyn_envelope` 不改变原始信号，只用包络分析结果确定 branch 边界。它是 `bin/reference_code/pipeline.py` 中 `segment()` 的完整移植，与 `bin/after_split_data/` 的产物逐位一致。
 
 定位信号与帧处理方式无关：每个通道按 `max(abs(x))` 选幅值最大的 `locator_top_k=3` 帧（并列取较早帧）求平均，再取 Hilbert 包络。检测流程为：包络前 71 点置零后用 `mode='nearest'` 的长度 5 移动平均平滑；在第 71 点起找首个 `> 0.015` 的参考点；在 `[参考点-50, 参考点+150)` 内取局部峰；以 `0.05 × 峰值` 为比例阈值提取连续段；从含该峰的主波包向前合并间隔 ≤ 8、宽度 ≥ 8、面积 ≥ 主波包 5%、累计提前 ≤ 96 的段；阈值点 `t` 取合并后最早越阈点；主窗为 `[max(t-20,70), +170)`，尾部为固定 `[251, 896)`。
 
@@ -340,24 +349,26 @@ python gui_app.py
 - 选择单一预处理方式时，显示对应的预处理信号图和 EMD 分量图。
 - “Training Curve” 页位于预处理可视化和 EMD 分解之间，显示当前筛选实验的 validation loss/test loss-epoch 曲线，并标出 Best Epoch。
 - “Confusion Matrix” 页显示当前顶部筛选对应的 test 集混淆矩阵，并可在右侧选择栏中独立选择其他已生成实验进行对比。
+- “错分厚度分布” 页显示当前顶部筛选对应的“骨头厚度—错分数”柱状分布（浅色宽柱为该厚度桶的全部样本，深色窄柱为 train/val/test 各自的错分样本，1 mm 处有 label 分界参考线），并可在右侧选择栏中独立选择其他已生成实验进行对比。
 - 预处理页不再提供全局类别下拉框；四个等宽列分别显示当前组合 label=0/1 和目标组合 label=0/1。顶部筛选条件只控制当前组合，目标组合选择栏可独立选择所有已生成的 form/region/channel 结果。四列共用横向滑动条，按图片序号同步切换，多 branch 图像可横向查看。
 - 支持区域组合和通道模式筛选；EMD 页默认同时显示两个类别。
 - 点击“开始训练”后，会按当前预处理方式、区域组合和通道模式调用现有训练脚本；训练在后台执行，日志会显示在 Summary 页底部。
-- 默认训练完成后自动生成对应的预处理图、EMD 分量图、训练曲线图和 test 集混淆矩阵图；可以取消“训练后生成图像”。
+- 默认训练完成后自动生成对应的预处理图、EMD 分量图、训练曲线图、test 集混淆矩阵图和错分厚度分布图；可以取消“训练后生成图像”。
 - 旧版不含通道号的图片文件也可以读取；新生成的图片文件名会包含通道模式，避免不同通道结果互相覆盖。
 
 训练时需要选择具体通道 1、2 或 3，不能选择“全部通道”。预处理方式和区域组合可以选择“全部”，这会按现有命令行脚本运行多组实验。
 
-如果某个筛选组合尚未运行实验或生成图像，界面会提示缺少结果；需要先使用 `run_emd_experiments.py`、`visualize_preprocessing.py`、`visualize_emd_components.py`、`visualize_training_curves.py` 或 `visualize_confusion_matrix.py` 生成对应文件。
+如果某个筛选组合尚未运行实验或生成图像，界面会提示缺少结果；需要先使用 `run_emd_experiments.py`、`visualize_preprocessing.py`、`visualize_emd_components.py`、`visualize_training_curves.py`、`visualize_confusion_matrix.py` 或 `visualize_error_by_thickness.py` 生成对应文件。
 
 ## 数据可视化
 
-新增四个可视化脚本：
+新增五个可视化脚本：
 
 - `visualize_preprocessing.py`：对四种帧处理方式的输出进行可视化，每个类别随机选择 10 个样本。
 - `visualize_emd_components.py`：对 EMD 得到的 IMF 和 Residue 进行可视化，每个类别随机选择 1 个样本。
 - `visualize_training_curves.py`：读取 `history.json`，绘制 validation loss 和 test loss 随 epoch 的变化；test loss 不参与 early stopping。
 - `visualize_confusion_matrix.py`：读取 `metrics.json`，绘制 test 集混淆矩阵。
+- `visualize_error_by_thickness.py`：读取 `samples_{split}.json` 与 `probabilities_{split}.npy`/`labels_{split}.npy`，按骨头厚度分桶统计 train/val/test 的错分样本个数并绘制堆叠柱状图；默认桶宽 0.05 mm、判定阈值 0.5。
 
 两个脚本默认都使用：
 

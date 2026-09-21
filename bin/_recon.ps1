@@ -1,3 +1,10 @@
+# ---------------------------------------------------------------------------
+# ARCHIVED (moved to bin/ on 2026-09-21).
+# One-off reconnaissance script used during the 2026-09 Miniconda migration:
+# it only reports directory sizes, free disk space, .condarc and pip.ini
+# locations. It has no relation to the EMD/MLP pipeline, so it is kept here
+# as a historical record instead of the project root.
+# ---------------------------------------------------------------------------
 # Recon for environment migration
 $ErrorActionPreference = 'SilentlyContinue'
 

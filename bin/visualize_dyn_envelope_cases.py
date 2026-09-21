@@ -19,13 +19,22 @@ only the sub-threshold channel selected -- which is what ``--channel-mode 1`` /
 
 Usage::
 
-    python visualize_dyn_envelope_cases.py
+    python bin/visualize_dyn_envelope_cases.py     # run from the project root
+
+This script was archived into ``bin/`` (it is not part of the GUI / documented
+pipeline), so it bootstraps ``sys.path`` to import the project's ``emd_pipeline``
+and writes to ``visualizations/`` relative to the current working directory.
 """
 
 from __future__ import annotations
 
+import sys
 from dataclasses import replace
 from pathlib import Path
+
+# Archived under ``bin/``: put the project root (parent of this file's folder)
+# back on ``sys.path`` so ``emd_pipeline`` still resolves.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import matplotlib
 

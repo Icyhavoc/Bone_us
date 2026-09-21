@@ -3,7 +3,7 @@
 更新时间：2026-09-17
 
 > **当前状态**：本文件中提到的全部旧实验已归档到
-> `backup/5_experiments_2026-09-17/`（27 个实验目录 + 1 个 `summary.json`）。
+> `bin/backup/5_experiments_2026-09-17/`（27 个实验目录 + 1 个 `summary.json`）。
 > 归档保留的原因是下面列出的两类问题，**旧指标不要再引用**。
 
 ## 现有目录（全部由当前代码重新生成）
@@ -37,7 +37,7 @@ D:\Miniconda3\python.exe run_emd_experiments.py --forms all --region-set all --c
 | `form_top3_mean__regions_full__channels_1` | `raw_data` | ⚠️ 2026-08-12 生成，**早于 ADC 直流归零** |
 | `form_top3_mean__regions_bone_plus_post__channels_1` | `raw_data` | ⚠️ 2026-08-12 生成，**早于 ADC 直流归零** |
 | `form_top3_mean__regions_bone__channels_1` | `raw_data` | ⚠️ 无 `metrics.json`，是一次未完成的运行 |
-| `**/regions_after_split_pair__*`、`**/regions_main__*`、`**/regions_tail__*` | `after_split_data` | ❌ **不可复现的历史产物**（见下） |
+| `**/regions_after_split_pair__*`、`**/regions_main__*`、`**/regions_tail__*` | `bin/after_split_data` | ❌ **不可复现的历史产物**（见下） |
 | 全部 `*__channels_3` | `raw_data` | ❌ 改写前生成，对应 `pooled` 行为，当前默认已改为 `per_channel` |
 
 
@@ -61,7 +61,7 @@ D:\Miniconda3\python.exe run_emd_experiments.py --forms all --region-set all --c
 选帧结果未改变，因此差异来自特征数值本身，而不是帧选择跳变。
 影响量级为 $10^{-2}$，对指标的影响需重跑才能确定。
 
-## 为什么 `after_split_data` 的实验不可复现
+## 为什么基于 `bin/after_split_data` 的实验不可复现
 
 这批目录的 `config.json` 里有当前代码已不存在的字段：
 
@@ -70,14 +70,17 @@ D:\Miniconda3\python.exe run_emd_experiments.py --forms all --region-set all --c
 - `selection_region = after_split_covered`，`dataset = after_split`、
   `combined_branches = [main, tail]` 均为旧设计
 - `--data-dir after_split_data` 也无法运行：`load_split()` 按 `train` / `val` / `test`
-  拼路径，而 `after_split_data/` 下的切分目录叫 `validation/`
+  拼路径，而 `bin/after_split_data/` 下的切分目录叫 `validation/`
+
+> 该数据集本身已于 2026-09-21 随 `reference_code/` 一起归档进 `bin/`；
+> 它不再参与训练，**仅**被 `verify_dyn_envelope.py` 当作算法参照读取。
 
 因此这批产物只能作为历史记录保留，不代表当前算法的输出。
 
 ## 建议
 
 1. 需要引用指标时，用当前代码重新运行 `run_emd_experiments.py`，不要沿用归档目录里的旧数字。
-2. 归档位置：`backup/5_experiments_2026-09-17/`（其中 `README.md` 记录了归档原因与清单）。
+2. 归档位置：`bin/backup/5_experiments_2026-09-17/`（其中 `README.md` 记录了归档原因与清单）。
    需要时可以直接把它们拷回来做对照，但不应当作当前算法的基线。
 3. 重跑全矩阵基线的命令（4 种帧处理 × 4 种区域 × 双通道独立）：
 
@@ -90,5 +93,5 @@ D:\Miniconda3\python.exe run_emd_experiments.py --forms all --region-set all --c
 
    | 版本 | val AUC | test AUC | test accuracy | test sensitivity |
    |---|---:|---:|---:|---:|
-   | 移植前（`backup/4_stale_dyn_preport/`） | 0.7803 | 0.7016 | 0.6269 | 0.5556 |
-   | 移植后（`backup/5_experiments_2026-09-17/`） | 0.8813 | 0.8297 | 0.7313 | 0.8056 |
+   | 移植前（`bin/backup/4_stale_dyn_preport/`） | 0.7803 | 0.7016 | 0.6269 | 0.5556 |
+   | 移植后（`bin/backup/5_experiments_2026-09-17/`） | 0.8813 | 0.8297 | 0.7313 | 0.8056 |

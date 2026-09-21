@@ -2,7 +2,10 @@
 __pycache__/
 *.py[cod]
 
-# Raw/private data; keep the expected directory structure locally
+# Raw/private data; keep the expected directory structure locally.
+# ``after_split_data/`` and ``reference_code/`` were archived into ``bin/`` on
+# 2026-09-21; these rules carry no leading slash, so they keep matching at any
+# depth and ``bin/after_split_data/`` / ``bin/reference_code/`` stay ignored too.
 raw_data/
 after_split_data/
 reference_code/
@@ -15,9 +18,12 @@ experiments/*
 visualizations/
 
 # Local archives and scratch run directories.
-# ``_*/`` catches the throwaway ``--output-dir`` names (``_smoke_all``,
-# ``_verify_fullrun``, ...); it only matches directories, so ``_recon.ps1``
-# stays tracked.
+# ``bin/`` is the project attic (2026-09-21): one-off / unused scripts plus the
+# archived snapshot folders (``bin/backup``, ``bin/_smoke_all``, ...). The rules
+# below only match *directories*, so the files sitting directly in ``bin/``
+# (``bin/_recon.ps1``, ``bin/visualize_dyn_envelope_cases.py``) stay tracked.
+# They also match at any depth, so ``bin/backup/`` and the ``bin/_*/`` copies
+# remain ignored as well.
 backup/
 smoke_test/
 smoke_all/

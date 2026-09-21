@@ -33,14 +33,15 @@ raw_data
 
 源 ADC 同时用码值 127 和 128 表示“零”，两者归一化后分别是
 $\pm 0.5/127.5 \approx \pm 0.003922$，即同一个物理电平被拆到了 127.5 中点的两侧。
-`raw_data/` 保留了这一 $\pm 0.0039$ 抖动，而 `after_split_data/` 是从抖动已被抹平的信号生成的；
+``raw_data/`` 保留了这一 $\pm 0.0039$ 抖动，而参考数据集（现位于 `bin/after_split_data/`）
+是从抖动已被抹平的信号生成的；
 这点量化噪声足以让 `dyn_envelope` 的过阈点偏移几十个采样点
 （实测 `N35_P2_01` 通道 1 会从 324 漂到 267，从而触发人工修正守卫报错）。
 
 因此 `emd_pipeline.load_split()` 现在统一调用 `replace_adc_dc_level()`
 （`ADC_DC_MAGNITUDE = 0.5 / 127.5`，`ADC_DC_ATOL = 1e-6`）把这一对码值塌陷到 0.0。
 由于入口唯一，训练与四个可视化脚本都自动获得同一份直流归零后的帧；
-对本身已归零的 `after_split_data/` 该操作是幂等的。实验目录的 `config.json`
+对本身已归零的 `bin/after_split_data/` 该操作是幂等的。实验目录的 `config.json`
 会用 `adc_dc_replacement` 字段记录该常数。
 
 深度映射由 `DepthMapper` 封装，默认规则为：
@@ -196,7 +197,8 @@ np.sqrt(np.mean(np.square(segment, dtype=np.float64), axis=(1, 2)))
 
 ## 6. 动态包络区域 `dyn_envelope`
 
-`dyn_envelope` 是 `reference_code/pipeline.py` 中 `segment()` 的**完整移植**，与 `after_split_data/` 的产物逐位一致（见 `verify_dyn_envelope.py`）。它不改变信号，只用包络结果确定 branch 边界。
+`dyn_envelope` 是 `bin/reference_code/pipeline.py` 中 `segment()` 的**完整移植**，与
+`bin/after_split_data/` 的产物逐位一致（见 `verify_dyn_envelope.py`）。它不改变信号，只用包络结果确定 branch 边界。
 
 > ⚠️ 本区域对输入的直流电平敏感：必须先执行 §2.1 的 ADC 127/128 归零，
 > 否则 $\pm 0.0039$ 的量化抖动会把越阈点推偏几十个采样点，并触发人工修正守卫
@@ -527,13 +529,46 @@ python verify_mlp_gradients.py       # 双塔 MLP 解析梯度
 python verify_channel_aggregation.py # 通道聚合语义与网络拓扑
 ```
 
-## 15. Git 发布说明
+## 15. 项目结构与归档约定
+
+### 15.1 根目录（活跃代码与文档）
+
+| 类别 | 文件 |
+|---|---|
+| 核心流水线 | `emd_pipeline.py`、`run_emd_experiments.py`、`dyn_cli.py` |
+| GUI | `gui_app.py` |
+| 可视化（GUI 调用 + 文档记录） | `visualize_preprocessing.py`、`visualize_emd_components.py`、`visualize_training_curves.py`、`visualize_confusion_matrix.py`、`visualize_error_by_thickness.py` |
+| 自检回归 | `verify_dyn_envelope.py`、`verify_mlp_gradients.py`、`verify_channel_aggregation.py` |
+| 文档 | `README.md`、`PROJECT_SUMMARY.md` |
+| 数据/输出（本地，多数被忽略） | `raw_data/`（唯一的训练数据源）、`experiments/`、`visualizations/` |
+
+### 15.2 `bin/`（归档区）
+
+根目录只保留仍然在用的脚本；一次性、已被取代或与项目无关的文件统一移入 `bin/`，
+具体清单与原因见 `bin/README.md`。当前 `bin/` 内有：
+
+- `bin/after_split_data/`（`reference_code/pipeline.py` 的输出，**只有** `verify_dyn_envelope.py` 读它作参照；训练一律走 `raw_data/`）
+- `bin/reference_code/`（参考实现的原始目录，是算法出处；没有任何代码 import 它）
+- `bin/_recon.ps1`（2026-09 环境迁移的一次性侦查脚本）
+- `bin/visualize_dyn_envelope_cases.py`（`dyn_envelope` 阈值回退的专项诊断出图，未被 GUI/文档引用）
+- `bin/backup/`（历史代码与实验快照：`0_no_gui` ~ `5_experiments_2026-09-17`）
+- `bin/_recon_check/`、`bin/_smoke_all/`、`bin/_verify_fix/`（一次性冒烟/校验输出）
+- `bin/__pycache__/`（含已删除模块 `dynamic_split`、`_grad_check` 的陈旧 pyc，可随时删除）
+
+> `bin/` 下的目录仍被 `.gitignore` 的 `after_split_data/`、`reference_code/`、`backup/`、`_*/`、
+> `__pycache__/` 规则忽略（这些规则都不带前导斜杠，可在任意层级匹配），所以归档内容不会进入版本库；
+> 直接放在 `bin/` 下的两个脚本文件则继续保持被跟踪。
+> 依赖方向是“根目录 → `bin/`”，`bin/` 内的东西从不反向依赖根目录；唯一例外是
+> `verify_dyn_envelope.py` 通过 `REFERENCE_DIR` 读取 `bin/after_split_data/`（可用环境变量
+> `DYN_REFERENCE_DIR` 重定向）。
+
+## 16. Git 发布说明
 
 本目录已经是 Git 仓库根的子目录：远端为 `https://github.com/Icyhavoc/bone_us.git`，
 当前分支 `custom-dyn_envelop` 跟踪 `origin/custom-dyn_envelop`。
-`.gitignore` 已排除 `raw_data/`、`after_split_data/`、`reference_code/`、
-`experiments/*`（仅保留 `experiments/*.md`）、`visualizations/`、`backup/`、
-`__pycache__/` 和 `_*/` 临时输出目录。
+`.gitignore` 已排除 `raw_data/`、`after_split_data/`、`reference_code/`（后两者已归档进 `bin/`，
+规则仍按任意深度生效）、`experiments/*`（仅保留 `experiments/*.md`）、`visualizations/`、`backup/`、
+`__pycache__/` 和 `_*/` 临时输出目录（这些规则不带前导斜杠，因此同样覆盖 `bin/` 下的归档副本）。
 
 因此提交时只需：
 
@@ -542,8 +577,9 @@ git add -A
 git commit -m "..."
 ```
 
-`_*/` 规则只匹配目录，所以 `_recon.ps1` 仍在版本控制中；新增的
-`verify_*.py` 是脚本文件而不是目录，会正常被跟踪。
+`_*/` 规则只匹配目录，所以根目录下已不再有临时目录；被归档的一次性脚本
+`bin/_recon.ps1`、`bin/visualize_dyn_envelope_cases.py` 是文件而非目录，仍在版本控制中；
+新增的 `verify_*.py` 也会正常被跟踪。
 
 如需发布可复现实验结果，可以额外选择性提交对应实验目录的 `config.json`、
 `metrics.json`、`history.json` 和 `summary.json`（需临时放开 `experiments/*` 的忽略规则）。

@@ -1,9 +1,13 @@
 """Verify the ported ``dyn_envelope`` split against the reference output.
 
-``after_split_data/`` was produced by ``reference_code/pipeline.py``.  The two
-datasets share the same source traces; ``raw_data`` only differs by not
-collapsing the ADC ``127``/``128`` DC pair onto the shared zero level, which
-:func:`emd_pipeline.replace_adc_dc_level` reproduces before comparing.
+``bin/reference_code/pipeline.py`` produced ``bin/after_split_data/``; both were
+archived into ``bin/`` (see ``bin/README.md``) but are still read here as the
+algorithmic reference.  The two datasets share the same source traces;
+``raw_data`` only differs by not collapsing the ADC ``127``/``128`` DC pair onto
+the shared zero level, which :func:`emd_pipeline.replace_adc_dc_level`
+reproduces before comparing.
+
+Set ``DYN_REFERENCE_DIR`` to point at another copy of ``after_split_data``.
 
 Two levels are checked for all 268 points and both channels:
 
@@ -17,6 +21,7 @@ Run: ``python verify_dyn_envelope.py``
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -37,7 +42,12 @@ from emd_pipeline import (
 
 APP_DIR = Path(__file__).resolve().parent
 RAW_DIR = APP_DIR / "raw_data"
-REFERENCE_DIR = APP_DIR / "after_split_data"
+# The reference implementation and its output live in the project attic
+# (``bin/``), see ``bin/README.md``.  Override with ``DYN_REFERENCE_DIR`` if a
+# copy is kept elsewhere.
+REFERENCE_DIR = Path(
+    os.environ.get("DYN_REFERENCE_DIR", APP_DIR / "bin" / "after_split_data")
+)
 TARGET_LENGTH = 512
 
 
@@ -165,7 +175,7 @@ def main() -> int:
     raw = load_raw_frames()
     reference = load_reference()
     if set(raw) != set(reference):
-        print("point sets differ between raw_data and after_split_data")
+        print(f"point sets differ between {RAW_DIR.name} and {REFERENCE_DIR}")
         return 1
     print(f"points={len(raw)} channels={len(raw) * 2}")
 
