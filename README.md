@@ -405,6 +405,14 @@ python visualize_training_curves.py `
   --output-dir visualizations/training_curves
 ```
 
+运行错分厚度分布可视化（需先完成训练）：
+
+```powershell
+python visualize_error_by_thickness.py `
+  --experiments-dir experiments `
+  --output-dir visualizations/error_by_thickness
+```
+
 输出分别位于：
 
 ```text
@@ -412,6 +420,7 @@ visualizations/preprocessing/
 visualizations/emd/
 visualizations/training_curves/
 visualizations/confusion_matrices/
+visualizations/error_by_thickness/
 ```
 
 如果只想检查当前实验配置，可以运行：

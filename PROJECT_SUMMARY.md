@@ -398,6 +398,7 @@ python gui_app.py
 - `visualize_emd_components.py`：每个类别随机选择 1 个样本，绘制每个 branch 的 IMF 和 residue。
 - `visualize_training_curves.py`：绘制 validation loss/test loss 随 epoch 的变化。
 - `visualize_confusion_matrix.py`：绘制 test 集混淆矩阵。
+- `visualize_error_by_thickness.py`：按骨头厚度（`samples_*.json` 的 `depth_value`，即原始表的“总厚度”列，不是 0-5 mm 采集深度轴）分桶统计 train/val/test 的错分样本数并绘制堆叠柱状图；浅色宽柱为该桶全部样本，深色窄柱为各 split 的错分样本，1 mm 处有 label 分界参考线。默认桶宽 0.05 mm、判定阈值 0.5，只读取训练已保存的 `probabilities_{split}.npy`/`labels_{split}.npy`，不重跑推理。
 
 默认类别和随机设置：
 

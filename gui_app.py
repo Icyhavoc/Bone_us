@@ -279,6 +279,38 @@ class ExperimentCatalog:
             options[key] = path
         return options
 
+    def error_by_thickness_files(self, form: str, region: str, channel: str) -> list[Path]:
+        root = self.visualizations_dir / "error_by_thickness"
+        if not root.exists():
+            return []
+        form_part = "*" if form == "all" else form
+        region_part = "*" if region == "all" else region
+        channel_part = "*" if channel == "all" else channel
+        pattern = f"form_{form_part}__regions_{region_part}__channels_{channel_part}.png"
+        return sorted(root.glob(pattern))
+
+    def error_by_thickness_options(self) -> dict[str, Path]:
+        """Return all generated thickness-vs-error charts for the target selector."""
+
+        root = self.visualizations_dir / "error_by_thickness"
+        pattern = re.compile(
+            r"^form_(?P<form>.+?)__regions_(?P<region>.+?)"
+            r"__channels_(?P<channel>[123])\.png$"
+        )
+        options: dict[str, Path] = {}
+        if not root.exists():
+            return options
+        for path in sorted(root.glob("*.png")):
+            match = pattern.match(path.name)
+            if match is None:
+                continue
+            key = (
+                f"form={match.group('form')} | region={match.group('region')} | "
+                f"channel={match.group('channel')}"
+            )
+            options[key] = path
+        return options
+
 
 class ScrollableImagePanel(ttk.Frame):
     """A vertical image browser used by both visualization tabs."""
@@ -681,7 +713,7 @@ class EMDViewerApp(tk.Tk):
         controls.pack(fill="x")
         self.form_var = tk.StringVar(value="all")
         self.region_var = tk.StringVar(value="all")
-        self.channel_var = tk.StringVar(value="3")
+        self.channel_var = tk.StringVar(value="1")
         self.status_var = tk.StringVar(value="")
         self._add_combo(controls, "预处理方式", self.form_var, list(FORM_LABELS), 0, "form")
         self._add_combo(controls, "区域组合", self.region_var, list(REGION_LABELS), 2, "region")
@@ -734,11 +766,13 @@ class EMDViewerApp(tk.Tk):
         self.preprocessing_tab = ttk.Frame(notebook)
         self.training_curve_tab = ttk.Frame(notebook)
         self.confusion_matrix_tab = ttk.Frame(notebook)
+        self.error_by_thickness_tab = ttk.Frame(notebook)
         self.emd_tab = ttk.Frame(notebook)
         notebook.add(self.summary_tab, text="Summary")
         notebook.add(self.preprocessing_tab, text="预处理可视化")
         notebook.add(self.training_curve_tab, text="Training Curve")
         notebook.add(self.confusion_matrix_tab, text="Confusion Matrix")
+        notebook.add(self.error_by_thickness_tab, text="错分厚度分布")
         notebook.add(self.emd_tab, text="EMD 分解")
 
         self.summary_hint = ttk.Label(self.summary_tab, text="", style="Hint.TLabel")
@@ -850,6 +884,34 @@ class EMDViewerApp(tk.Tk):
         self.target_confusion_images.pack(fill="both", expand=True)
         self.confusion_option_map: dict[str, Path] = {}
         self._current_confusion_paths: list[Path] = []
+
+        thickness_selection = ttk.Frame(self.error_by_thickness_tab, padding=(8, 8, 8, 4))
+        thickness_selection.pack(fill="x")
+        ttk.Label(thickness_selection, text="选择右侧错分厚度分布组合：").pack(side="left")
+        self.thickness_choice_var = tk.StringVar(value="")
+        self.thickness_choice = ttk.Combobox(
+            thickness_selection,
+            textvariable=self.thickness_choice_var,
+            state="readonly",
+            width=50,
+        )
+        self.thickness_choice.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        self.thickness_choice.bind(
+            "<<ComboboxSelected>>", lambda _event: self._refresh_error_by_thickness_selection()
+        )
+        self.thickness_split = ttk.PanedWindow(self.error_by_thickness_tab, orient="horizontal")
+        self.thickness_split.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        current_thickness_frame = ttk.LabelFrame(self.thickness_split, text="当前组合")
+        target_thickness_frame = ttk.LabelFrame(self.thickness_split, text="目标组合")
+        self.thickness_split.add(current_thickness_frame)
+        self.thickness_split.add(target_thickness_frame)
+        self.current_thickness_images = ScrollableImagePanel(current_thickness_frame)
+        self.current_thickness_images.pack(fill="both", expand=True)
+        self.target_thickness_images = ScrollableImagePanel(target_thickness_frame)
+        self.target_thickness_images.pack(fill="both", expand=True)
+        self.thickness_option_map: dict[str, Path] = {}
+        self._current_thickness_paths: list[Path] = []
+
         self.emd_images = ScrollableImagePanel(self.emd_tab)
         self.emd_images.pack(fill="both", expand=True)
 
@@ -903,6 +965,23 @@ class EMDViewerApp(tk.Tk):
         selected_path = self.confusion_option_map.get(self.confusion_choice_var.get())
         self.target_confusion_images.show_images([selected_path] if selected_path else [])
 
+    def _refresh_error_by_thickness_layout(self, form: str, region: str, channel: str) -> int:
+        current_paths = self.catalog.error_by_thickness_files(form, region, channel)
+        self._current_thickness_paths = current_paths
+        current_count = self.current_thickness_images.show_images(current_paths)
+        self.thickness_option_map = self.catalog.error_by_thickness_options()
+        options = sorted(self.thickness_option_map)
+        self.thickness_choice.configure(values=options)
+        if self.thickness_choice_var.get() not in self.thickness_option_map:
+            self.thickness_choice_var.set(options[0] if options else "")
+        selected_path = self.thickness_option_map.get(self.thickness_choice_var.get())
+        self.target_thickness_images.show_images([selected_path] if selected_path else [])
+        return current_count
+
+    def _refresh_error_by_thickness_selection(self) -> None:
+        selected_path = self.thickness_option_map.get(self.thickness_choice_var.get())
+        self.target_thickness_images.show_images([selected_path] if selected_path else [])
+
     def refresh(self) -> None:
         self.catalog.reload()
         form = self.form_var.get()
@@ -912,13 +991,14 @@ class EMDViewerApp(tk.Tk):
         self._fill_summary(rows)
         pre_imminent_count, pre_safe_count = self._refresh_preprocessing_layout(form, region, channel)
         confusion_count = self._refresh_confusion_matrix_layout(form, region, channel)
+        thickness_count = self._refresh_error_by_thickness_layout(form, region, channel)
         if form == "all":
             self.emd_images.clear("请选择一种具体预处理方式后查看 EMD 分量图。")
             curve_paths = self.catalog.training_curve_files(form, region, channel)
             curve_count = self.training_curve_images.show_images(curve_paths)
             self.status_var.set(
                 f"已加载 {len(rows)} 组实验摘要；预处理图 label=0/{pre_imminent_count}、"
-                f"label=1/{pre_safe_count}，训练曲线 {curve_count} 张。"
+                f"label=1/{pre_safe_count}，训练曲线 {curve_count} 张，错分厚度分布 {thickness_count} 张。"
             )
             self.summary_hint.configure(text="当前显示所有可用实验的 summary；右侧可通过选择栏查看具体预处理组合。")
             self._update_train_button()
@@ -929,7 +1009,8 @@ class EMDViewerApp(tk.Tk):
         emd_count = self.emd_images.show_images(emd_paths)
         self.status_var.set(
             f"当前筛选 {len(rows)} 组实验；预处理图 label=0/{pre_imminent_count}、"
-            f"label=1/{pre_safe_count}，训练曲线 {curve_count} 张、EMD 图 {emd_count} 张。"
+            f"label=1/{pre_safe_count}，训练曲线 {curve_count} 张、EMD 图 {emd_count} 张，"
+            f"错分厚度分布 {thickness_count} 张。"
         )
         self.summary_hint.configure(
             text="左侧显示当前筛选条件下的 label=0/1；右侧可通过选择栏查看任意已生成组合。"
@@ -1030,6 +1111,20 @@ class EMDViewerApp(tk.Tk):
                         channel,
                         "--split",
                         "test",
+                    ],
+                    [
+                        sys.executable,
+                        str(APP_DIR / "visualize_error_by_thickness.py"),
+                        "--experiments-dir",
+                        str(EXPERIMENTS_DIR),
+                        "--output-dir",
+                        str(VISUALIZATIONS_DIR / "error_by_thickness"),
+                        "--forms",
+                        form,
+                        "--region-set",
+                        region,
+                        "--channel-mode",
+                        channel,
                     ],
                 ]
             )
