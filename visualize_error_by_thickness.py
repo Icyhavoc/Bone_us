@@ -28,12 +28,18 @@ import argparse
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from emd_pipeline import FORM_ORDER, canonical_form
+from emd_pipeline import (
+    FORM_ORDER,
+    canonical_form,
+    label_scheme_tag,
+    label_thresholds,
+    read_label_scheme,
+)
 
 
 SPLIT_LABELS = {"train": "Train", "val": "Validation", "test": "Test"}
@@ -42,7 +48,9 @@ STACK_ORDER = ("test", "val", "train")
 SPLIT_COLORS = {"test": "#2f6f9f", "val": "#3d8b62", "train": "#c45a32"}
 TOTAL_FILL = "#dfe5ea"
 TOTAL_OUTLINE = "#b3bfc8"
-LABEL_THRESHOLD_MM = 1.0
+# The historical binary split (``raw_data`` predates ``label_scheme.json``), used
+# when a run records no thresholds of its own.
+DEFAULT_LABEL_THRESHOLDS: tuple[float, ...] = (1.0,)
 
 BACKGROUND = "#f7f9fb"
 INK = "#1f2d36"
@@ -119,14 +127,21 @@ def _load_split(
 
 
 def _error_flags(probabilities: np.ndarray, labels: np.ndarray, threshold: float) -> np.ndarray:
-    """Reuse the exact decision rule of ``emd_pipeline.binary_metrics``."""
+    """Misclassification flags, matching the model that produced the scores.
+
+    Two columns reproduce the decision rule of ``emd_pipeline.binary_metrics``
+    exactly (score = ``probabilities[:, 1]`` compared against ``threshold``).
+    More columns mean a softmax head, whose prediction is the argmax, so the
+    stored ``--threshold`` does not apply there.
+    """
 
     probabilities = np.asarray(probabilities, dtype=np.float64)
-    if probabilities.ndim == 2 and probabilities.shape[1] > 1:
-        scores = probabilities[:, 1]
+    if probabilities.ndim == 2 and probabilities.shape[1] > 2:
+        predictions = np.argmax(probabilities, axis=1).astype(np.int64)
+    elif probabilities.ndim == 2 and probabilities.shape[1] > 1:
+        predictions = (probabilities[:, 1] >= threshold).astype(np.int64)
     else:
-        scores = probabilities.reshape(-1)
-    predictions = (scores >= threshold).astype(np.int64)
+        predictions = (probabilities.reshape(-1) >= threshold).astype(np.int64)
     return (predictions != labels).reshape(-1)
 
 
@@ -183,8 +198,15 @@ def render_error_by_thickness(
     output_path: Path,
     bin_width: float = 0.05,
     threshold: float = 0.5,
+    label_thresholds: Sequence[float] = (),
 ) -> dict[str, Any]:
-    """Draw the stacked misclassification histogram and return its statistics."""
+    """Draw the stacked misclassification histogram and return its statistics.
+
+    ``label_thresholds`` are the thicknesses that define the label boundaries.
+    One dashed reference line is drawn per entry, so a 3-class dataset with
+    0.8 mm / 1.2 mm boundaries shows both instead of a single 1.0 mm line that
+    does not exist in its labelling.
+    """
 
     ordered = {split: per_split[split] for split in SPLIT_LABELS if split in per_split}
     all_thickness = np.concatenate([thickness for thickness, _flags in ordered.values()])
@@ -274,15 +296,24 @@ def render_error_by_thickness(
             draw.rectangle((x0, y, x1, cursor_y), fill=SPLIT_COLORS[split])
             cursor_y = y
 
-    if start <= LABEL_THRESHOLD_MM <= float(edges[-1]):
-        x = plot_x0 + (LABEL_THRESHOLD_MM - start) / (bin_count * bin_width) * plot_width
+    for reference in label_thresholds:
+        reference = float(reference)
+        if not start <= reference <= float(edges[-1]):
+            continue
+        x = plot_x0 + (reference - start) / (bin_count * bin_width) * plot_width
         y = plot_y0
         while y < plot_y1:
             draw.line((x, y, x, min(y + 6.0, plot_y1)), fill=REFERENCE, width=1)
             y += 12.0
+        # The single-threshold caption is the historical one, verbatim, so the
+        # stored binary images stay byte-identical.
+        if len(label_thresholds) == 1:
+            caption = f"label 分界 {reference:g} mm（左=即将穿透，右=安全）"
+        else:
+            caption = f"label 分界 {reference:g} mm"
         draw.text(
             (x, plot_y0 - 10),
-            f"label 分界 {LABEL_THRESHOLD_MM:g} mm（左=即将穿透，右=安全）",
+            caption,
             fill=REFERENCE,
             font=_font(12),
             anchor="ms",
@@ -369,7 +400,53 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--threshold", type=float, default=0.5, help="positive-class decision threshold")
     parser.add_argument("--bin-width", type=float, default=0.05, help="thickness bin width in mm")
+    parser.add_argument(
+        "--label-thresholds",
+        default=None,
+        help=(
+            "comma-separated thickness thresholds drawn as reference lines; "
+            "defaults to the experiment's label_scheme (or 1.0 mm for the "
+            "historical binary runs that predate label_scheme.json)"
+        ),
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("raw_data"),
+        help=(
+            "dataset whose label scheme selects which experiments to draw; "
+            "raw_data (no label_scheme.json) keeps the historical binary runs"
+        ),
+    )
     return parser.parse_args()
+
+
+def _parse_threshold_override(value: str | None) -> list[float] | None:
+    """Parse ``--label-thresholds``; ``None`` means "use the recorded scheme"."""
+
+    if value is None or not value.strip():
+        return None
+    try:
+        return [float(item) for item in value.split(",") if item.strip()]
+    except ValueError as error:
+        raise SystemExit(f"--label-thresholds expects numbers, got {value!r}") from error
+
+
+def _scheme_of(config: dict[str, Any]) -> dict[str, Any] | None:
+    """A run's label scheme: recorded inline, else from its ``data_dir``.
+
+    ``raw_data`` has no ``label_scheme.json``, so this returns None there, which
+    is exactly the signal that the run used the historical 1.0 mm binary split.
+    """
+
+    scheme = config.get("label_scheme")
+    if isinstance(scheme, dict):
+        return scheme
+    data_dir = config.get("data_dir")
+    if not data_dir:
+        return None
+    found = read_label_scheme(data_dir)
+    return found if isinstance(found, dict) else None
 
 
 def main() -> None:
@@ -383,14 +460,19 @@ def main() -> None:
         raise SystemExit(f"unknown splits: {', '.join(unknown)}")
     experiments_dir = args.experiments_dir.resolve()
     output_dir = args.output_dir.resolve()
+    dataset_tag = label_scheme_tag(read_label_scheme(args.data_dir))
     manifest: dict[str, Any] = {
         "bin_width": args.bin_width,
         "threshold": args.threshold,
+        "label_thresholds_override": _parse_threshold_override(args.label_thresholds),
         "splits": splits,
         "output_dir": output_dir,
+        "data_dir": str(Path(args.data_dir).resolve()),
+        "label_scheme_tag": dataset_tag,
         "files": [],
         "skipped": [],
     }
+    override = manifest["label_thresholds_override"]
     generated = 0
     directories = (
         sorted(path for path in experiments_dir.iterdir() if path.is_dir())
@@ -400,6 +482,10 @@ def main() -> None:
     for directory in directories:
         config = _read_json(directory / "config.json", {})
         if not isinstance(config, dict) or not config:
+            continue
+        # A run belongs to exactly one dataset; drawing a 3-class run into the
+        # binary chart folder would mix two different label definitions.
+        if label_scheme_tag(_scheme_of(config)) != dataset_tag:
             continue
         form = str(config.get("form", ""))
         region = str(config.get("region_name", ""))
@@ -412,29 +498,54 @@ def main() -> None:
             continue
 
         per_split: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        widths: set[int] = set()
         for split in splits:
             loaded = _load_split(directory, split)
             if loaded is None:
                 continue
             thickness, labels, probabilities = loaded
+            widths.add(int(probabilities.shape[1]) if probabilities.ndim == 2 else 1)
             per_split[split] = (thickness, _error_flags(probabilities, labels, args.threshold))
         if not per_split:
             manifest["skipped"].append({"experiment": directory.name, "reason": "no saved arrays"})
             print(f"skipped {directory.name}: no saved probabilities/labels/samples")
             continue
 
+        scheme = _scheme_of(config)
+        if override is not None:
+            reference_thresholds = list(override)
+        else:
+            reference_thresholds = label_thresholds(scheme)
+        num_classes = max(widths)
+        if not reference_thresholds and num_classes == 2:
+            reference_thresholds = list(DEFAULT_LABEL_THRESHOLDS)
+
+        label_tag = label_scheme_tag(scheme)
         file_name = (
             f"form_{_safe_name(form)}__regions_{_safe_name(region)}__"
-            f"channels_{_safe_name(channel)}.png"
+            f"channels_{_safe_name(channel)}"
         )
+        if label_tag:
+            file_name = f"{file_name}__{_safe_name(label_tag)}"
+        file_name = f"{file_name}.png"
         stats = render_error_by_thickness(
             per_split,
             f"{form} | {region} | channel_mode={channel}",
             output_dir / file_name,
             bin_width=args.bin_width,
             threshold=args.threshold,
+            label_thresholds=reference_thresholds,
         )
-        manifest["files"].append({"file": file_name, "experiment": directory.name, **stats})
+        manifest["files"].append(
+            {
+                "file": file_name,
+                "experiment": directory.name,
+                "num_classes": num_classes,
+                "label_scheme_tag": label_tag,
+                "label_thresholds": reference_thresholds,
+                **stats,
+            }
+        )
         generated += 1
 
     output_dir.mkdir(parents=True, exist_ok=True)

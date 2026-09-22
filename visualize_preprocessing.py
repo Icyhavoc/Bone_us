@@ -22,27 +22,104 @@ from PIL import Image, ImageDraw, ImageFont
 
 from emd_pipeline import (
     FORM_ORDER,
+    LOCATOR_BRANCH_NAME,
+    TAIL_BRANCH_NAME,
     DepthMapper,
     DynamicEnvelopeConfig,
     RegionSpec,
     canonical_form,
     channel_physical_indices,
+    class_display_names,
     json_ready,
     load_split,
     parse_regions,
     prepare_branch_signals,
     prepare_dynamic_envelope_branches,
     process_frames,
+    read_label_scheme,
     select_channels,
 )
 from dyn_cli import add_dyn_arguments, dyn_config_from_args
 from run_emd_experiments import DYNAMIC_REGION_NAME, REGION_CHOICES, REGION_PRESETS
 
 
+# Historical binary names, used whenever the dataset ships no label_scheme.json.
+# ``raw_data`` is exactly that case, so every stored binary sheet keeps its title.
 CLASS_NAMES = {0: "即将穿透", 1: "安全"}
 CHANNEL_COLORS = [(44, 95, 154), (192, 57, 43)]
 STAT_COLORS = [(44, 95, 154), (128, 128, 128)]
 DEFAULT_Y_LIMITS = (-1.0, 1.0)
+
+
+def class_names_for_data_dir(data_dir: Path | str, num_classes: int) -> list[str]:
+    """One display name per label, preferring the dataset's ``label_scheme.json``.
+
+    A relabelled dataset records names such as ``"depth < 0.8"``; without it the
+    historical Chinese binary names are used, which is what ``raw_data`` needs.
+    """
+
+    return class_display_names(read_label_scheme(data_dir), num_classes)
+
+
+def _parse_optional_labels(value: str | None) -> list[int] | None:
+    """Parse ``--class-labels``; ``None`` means "use the imminent/safe pair"."""
+
+    if value is None or not value.strip():
+        return None
+    labels: list[int] = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            labels.append(int(item))
+        except ValueError as error:
+            raise SystemExit(f"--class-labels expects integers, got {item!r}") from error
+    return labels or None
+
+
+def resolve_class_labels(
+    labels: np.ndarray,
+    requested: Sequence[int] | None,
+    imminent: int,
+    safe: int,
+) -> list[int]:
+    """The class labels to draw, in order.
+
+    ``--class-labels`` wins; otherwise the historical two-label pair is used, so
+    a binary run needs no new arguments.  The order also fixes the file-name
+    tokens (``imminent``/``safe`` for the historical pair, else ``label{k}``).
+    """
+
+    ordered = [int(label) for label in requested] if requested else [int(imminent), int(safe)]
+    if len(set(ordered)) != len(ordered):
+        raise SystemExit(f"duplicate class labels requested: {ordered}")
+    highest = int(labels.max()) + 1 if labels.size else 0
+    for label in ordered:
+        if not 0 <= label < max(highest, 1):
+            raise SystemExit(f"class label {label} is out of range for labels 0..{highest - 1}")
+        if not np.any(labels == label):
+            raise SystemExit(f"class label {label} has no samples in this split")
+    return ordered
+
+
+def class_file_token(label: int, imminent: int, safe: int, num_classes: int = 2) -> str:
+    """File-name token for one class.
+
+    ``imminent``/``safe`` are kept verbatim for a binary dataset so the
+    historical ``...__class_imminent.png`` / ``...__class_safe.png`` files keep
+    their names.  A k-class dataset has no such heritage -- calling its middle
+    group "safe" would be actively misleading -- so every label becomes
+    ``label{k}`` instead.
+    """
+
+    if int(num_classes) > 2:
+        return f"label{label}"
+    if label == int(imminent):
+        return "imminent"
+    if label == int(safe):
+        return "safe"
+    return f"label{label}"
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -67,6 +144,64 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.I
 
 def _safe_name(value: str) -> str:
     return re.sub(r"[^0-9A-Za-z_.-]+", "_", value)
+
+
+def _short_branch_name(name: str) -> str:
+    """``dynamic_main_window`` -> ``main``, so a title stays inside its cell."""
+
+    label = str(name)
+    if label.startswith("dynamic_"):
+        label = label[len("dynamic_"):]
+    if label.endswith("_window"):
+        label = label[: -len("_window")]
+    return label.replace("_", " ") or str(name)
+
+
+def _fit_title(
+    draw: "ImageDraw.ImageDraw",
+    segments: Sequence[str],
+    font: Any,
+    max_width: float,
+) -> str:
+    """Join ``segments`` with " | ", dropping optional ones until the text fits.
+
+    The first segment is always kept: it identifies the branch, and a clipped
+    identifier is worse than missing detail.  Cell widths are fixed while branch
+    geometry is configurable, so no single format fits every configuration.
+    """
+
+    for count in range(len(segments), 0, -1):
+        candidate = " | ".join(segments[:count])
+        if draw.textlength(candidate, font=font) <= max_width:
+            return candidate
+    return segments[0]
+
+
+def dynamic_branch_title(
+    column: int,
+    name: str,
+    span_samples: int,
+    mm_per_index: float,
+    target_length: int,
+) -> str:
+    """Describe a dynamic branch by its real extent and physical resolution.
+
+    Both branches are resampled to ``target_length`` samples, so one point on
+    the main branch covers far less depth than one point on the tail branch.
+    Printing the span and the per-point spacing is what makes that visible: the
+    hardcoded "(170 samples)" / "[251, 896)" strings that used to sit here
+    described the default configuration, not the one that was actually run.
+    """
+
+    span_mm = float(span_samples) * float(mm_per_index)
+    spacing_mm = span_mm / target_length if target_length else 0.0
+    return " | ".join(
+        [
+            f"Branch {column + 1}: {_short_branch_name(name)}",
+            f"{int(span_samples)} pt = {span_mm:.2f} mm",
+            f"{spacing_mm:.5f} mm/pt",
+        ]
+    )
 
 
 def load_split_records(
@@ -205,6 +340,7 @@ def _make_sheet(
     region_name: str,
     regions: Sequence[RegionSpec],
     class_label: int,
+    class_name: str,
     selected_indices: np.ndarray,
     x: np.ndarray,
     labels: np.ndarray,
@@ -227,7 +363,8 @@ def _make_sheet(
     height = top_margin + cell_height * len(selected_indices)
     image = Image.new("RGB", (width, height), (255, 255, 255))
     draw = ImageDraw.Draw(image)
-    class_name = CLASS_NAMES.get(class_label, f"label={class_label}")
+    branch_font = _font(14, bold=True)
+    mm_per_index = mapper.max_depth_mm / mapper.signal_length
     draw.text(
         (20, 16),
         f"{form} | {region_name} | {class_name} | channel_mode={channel_mode}",
@@ -244,17 +381,39 @@ def _make_sheet(
         x0 = left_margin + column * cell_width
         if dynamic_envelope_config is None:
             branch_title = f"Branch {column + 1}: {regions[column].label}"
+        elif column == 0:
+            # The main window has a fixed *length* config.main_length; only the
+            # offset the detector finds moves, so the config describes the span.
+            span = int(dynamic_envelope_config.main_length)
+            branch_title = _fit_title(
+                draw,
+                [
+                    f"Branch 1: {_short_branch_name(LOCATOR_BRANCH_NAME)}",
+                    f"{span} pt = {span * mm_per_index:.2f} mm",
+                    f"{mm_per_index / target_length:.5f} mm/pt",
+                ],
+                branch_font,
+                cell_width - 16,
+            )
         else:
-            branch_title = (
-                "Branch 1: merged leading packet window (170 samples)"
-                if column == 0
-                else "Branch 2: fixed tail [251, 896)"
+            tail_start = int(dynamic_envelope_config.tail_start)
+            tail_end = int(dynamic_envelope_config.signal_length)
+            branch_title = _fit_title(
+                draw,
+                [
+                    f"Branch 2: {_short_branch_name(TAIL_BRANCH_NAME)}",
+                    f"[{tail_start}, {tail_end}) = {tail_end - tail_start} pt",
+                    f"{(tail_end - tail_start) * mm_per_index:.2f} mm",
+                    f"{mm_per_index / target_length:.5f} mm/pt",
+                ],
+                branch_font,
+                cell_width - 16,
             )
         draw.text(
             (x0 + 8, 58),
             branch_title,
             fill=(20, 20, 20),
-            font=_font(14, bold=True),
+            font=branch_font,
         )
 
     for row, sample_index in enumerate(selected_indices):
@@ -353,6 +512,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--samples-per-class", type=int, default=10)
     parser.add_argument("--imminent-label", type=int, default=0)
     parser.add_argument("--safe-label", type=int, default=1)
+    parser.add_argument(
+        "--class-labels",
+        default=None,
+        help=(
+            "comma-separated class labels to draw, e.g. \"0,1,2\" for a 3-class "
+            "dataset; defaults to --imminent-label/--safe-label"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--target-length", type=int, default=512)
     parser.add_argument("--tukey-alpha", type=float, default=0.3)
@@ -372,9 +539,21 @@ def main() -> None:
     ]
     regions_to_run = _resolve_region_experiments(args.region_set, args.regions_json)
     x, labels, records, split_names = load_split_records(args.data_dir, args.split)
+    num_classes = int(labels.max()) + 1 if labels.size else 2
+    class_names = class_names_for_data_dir(args.data_dir, num_classes)
+    class_labels = resolve_class_labels(
+        labels,
+        _parse_optional_labels(args.class_labels),
+        args.imminent_label,
+        args.safe_label,
+    )
+    file_tokens = {
+        label: class_file_token(label, args.imminent_label, args.safe_label, num_classes)
+        for label in class_labels
+    }
     selected = select_class_indices(
         labels,
-        [args.imminent_label, args.safe_label],
+        class_labels,
         args.samples_per_class,
         args.seed,
     )
@@ -386,14 +565,24 @@ def main() -> None:
         "split": args.split,
         "seed": args.seed,
         "samples_per_class": args.samples_per_class,
+        "num_classes": num_classes,
+        "label_scheme": read_label_scheme(args.data_dir),
         "class_labels": {
             "imminent": args.imminent_label,
             "safe": args.safe_label,
         },
+        "classes": [
+            {
+                "label": label,
+                "name": class_names[label],
+                "file_token": file_tokens[label],
+            }
+            for label in class_labels
+        ],
         "selections": {},
     }
     for label, indices in selected.items():
-        name = "imminent" if label == args.imminent_label else "safe"
+        name = file_tokens[label]
         selection_manifest["selections"][name] = [
             {
                 "index": int(index),
@@ -407,7 +596,7 @@ def main() -> None:
     for form in forms:
         for region_name, regions in regions_to_run:
             for label, indices in selected.items():
-                class_name = "imminent" if label == args.imminent_label else "safe"
+                class_name = file_tokens[label]
                 file_name = (
                     f"form_{form}__regions_{_safe_name(region_name)}__"
                     f"channels_{args.channel_mode}__class_{class_name}.png"
@@ -417,6 +606,7 @@ def main() -> None:
                     region_name,
                     regions,
                     label,
+                    class_names[label],
                     indices,
                     x,
                     labels,

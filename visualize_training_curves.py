@@ -10,7 +10,13 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-from emd_pipeline import FORM_ORDER, canonical_form
+from emd_pipeline import (
+    FORM_ORDER,
+    canonical_form,
+    config_label_scheme_tag,
+    label_scheme_tag,
+    read_label_scheme,
+)
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -177,15 +183,30 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--forms", default="all", help="all or comma-separated forms")
     parser.add_argument("--region-set", default="all")
     parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3], default=None)
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("raw_data"),
+        help=(
+            "dataset whose label scheme selects which experiments to draw; "
+            "raw_data (no label_scheme.json) keeps the historical binary names"
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
     form_filter = _parse_forms(args.forms)
+    dataset_tag = label_scheme_tag(read_label_scheme(args.data_dir))
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    manifest: dict[str, Any] = {"files": [], "output_dir": output_dir}
+    manifest: dict[str, Any] = {
+        "files": [],
+        "output_dir": output_dir,
+        "data_dir": str(Path(args.data_dir).resolve()),
+        "label_scheme_tag": dataset_tag,
+    }
     generated = 0
     for directory in sorted(args.experiments_dir.resolve().iterdir()):
         if not directory.is_dir():
@@ -194,6 +215,10 @@ def main() -> None:
         history = _read_json(directory / "history.json", [])
         metrics = _read_json(directory / "metrics.json", {})
         if not isinstance(config, dict) or not isinstance(history, list):
+            continue
+        # Experiments are scoped to one dataset: a 3-class run must not be drawn
+        # into (or overwrite) the historical binary curves.
+        if config_label_scheme_tag(config) != dataset_tag:
             continue
         form = str(config.get("form", ""))
         region = str(config.get("region_name", ""))
@@ -205,7 +230,8 @@ def main() -> None:
         if args.channel_mode is not None and channel != str(args.channel_mode):
             continue
         file_name = (
-            f"form_{_safe_name(form)}__regions_{_safe_name(region)}__channels_{_safe_name(channel)}.png"
+            f"form_{_safe_name(form)}__regions_{_safe_name(region)}__channels_{_safe_name(channel)}"
+            f"{'' if dataset_tag is None else '__' + dataset_tag}.png"
         )
         output_path = output_dir / file_name
         title = f"{form} | {region} | channel_mode={channel}"

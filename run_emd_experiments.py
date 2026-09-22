@@ -22,18 +22,23 @@ import numpy as np
 
 from emd_pipeline import (
     DepthMapper,
+    EMD_FEATURE_PRESETS,
     EMDConfig,
     FORM_ORDER,
+    LOCATOR_FEATURE_PRESETS,
     MLPConfig,
     RegionSpec,
     StandardScaler,
     ADC_DC_MAGNITUDE,
-    binary_metrics,
     build_feature_matrix,
     canonical_form,
+    classification_metrics,
+    feature_dimension_names,
     json_ready,
+    label_scheme_tag,
     load_split,
     parse_regions,
+    read_label_scheme,
     write_json,
     NumpyMLPClassifier,
 )
@@ -101,12 +106,41 @@ def _parse_args() -> argparse.Namespace:
             "(the historical channel-3 behaviour)"
         ),
     )
+    parser.add_argument(
+        "--feature-set",
+        choices=sorted(EMD_FEATURE_PRESETS),
+        default="compact",
+        help=(
+            "per-IMF statistic set: legacy keeps the original 8 (including the "
+            "mathematically zero 'mean' of an IMF), compact drops 'mean', lean also "
+            "drops 'energy'"
+        ),
+    )
+    parser.add_argument(
+        "--locator-features",
+        choices=sorted(LOCATOR_FEATURE_PRESETS),
+        default="core",
+        help=(
+            "depth-locator block appended to the envelope main window: core adds the "
+            "merged onset and the envelope peak in mm, full adds the weak threshold "
+            "crossing, rise time, merge extension and peak amplitude, none disables it"
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--patience", type=int, default=40)
     parser.add_argument("--hidden-dims", default="64,32")
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--num-classes",
+        type=int,
+        default=None,
+        help=(
+            "number of classes in the target; omit to infer it from the labels "
+            "of every split (2 for the default depth>=1.0mm labels)"
+        ),
+    )
     parser.add_argument(
         "--max-samples",
         type=int,
@@ -130,7 +164,11 @@ def _region_experiments(args: argparse.Namespace) -> list[tuple[str, list[Region
 
 
 def _experiment_name(
-    form: str, region_name: str, channel_mode: int, channel_aggregation: str = "per_channel"
+    form: str,
+    region_name: str,
+    channel_mode: int,
+    channel_aggregation: str = "per_channel",
+    label_tag: str | None = None,
 ) -> str:
     """Directory name for one experiment.
 
@@ -138,11 +176,24 @@ def _experiment_name(
     existing directories still line up.  ``pooled`` (the legacy channel-3
     behaviour, now used as an ablation baseline) gets a suffix, otherwise it
     would silently overwrite the ``per_channel`` run in the same directory.
+
+    A dataset that ships a ``label_scheme.json`` (i.e. one produced by
+    ``raw_data/relabel_by_thickness.py``) appends its tag for the same reason:
+    a 3-class run must not land on top of the binary results it is meant to be
+    compared with.
     """
     name = f"form_{form}__regions_{region_name}__channels_{channel_mode}"
     if channel_aggregation != "per_channel":
         name = f"{name}__{channel_aggregation}"
+    if label_tag:
+        name = f"{name}__{label_tag}"
     return name
+
+
+def _dataset_tag(data_dir: Path) -> str | None:
+    """Label-scheme tag of a relabelled dataset, sanitised for a directory name."""
+
+    return label_scheme_tag(_read_label_scheme(data_dir))
 
 
 def _feature_group_dims(info: object) -> tuple[int, ...]:
@@ -188,6 +239,40 @@ def _best_history_record(
     return best
 
 
+def _infer_num_classes(data_dir: Path, max_samples: int | None = None) -> int:
+    """Smallest class count that covers every label in every split.
+
+    Only ``y.npy`` is read here, so this costs microseconds compared with the
+    EMD feature extraction that follows and lets the MLP head be sized before
+    any of that work is done.
+    """
+
+    highest = -1
+    for split in ("train", "val", "test"):
+        path = data_dir / split / "y.npy"
+        if not path.is_file():
+            raise FileNotFoundError(f"missing label file: {path}")
+        labels = np.load(path)
+        if max_samples is not None:
+            labels = labels[:max_samples]
+        if labels.size:
+            highest = max(highest, int(labels.max()))
+    if highest < 0:
+        raise ValueError(f"no labels found under {data_dir}")
+    return highest + 1
+
+
+def _read_label_scheme(data_dir: Path) -> dict[str, object] | None:
+    """The threshold scheme recorded by ``raw_data/relabel_by_thickness.py``.
+
+    Thin wrapper around :func:`emd_pipeline.read_label_scheme` so that the
+    visualisation scripts and the training script agree on both the file name
+    and the "absent file means the historical 1.0 mm binary split" rule.
+    """
+
+    return read_label_scheme(data_dir)
+
+
 def run_one(
     data_dir: Path,
     output_dir: Path,
@@ -210,19 +295,30 @@ def run_one(
         sift_sd_threshold=args.sift_sd_threshold,
         stream_aggregation=args.stream_aggregation,
         channel_aggregation=args.channel_aggregation,
+        feature_names=EMD_FEATURE_PRESETS[args.feature_set],
+        locator_features=args.locator_features,
     )
     dynamic_envelope_config = (
         dyn_config_from_args(args) if region_name == DYNAMIC_REGION_NAME else None
     )
     hidden_dims = tuple(int(item) for item in args.hidden_dims.split(",") if item.strip())
+    inferred_classes = _infer_num_classes(data_dir, args.max_samples)
+    if args.num_classes is not None and args.num_classes < inferred_classes:
+        raise ValueError(
+            f"--num-classes {args.num_classes} cannot hold the labels in {data_dir}, "
+            f"which need at least {inferred_classes} classes"
+        )
+    num_classes = inferred_classes if args.num_classes is None else int(args.num_classes)
     mlp_config = MLPConfig(
         hidden_dims=hidden_dims,
+        num_classes=num_classes,
         learning_rate=args.learning_rate,
         dropout=args.dropout,
         epochs=args.epochs,
         patience=args.patience,
         seed=args.seed,
     )
+    label_scheme = _read_label_scheme(data_dir)
     experiment_config = {
         "form": form,
         "region_name": region_name,
@@ -236,10 +332,20 @@ def run_one(
         "emd": emd_config,
         "mlp": mlp_config,
         "data_dir": data_dir,
+        "num_classes": num_classes,
+        "label_scheme": label_scheme,
         "adc_dc_replacement": ADC_DC_MAGNITUDE,
         "max_samples": args.max_samples,
     }
     write_json(output_dir / "config.json", experiment_config)
+    print(
+        f"[{form}/{region_name}] data_dir={data_dir.name}, num_classes={num_classes}"
+        + (
+            ""
+            if label_scheme is None
+            else f", thresholds_mm={label_scheme.get('thresholds_mm')}"
+        )
+    )
 
     split_data: dict[str, tuple[np.ndarray, np.ndarray, list[dict[str, object]]]] = {}
     feature_data: dict[str, np.ndarray] = {}
@@ -275,6 +381,17 @@ def run_one(
     scaler = StandardScaler().fit(train_features)
     scaled = {split: scaler.transform(features) for split, features in feature_data.items()}
     scaler.save(output_dir / "standard_scaler.npz")
+    # A degenerate column carries no variation, so the classifier sees a constant.
+    # Name them: an unexpected entry here means the feature set is not what it
+    # was thought to be.
+    dimension_names = feature_dimension_names(feature_info["train"][0], emd_config)
+    degenerate_indices = scaler.degenerate_indices
+    if degenerate_indices:
+        named = ", ".join(
+            dimension_names[index] if index < len(dimension_names) else f"dim{index}"
+            for index in degenerate_indices
+        )
+        print(f"[{form}/{region_name}] constant feature columns (mapped to 0): {named}")
     feature_group_dims = _feature_group_dims(feature_info["train"])
     model = NumpyMLPClassifier(
         input_dim=train_features.shape[1],
@@ -296,16 +413,24 @@ def run_one(
     metrics: dict[str, object] = {
         "feature_dim": int(train_features.shape[1]),
         "feature_group_dims": [int(width) for width in feature_group_dims],
+        "feature_dimension_names": dimension_names,
+        "degenerate_feature_indices": [int(index) for index in degenerate_indices],
+        "degenerate_feature_names": [
+            dimension_names[index] if index < len(dimension_names) else f"dim{index}"
+            for index in degenerate_indices
+        ],
         "model_layout": model.parameter_layout(),
         "best_epoch": None if best_record is None else best_record.get("epoch"),
         "trained_epochs": 0 if not history else history[-1].get("epoch"),
         "best_val_auc": None if best_record is None else best_record.get("val_auc"),
         "best_val_loss": None if best_record is None else best_record.get("val_loss"),
         "split_counts": {split: int(split_data[split][1].size) for split in split_data},
+        "num_classes": num_classes,
+        "label_scheme": label_scheme,
         "class_counts": {
             split: {
-                "0": int(np.sum(split_data[split][1] == 0)),
-                "1": int(np.sum(split_data[split][1] == 1)),
+                str(label): int(np.sum(split_data[split][1] == label))
+                for label in range(num_classes)
             }
             for split in split_data
         },
@@ -313,13 +438,16 @@ def run_one(
     }
     for split in ("train", "val", "test"):
         probabilities = model.predict_proba(scaled[split])
-        metrics["metrics"][split] = binary_metrics(split_data[split][1], probabilities)
+        metrics["metrics"][split] = classification_metrics(
+            split_data[split][1], probabilities, num_classes
+        )
         np.save(output_dir / f"probabilities_{split}.npy", probabilities)
     write_json(output_dir / "feature_info.json", feature_info)
     write_json(output_dir / "metrics.json", metrics)
     elapsed = time.time() - start_time
     print(
         f"[{form}/{region_name}] done: feature_dim={train_features.shape[1]}, "
+        f"num_classes={num_classes}, test_accuracy={metrics['metrics']['test']['accuracy']}, "
         f"test_auc={metrics['metrics']['test']['auc']}, time={elapsed:.1f}s"
     )
     return metrics
@@ -331,18 +459,21 @@ def main() -> None:
     output_dir = args.output_dir.resolve()
     forms = _parse_forms(args.forms)
     region_experiments = _region_experiments(args)
+    dataset_tag = _dataset_tag(data_dir)
     all_results: dict[str, object] = {
         "data_dir": data_dir,
         "output_dir": output_dir,
         "forms": forms,
         "regions": {name: regions for name, regions in region_experiments},
         "channel_mode": args.channel_mode,
+        "dataset_tag": dataset_tag,
+        "label_scheme": _read_label_scheme(data_dir),
         "results": {},
     }
     for form in forms:
         for region_name, regions in region_experiments:
             experiment_name = _experiment_name(
-                form, region_name, args.channel_mode, args.channel_aggregation
+                form, region_name, args.channel_mode, args.channel_aggregation, dataset_tag
             )
             experiment_dir = output_dir / experiment_name
             result = run_one(

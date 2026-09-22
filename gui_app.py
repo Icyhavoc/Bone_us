@@ -5,6 +5,11 @@ compare available experiment summaries, or select one frame-processing form
 to inspect its metrics, training curve, preprocessing plots, and EMD component
 plots.  The training button runs the existing training script in a background
 worker for the selected concrete channel.
+
+A dataset selector scopes everything to one label scheme.  ``raw_data`` is the
+historical 1.0 mm binary split; datasets written under ``raw_data_relabeled/``
+(2-class 1.3 mm, 3-class 0.8/1.2 mm, ...) are discovered from their
+``label_scheme.json`` and trained, visualised, and browsed independently.
 """
 
 from __future__ import annotations
@@ -16,16 +21,30 @@ import subprocess
 import sys
 import tkinter as tk
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import ttk
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 from PIL import Image, ImageTk
+
+from emd_pipeline import (
+    class_display_names,
+    label_scheme_tag,
+    label_thresholds,
+    read_label_scheme,
+)
 
 
 APP_DIR = Path(__file__).resolve().parent
 EXPERIMENTS_DIR = APP_DIR / "experiments"
 VISUALIZATIONS_DIR = APP_DIR / "visualizations"
+RAW_DATA_DIR = APP_DIR / "raw_data"
+RELABELED_DATA_DIR = APP_DIR / "raw_data_relabeled"
+# ``raw_data`` predates ``label_scheme.json``; its stored rule is
+# ``label = int(depth_value >= 1.0)``, re-verified against the stored labels.
+DEFAULT_BINARY_THRESHOLDS: tuple[float, ...] = (1.0,)
+CLASS_NUMBER_WORDS = {2: "二分类", 3: "三分类", 4: "四分类"}
 
 FORM_LABELS = {
     "all": "全部预处理方式",
@@ -42,6 +61,101 @@ REGION_LABELS = {
     "dyn_envelope": "Dynamic Envelope",
     "custom": "自定义区域",
 }
+
+
+@dataclass(frozen=True)
+class DatasetProfile:
+    """One selectable training dataset, described by its label scheme.
+
+    ``tag`` is the dataset's label-scheme marker: ``None`` for the historical
+    ``raw_data`` binary split, otherwise the tag stored in
+    ``label_scheme.json``.  It is also the sub-directory name used to keep the
+    per-dataset visualisations apart and the suffix appended to experiment and
+    image file names by the command-line scripts.
+    """
+
+    data_dir: Path
+    num_classes: int
+    thresholds: tuple[float, ...]
+    tag: str | None
+
+    @property
+    def is_default(self) -> bool:
+        """True when the dataset has no label scheme (the historical split)."""
+
+        return self.tag is None
+
+    @property
+    def display(self) -> str:
+        """Combo-box label, e.g. ``三分类 · 阈值 0.8 / 1.2 mm · cls3_thr0.8_1.2``."""
+
+        kind = CLASS_NUMBER_WORDS.get(self.num_classes, f"{self.num_classes} 分类")
+        thresholds = " / ".join(str(float(value)) for value in self.thresholds)
+        if self.is_default:
+            return f"默认 · {kind} · depth >= {thresholds} mm"
+        return f"{kind} · 阈值 {thresholds} mm · {self.data_dir.name}"
+
+    @property
+    def class_names(self) -> list[str]:
+        """One display name per label, preferring the recorded scheme."""
+
+        return class_display_names(read_label_scheme(self.data_dir), self.num_classes)
+
+    @property
+    def class_tokens(self) -> list[str]:
+        """File-name tokens used by the preprocessing/EMD visualisations.
+
+        Mirrors ``visualize_preprocessing.class_file_token``: the historical
+        binary pair keeps ``imminent``/``safe``, a k-class dataset uses
+        ``label0``..``label{k-1}``.
+        """
+
+        if self.num_classes <= 2:
+            return ["imminent", "safe"]
+        return [f"label{index}" for index in range(self.num_classes)]
+
+
+def discover_datasets() -> list[DatasetProfile]:
+    """Every dataset the GUI can train and browse, historical default first.
+
+    Candidates are ``raw_data`` plus each sub-directory of
+    ``raw_data_relabeled/`` that carries a ``label_scheme.json``.  Directory
+    order is stable so the default dataset stays selected across reloads.
+    """
+
+    candidates: list[Path] = [RAW_DATA_DIR]
+    if RELABELED_DATA_DIR.exists():
+        candidates.extend(
+            sorted(
+                directory
+                for directory in RELABELED_DATA_DIR.iterdir()
+                if directory.is_dir() and (directory / "label_scheme.json").exists()
+            )
+        )
+    profiles: list[DatasetProfile] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved in seen or not resolved.exists():
+            continue
+        seen.add(resolved)
+        scheme = read_label_scheme(resolved)
+        thresholds = tuple(label_thresholds(scheme)) if scheme else DEFAULT_BINARY_THRESHOLDS
+        num_classes = len(thresholds) + 1 if thresholds else 2
+        profiles.append(
+            DatasetProfile(
+                data_dir=resolved,
+                num_classes=num_classes,
+                thresholds=thresholds,
+                tag=label_scheme_tag(scheme),
+            )
+        )
+    return profiles
+
+
 def _read_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
@@ -85,14 +199,73 @@ def _best_history_info(
     return best_epoch, int(history[-1].get("epoch", 0))
 
 
-class ExperimentCatalog:
-    """Read summary/metric files and find matching generated image files."""
+def _row_num_classes(config: Any, metrics: Any) -> int:
+    """Class count of a saved run, defaulting to the historical binary pair.
 
-    def __init__(self, experiments_dir: Path, visualizations_dir: Path) -> None:
+    Newer ``config.json``/``metrics.json`` files record ``num_classes``
+    directly; older binary runs only carry the ``tn``/``fp``/``fn``/``tp``
+    quadruple, which is why the fallback is 2 rather than an error.
+    """
+
+    if isinstance(config, dict) and config.get("num_classes") is not None:
+        try:
+            return max(2, int(config["num_classes"]))
+        except (TypeError, ValueError):
+            pass
+    if isinstance(metrics, dict):
+        if metrics.get("num_classes") is not None:
+            try:
+                return max(2, int(metrics["num_classes"]))
+            except (TypeError, ValueError):
+                pass
+        for block in metrics.values():
+            if not isinstance(block, dict):
+                continue
+            matrix = block.get("confusion_matrix")
+            if isinstance(matrix, (list, tuple)) and len(matrix) >= 2:
+                return len(matrix)
+    return 2
+
+
+class ExperimentCatalog:
+    """Read summary/metric files and find matching generated image files.
+
+    Every lookup is scoped to :attr:`dataset`: experiments recorded with a
+    different ``label_scheme`` tag are invisible, and (when the dataset is not
+    the historical default) images are read from the dataset's own
+    ``<kind>/<tag>/`` sub-directory, so nothing leaks between label schemes.
+    """
+
+    def __init__(
+        self,
+        experiments_dir: Path,
+        visualizations_dir: Path,
+        dataset: DatasetProfile | None = None,
+    ) -> None:
         self.experiments_dir = experiments_dir
         self.visualizations_dir = visualizations_dir
+        self.dataset = dataset
         self.summary: dict[str, Any] = {}
         self.rows: list[dict[str, Any]] = []
+
+    def set_dataset(self, dataset: DatasetProfile | None) -> None:
+        self.dataset = dataset
+
+    @property
+    def _dataset_tag(self) -> str | None:
+        return None if self.dataset is None else self.dataset.tag
+
+    def _kind_root(self, kind: str) -> Path:
+        """Image root for one visualisation kind, scoped to the dataset.
+
+        The historical binary artefacts live directly under
+        ``visualizations/<kind>/`` and keep that location; a relabelled dataset
+        gets ``visualizations/<kind>/<tag>/`` so the two never collide.
+        """
+
+        root = self.visualizations_dir / kind
+        tag = self._dataset_tag
+        return root if tag is None else root / tag
 
     def reload(self) -> None:
         self.summary = _read_json(self.experiments_dir / "summary.json", {})
@@ -114,10 +287,15 @@ class ExperimentCatalog:
             mlp_config = config.get("mlp", {})
             min_delta = float(mlp_config.get("min_delta", 1e-4)) if isinstance(mlp_config, dict) else 1e-4
             fallback_best_epoch, fallback_trained_epochs = _best_history_info(history, min_delta)
+            label_scheme = config.get("label_scheme") if isinstance(config, dict) else None
             rows.append(
                 {
                     "name": directory.name,
                     "directory": directory,
+                    "label_tag": label_scheme_tag(
+                        label_scheme if isinstance(label_scheme, dict) else None
+                    ),
+                    "num_classes": _row_num_classes(config, metrics),
                     "form": config.get("form", self._parse_name(directory.name, "form")),
                     "region": config.get(
                         "region_name", self._parse_name(directory.name, "region")
@@ -154,6 +332,10 @@ class ExperimentCatalog:
 
     def filtered_rows(self, form: str, region: str, channel: str) -> list[dict[str, Any]]:
         rows = self.rows
+        # Experiments carry the label-scheme tag of the dataset they were
+        # trained on; a 3-class run is not an "alternative" of a binary one.
+        if self.dataset is not None:
+            rows = [row for row in rows if row["label_tag"] == self.dataset.tag]
         if form != "all":
             rows = [row for row in rows if row["form"] == form]
         if region != "all":
@@ -168,14 +350,23 @@ class ExperimentCatalog:
         form: str,
         region: str,
         channel: str,
-        class_filter: str,
+        class_filter: str = "all",
+        class_tokens: Sequence[str] | None = None,
     ) -> list[Path]:
-        """Find new channel-aware files, with fallback to legacy filenames."""
+        """Find new channel-aware files, with fallback to legacy filenames.
 
-        root = self.visualizations_dir / kind
+        ``class_filter`` selects one class token; ``"all"`` expands to every
+        token of the current dataset, so a 3-class dataset collects
+        ``label0``..``label2`` instead of the historical ``imminent``/``safe``.
+        """
+
+        root = self._kind_root(kind)
         if not root.exists() or form == "all":
             return []
-        classes = ["imminent", "safe"] if class_filter == "all" else [class_filter]
+        if class_filter == "all":
+            classes = list(class_tokens) if class_tokens else ["imminent", "safe"]
+        else:
+            classes = [class_filter]
         regions = [region]
         if region == "all":
             regions = ["*"]
@@ -200,10 +391,11 @@ class ExperimentCatalog:
     ) -> dict[str, dict[str, Path]]:
         """Return selectable preprocessing image pairs keyed by configuration."""
 
-        root = self.visualizations_dir / "preprocessing"
+        root = self._kind_root("preprocessing")
         pattern = re.compile(
             r"^form_(?P<form>.+?)__regions_(?P<region>.+?)"
-            r"(?:__channels_(?P<channel>[123]))?__class_(?P<class>imminent|safe)\.png$"
+            r"(?:__channels_(?P<channel>[123]))?"
+            r"__class_(?P<class>imminent|safe|label\d+)(?:__.+)?\.png$"
         )
         options: dict[str, dict[str, Path]] = {}
         if not root.exists():
@@ -231,44 +423,48 @@ class ExperimentCatalog:
         return options
 
     def training_curve_files(self, form: str, region: str, channel: str) -> list[Path]:
-        root = self.visualizations_dir / "training_curves"
+        root = self._kind_root("training_curves")
         if not root.exists():
             return []
         form_part = "*" if form == "all" else form
         region_part = "*" if region == "all" else region
         channel_part = "*" if channel == "all" else channel
+        tag = self._dataset_tag
+        suffix = "" if tag is None else f"__{tag}"
         pattern = (
-            f"form_{form_part}__regions_{region_part}__channels_{channel_part}.png"
+            f"form_{form_part}__regions_{region_part}__channels_{channel_part}{suffix}.png"
         )
         return sorted(root.glob(pattern))
 
     def confusion_matrix_files(
         self, form: str, region: str, channel: str, split: str = "test"
     ) -> list[Path]:
-        root = self.visualizations_dir / "confusion_matrices"
+        root = self._kind_root("confusion_matrices")
         if not root.exists() or form == "all":
             return []
         form_part = form
         region_part = "*" if region == "all" else region
         channel_part = "*" if channel == "all" else channel
+        tag = self._dataset_tag
+        suffix = "" if tag is None else f"__{tag}"
         pattern = (
             f"form_{form_part}__regions_{region_part}__channels_{channel_part}"
-            f"__split_{split}.png"
+            f"__split_{split}{suffix}.png"
         )
         return sorted(root.glob(pattern))
 
     def confusion_matrix_options(self, split: str = "test") -> dict[str, Path]:
         """Return all generated confusion matrices for the target selector."""
 
-        root = self.visualizations_dir / "confusion_matrices"
+        root = self._kind_root("confusion_matrices")
         pattern = re.compile(
             rf"^form_(?P<form>.+?)__regions_(?P<region>.+?)"
-            rf"__channels_(?P<channel>[123])__split_{re.escape(split)}\.png$"
+            rf"__channels_(?P<channel>[123])__split_{re.escape(split)}(?:__.+)?\.png$"
         )
         options: dict[str, Path] = {}
         if not root.exists():
             return options
-        for path in sorted(root.glob(f"*__split_{split}.png")):
+        for path in sorted(root.glob("*.png")):
             match = pattern.match(path.name)
             if match is None:
                 continue
@@ -280,22 +476,26 @@ class ExperimentCatalog:
         return options
 
     def error_by_thickness_files(self, form: str, region: str, channel: str) -> list[Path]:
-        root = self.visualizations_dir / "error_by_thickness"
+        root = self._kind_root("error_by_thickness")
         if not root.exists():
             return []
         form_part = "*" if form == "all" else form
         region_part = "*" if region == "all" else region
         channel_part = "*" if channel == "all" else channel
-        pattern = f"form_{form_part}__regions_{region_part}__channels_{channel_part}.png"
+        tag = self._dataset_tag
+        suffix = "" if tag is None else f"__{tag}"
+        pattern = (
+            f"form_{form_part}__regions_{region_part}__channels_{channel_part}{suffix}.png"
+        )
         return sorted(root.glob(pattern))
 
     def error_by_thickness_options(self) -> dict[str, Path]:
         """Return all generated thickness-vs-error charts for the target selector."""
 
-        root = self.visualizations_dir / "error_by_thickness"
+        root = self._kind_root("error_by_thickness")
         pattern = re.compile(
             r"^form_(?P<form>.+?)__regions_(?P<region>.+?)"
-            r"__channels_(?P<channel>[123])\.png$"
+            r"__channels_(?P<channel>[123])(?:__.+)?\.png$"
         )
         options: dict[str, Path] = {}
         if not root.exists():
@@ -364,13 +564,19 @@ class ScrollableImagePanel(ttk.Frame):
 
 
 class SynchronizedImageColumns(ttk.Frame):
-    """Show four equal-width image columns with synchronized scrolling."""
+    """Show current/target image column pairs with synchronized scrolling.
+
+    The binary datasets render the historical four columns; a dataset with
+    ``k`` classes renders ``2 * k`` columns.
+    """
 
     def __init__(self, parent: tk.Misc, titles: Iterable[str]) -> None:
         super().__init__(parent)
         self._titles = list(titles)
-        if len(self._titles) != 4:
-            raise ValueError("Exactly four image columns are required")
+        if not self._titles:
+            raise ValueError("At least one image column is required")
+        if len(self._titles) % 2:
+            raise ValueError("Image columns must come in current/target pairs")
         self._paths: list[list[Path]] = [[] for _ in self._titles]
         self._message: str | None = None
         self._photo_refs: list[ImageTk.PhotoImage] = []
@@ -433,8 +639,10 @@ class SynchronizedImageColumns(ttk.Frame):
 
     def show_columns(self, paths_by_column: Iterable[Iterable[Path]]) -> None:
         columns = [list(paths) for paths in paths_by_column]
-        if len(columns) != 4:
-            raise ValueError("Exactly four image columns are required")
+        if len(columns) != len(self._titles):
+            raise ValueError(
+                f"Expected {len(self._titles)} image columns, got {len(columns)}"
+            )
         self._paths = columns
         self._message = None
         self._schedule_render()
@@ -680,9 +888,15 @@ class EMDViewerApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("EMD + MLP 实验查看器")
-        self.geometry("1450x920")
+        self.geometry("1520x920")
         self.minsize(1100, 700)
-        self.catalog = ExperimentCatalog(EXPERIMENTS_DIR, VISUALIZATIONS_DIR)
+        self.datasets = discover_datasets()
+        self.dataset_map = {profile.display: profile for profile in self.datasets}
+        self.catalog = ExperimentCatalog(
+            EXPERIMENTS_DIR,
+            VISUALIZATIONS_DIR,
+            self.datasets[0] if self.datasets else None,
+        )
         self.training_active = False
         self.training_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self._build_style()
@@ -705,38 +919,48 @@ class EMDViewerApp(tk.Tk):
         ttk.Label(header, text="EMD + MLP 实验查看器", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             header,
-            text="选择全部方法查看汇总；选择单一方法查看对应指标、预处理信号和 EMD 分量。",
+            text=(
+                "选择数据集决定使用哪套厚度阈值划分；再选预处理方式/区域/通道查看指标、"
+                "预处理信号和 EMD 分量。"
+            ),
             style="Hint.TLabel",
         ).pack(anchor="w", pady=(3, 0))
 
         controls = ttk.Frame(self, padding=(16, 4, 16, 10))
         controls.pack(fill="x")
+        self.dataset_var = tk.StringVar(
+            value=self.datasets[0].display if self.datasets else ""
+        )
         self.form_var = tk.StringVar(value="all")
         self.region_var = tk.StringVar(value="all")
         self.channel_var = tk.StringVar(value="1")
         self.status_var = tk.StringVar(value="")
-        self._add_combo(controls, "预处理方式", self.form_var, list(FORM_LABELS), 0, "form")
-        self._add_combo(controls, "区域组合", self.region_var, list(REGION_LABELS), 2, "region")
-        self._add_combo(controls, "通道", self.channel_var, ["all", "1", "2", "3"], 4, "channel")
-        ttk.Button(controls, text="刷新", command=self.refresh).grid(row=0, column=6, padx=(18, 4))
+        self._add_combo(
+            controls, "数据集", self.dataset_var, list(self.dataset_map), 0, "dataset", width=32
+        )
+        self._add_combo(controls, "预处理方式", self.form_var, list(FORM_LABELS), 2, "form")
+        self._add_combo(controls, "区域组合", self.region_var, list(REGION_LABELS), 4, "region")
+        self._add_combo(controls, "通道", self.channel_var, ["all", "1", "2", "3"], 6, "channel")
+        ttk.Button(controls, text="刷新", command=self.refresh).grid(row=0, column=8, padx=(18, 4))
         ttk.Button(controls, text="打开实验目录", command=self._open_experiment_dir).grid(
-            row=0, column=7, padx=4
+            row=0, column=9, padx=4
         )
         self.train_button = ttk.Button(controls, text="开始训练", command=self.start_training)
-        self.train_button.grid(row=0, column=8, padx=4)
+        self.train_button.grid(row=0, column=10, padx=4)
         self.auto_visualize_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             controls,
             text="训练后生成图像",
             variable=self.auto_visualize_var,
-        ).grid(row=0, column=9, padx=(4, 0))
-        for column in (1, 3, 5):
+        ).grid(row=0, column=11, padx=(4, 0))
+        for column in (1, 3, 5, 7):
             controls.columnconfigure(column, weight=1)
+        self.dataset_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_dataset_change())
         self.form_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
         self.region_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
         self.channel_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
         ttk.Label(controls, textvariable=self.status_var, style="Hint.TLabel").grid(
-            row=1, column=0, columnspan=10, sticky="w", pady=(8, 0)
+            row=1, column=0, columnspan=12, sticky="w", pady=(8, 0)
         )
 
     def _add_combo(
@@ -747,6 +971,7 @@ class EMDViewerApp(tk.Tk):
         values: list[str],
         column: int,
         attribute_name: str,
+        width: int = 20,
     ) -> None:
         ttk.Label(parent, text=label).grid(row=0, column=column, sticky="w", padx=(0, 6))
         combo = ttk.Combobox(
@@ -754,7 +979,7 @@ class EMDViewerApp(tk.Tk):
             textvariable=variable,
             values=values,
             state="readonly",
-            width=20,
+            width=width,
         )
         combo.grid(row=0, column=column + 1, sticky="ew", padx=(0, 10))
         setattr(self, f"{attribute_name}_combo", combo)
@@ -845,18 +1070,18 @@ class EMDViewerApp(tk.Tk):
         )
         self.preprocessing_choice.pack(side="left", fill="x", expand=True, padx=(8, 0))
         self.preprocessing_choice.bind("<<ComboboxSelected>>", lambda _event: self._refresh_preprocessing_choice())
+        # Column count follows the dataset: 2 classes -> 4 columns (the
+        # historical layout), k classes -> 2k columns.
+        self._preprocessing_titles: tuple[str, ...] = tuple(
+            self._preprocessing_column_titles(self.catalog.dataset)
+        )
         self.preprocessing_columns = SynchronizedImageColumns(
             self.preprocessing_tab,
-            (
-                "当前组合：label=0（即将穿透）",
-                "当前组合：label=1（安全）",
-                "目标组合：label=0（即将穿透）",
-                "目标组合：label=1（安全）",
-            ),
+            self._preprocessing_titles,
         )
         self.preprocessing_columns.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.preprocessing_option_map: dict[str, dict[str, Path]] = {}
-        self._current_preprocessing_paths: tuple[list[Path], list[Path]] = ([], [])
+        self._current_preprocessing_paths: list[list[Path]] = []
 
         self.training_curve_images = ScrollableImagePanel(self.training_curve_tab)
         self.training_curve_images.pack(fill="both", expand=True)
@@ -915,27 +1140,66 @@ class EMDViewerApp(tk.Tk):
         self.emd_images = ScrollableImagePanel(self.emd_tab)
         self.emd_images.pack(fill="both", expand=True)
 
+    def _preprocessing_column_titles(self, profile: DatasetProfile | None) -> list[str]:
+        """Column titles for the current/target pairs of one dataset.
+
+        A binary dataset yields the historical four titles; a k-class dataset
+        yields ``当前组合``/``目标组合`` for every label.
+        """
+
+        num_classes = 2 if profile is None else profile.num_classes
+        names = ["即将穿透", "安全"] if profile is None else profile.class_names
+        titles: list[str] = []
+        for prefix in ("当前组合", "目标组合"):
+            for label in range(num_classes):
+                name = names[label] if label < len(names) else f"label={label}"
+                titles.append(f"{prefix}：label={label}（{name}）")
+        return titles
+
+    def _class_tokens(self) -> list[str]:
+        """File-name tokens of the current dataset's classes."""
+
+        profile = self.catalog.dataset
+        return ["imminent", "safe"] if profile is None else profile.class_tokens
+
+    def _rebuild_preprocessing_columns(self, profile: DatasetProfile | None) -> None:
+        """Recreate the side-by-side panel when the class count changes."""
+
+        titles = tuple(self._preprocessing_column_titles(profile))
+        if titles == self._preprocessing_titles:
+            return
+        self._preprocessing_titles = titles
+        self.preprocessing_columns.destroy()
+        self.preprocessing_columns = SynchronizedImageColumns(self.preprocessing_tab, titles)
+        self.preprocessing_columns.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    def _on_dataset_change(self) -> None:
+        profile = self.dataset_map.get(self.dataset_var.get())
+        self.catalog.set_dataset(profile)
+        self._rebuild_preprocessing_columns(profile)
+        self.refresh()
+
     def _refresh_preprocessing_choice(self) -> None:
         selected = self.preprocessing_choice_var.get()
         pair = self.preprocessing_option_map.get(selected, {})
-        imminent = pair.get("imminent")
-        safe = pair.get("safe")
-        current_imminent, current_safe = self._current_preprocessing_paths
-        self.preprocessing_columns.show_columns(
-            (
-                current_imminent,
-                current_safe,
-                [imminent] if imminent else [],
-                [safe] if safe else [],
-            )
-        )
+        tokens = self._class_tokens()
+        current = self._current_preprocessing_paths
+        columns: list[list[Path]] = [
+            list(current[index]) if index < len(current) else []
+            for index in range(len(tokens))
+        ]
+        for token in tokens:
+            path = pair.get(token)
+            columns.append([path] if path is not None else [])
+        self.preprocessing_columns.show_columns(columns)
 
-    def _refresh_preprocessing_layout(self, form: str, region: str, channel: str) -> tuple[int, int]:
-        imminent_paths = self.catalog.image_files("preprocessing", form, region, channel, "imminent")
-        safe_paths = self.catalog.image_files("preprocessing", form, region, channel, "safe")
-        self._current_preprocessing_paths = (imminent_paths, safe_paths)
-        left_imminent_count = len(imminent_paths)
-        left_safe_count = len(safe_paths)
+    def _refresh_preprocessing_layout(self, form: str, region: str, channel: str) -> list[int]:
+        tokens = self._class_tokens()
+        per_class = [
+            self.catalog.image_files("preprocessing", form, region, channel, token)
+            for token in tokens
+        ]
+        self._current_preprocessing_paths = per_class
 
         # The target selector is intentionally independent of the top-level
         # current-result filters, so it can compare any generated form,
@@ -946,7 +1210,7 @@ class EMDViewerApp(tk.Tk):
         if self.preprocessing_choice_var.get() not in self.preprocessing_option_map:
             self.preprocessing_choice_var.set(options[0] if options else "")
         self._refresh_preprocessing_choice()
-        return left_imminent_count, left_safe_count
+        return [len(paths) for paths in per_class]
 
     def _refresh_confusion_matrix_layout(self, form: str, region: str, channel: str) -> int:
         current_paths = self.catalog.confusion_matrix_files(form, region, channel, split="test")
@@ -989,7 +1253,10 @@ class EMDViewerApp(tk.Tk):
         channel = self.channel_var.get()
         rows = self.catalog.filtered_rows(form, region, channel)
         self._fill_summary(rows)
-        pre_imminent_count, pre_safe_count = self._refresh_preprocessing_layout(form, region, channel)
+        pre_counts = self._refresh_preprocessing_layout(form, region, channel)
+        pre_summary = "、".join(
+            f"label={index}/{count}" for index, count in enumerate(pre_counts)
+        )
         confusion_count = self._refresh_confusion_matrix_layout(form, region, channel)
         thickness_count = self._refresh_error_by_thickness_layout(form, region, channel)
         if form == "all":
@@ -997,23 +1264,28 @@ class EMDViewerApp(tk.Tk):
             curve_paths = self.catalog.training_curve_files(form, region, channel)
             curve_count = self.training_curve_images.show_images(curve_paths)
             self.status_var.set(
-                f"已加载 {len(rows)} 组实验摘要；预处理图 label=0/{pre_imminent_count}、"
-                f"label=1/{pre_safe_count}，训练曲线 {curve_count} 张，错分厚度分布 {thickness_count} 张。"
+                f"数据集：{self.dataset_var.get()}｜已加载 {len(rows)} 组实验摘要；"
+                f"预处理图 {pre_summary}，训练曲线 {curve_count} 张，"
+                f"错分厚度分布 {thickness_count} 张。"
             )
-            self.summary_hint.configure(text="当前显示所有可用实验的 summary；右侧可通过选择栏查看具体预处理组合。")
+            self.summary_hint.configure(
+                text="当前显示所选数据集下所有可用实验的 summary；右侧可通过选择栏查看具体预处理组合。"
+            )
             self._update_train_button()
             return
-        emd_paths = self.catalog.image_files("emd", form, region, channel, "all")
+        emd_paths = self.catalog.image_files(
+            "emd", form, region, channel, "all", self._class_tokens()
+        )
         curve_paths = self.catalog.training_curve_files(form, region, channel)
         curve_count = self.training_curve_images.show_images(curve_paths)
         emd_count = self.emd_images.show_images(emd_paths)
         self.status_var.set(
-            f"当前筛选 {len(rows)} 组实验；预处理图 label=0/{pre_imminent_count}、"
-            f"label=1/{pre_safe_count}，训练曲线 {curve_count} 张、EMD 图 {emd_count} 张，"
+            f"数据集：{self.dataset_var.get()}｜当前筛选 {len(rows)} 组实验；"
+            f"预处理图 {pre_summary}，训练曲线 {curve_count} 张、EMD 图 {emd_count} 张，"
             f"错分厚度分布 {thickness_count} 张。"
         )
         self.summary_hint.configure(
-            text="左侧显示当前筛选条件下的 label=0/1；右侧可通过选择栏查看任意已生成组合。"
+            text="左侧显示当前筛选条件下的各类别样本；右侧可通过选择栏查看任意已生成组合。"
         )
         self._update_train_button()
 
@@ -1032,7 +1304,12 @@ class EMDViewerApp(tk.Tk):
     def _set_controls_during_training(self, active: bool) -> None:
         self.training_active = active
         state = "disabled" if active else "readonly"
-        for combo in (self.form_combo, self.region_combo, self.channel_combo):
+        for combo in (
+            self.dataset_combo,
+            self.form_combo,
+            self.region_combo,
+            self.channel_combo,
+        ):
             combo.configure(state=state)
         self._update_train_button()
 
@@ -1042,9 +1319,31 @@ class EMDViewerApp(tk.Tk):
         channel = self.channel_var.get()
         if channel == "all":
             raise ValueError("训练时请选择具体通道 1、2 或 3。")
+        profile = self.catalog.dataset
+        data_dir = RAW_DATA_DIR if profile is None else profile.data_dir
+        num_classes = 2 if profile is None else profile.num_classes
+        tag = None if profile is None else profile.tag
+
+        def _scoped(kind: str) -> Path:
+            """Output dir for one figure kind, scoped per dataset tag."""
+
+            root = VISUALIZATIONS_DIR / kind
+            return root if tag is None else root / tag
+
+        def _class_label_args() -> list[str]:
+            """Explicit label list, only needed once there are 3+ classes."""
+
+            if num_classes <= 2:
+                return []
+            return ["--class-labels", ",".join(str(index) for index in range(num_classes))]
+
         training_command = [
             sys.executable,
             str(APP_DIR / "run_emd_experiments.py"),
+            "--data-dir",
+            str(data_dir),
+            "--num-classes",
+            str(num_classes),
             "--forms",
             form,
             "--region-set",
@@ -1061,6 +1360,8 @@ class EMDViewerApp(tk.Tk):
                     [
                         sys.executable,
                         str(APP_DIR / "visualize_preprocessing.py"),
+                        "--data-dir",
+                        str(data_dir),
                         "--forms",
                         form,
                         "--region-set",
@@ -1068,11 +1369,14 @@ class EMDViewerApp(tk.Tk):
                         "--channel-mode",
                         channel,
                         "--output-dir",
-                        str(VISUALIZATIONS_DIR / "preprocessing"),
+                        str(_scoped("preprocessing")),
+                        *_class_label_args(),
                     ],
                     [
                         sys.executable,
                         str(APP_DIR / "visualize_emd_components.py"),
+                        "--data-dir",
+                        str(data_dir),
                         "--forms",
                         form,
                         "--region-set",
@@ -1080,15 +1384,18 @@ class EMDViewerApp(tk.Tk):
                         "--channel-mode",
                         channel,
                         "--output-dir",
-                        str(VISUALIZATIONS_DIR / "emd"),
+                        str(_scoped("emd")),
+                        *_class_label_args(),
                     ],
                     [
                         sys.executable,
                         str(APP_DIR / "visualize_training_curves.py"),
                         "--experiments-dir",
                         str(EXPERIMENTS_DIR),
+                        "--data-dir",
+                        str(data_dir),
                         "--output-dir",
-                        str(VISUALIZATIONS_DIR / "training_curves"),
+                        str(_scoped("training_curves")),
                         "--forms",
                         form,
                         "--region-set",
@@ -1101,8 +1408,10 @@ class EMDViewerApp(tk.Tk):
                         str(APP_DIR / "visualize_confusion_matrix.py"),
                         "--experiments-dir",
                         str(EXPERIMENTS_DIR),
+                        "--data-dir",
+                        str(data_dir),
                         "--output-dir",
-                        str(VISUALIZATIONS_DIR / "confusion_matrices"),
+                        str(_scoped("confusion_matrices")),
                         "--forms",
                         form,
                         "--region-set",
@@ -1117,8 +1426,10 @@ class EMDViewerApp(tk.Tk):
                         str(APP_DIR / "visualize_error_by_thickness.py"),
                         "--experiments-dir",
                         str(EXPERIMENTS_DIR),
+                        "--data-dir",
+                        str(data_dir),
                         "--output-dir",
-                        str(VISUALIZATIONS_DIR / "error_by_thickness"),
+                        str(_scoped("error_by_thickness")),
                         "--forms",
                         form,
                         "--region-set",
@@ -1141,8 +1452,8 @@ class EMDViewerApp(tk.Tk):
         self._set_controls_during_training(True)
         self._append_log("=" * 70)
         self._append_log(
-            f"开始训练：form={self.form_var.get()}, region={self.region_var.get()}, "
-            f"channel={self.channel_var.get()}"
+            f"开始训练：dataset={self.dataset_var.get()}, form={self.form_var.get()}, "
+            f"region={self.region_var.get()}, channel={self.channel_var.get()}"
         )
         if self.auto_visualize_var.get():
             self._append_log("训练完成后将自动生成预处理图、EMD 分量图、训练曲线图和混淆矩阵图。")

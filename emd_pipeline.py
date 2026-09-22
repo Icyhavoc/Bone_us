@@ -26,7 +26,10 @@ import numpy as np
 
 
 # NumPy 2.0 renamed ``trapz`` to ``trapezoid``; support both so the pipeline runs
-# unchanged on NumPy 1.x and 2.x.
+# unchanged on NumPy 1.x and 2.x.  Nothing in the module calls it at the moment
+# (``_roc_auc`` now uses ranks instead of a staircase integral); it is kept for
+# any future curve integration so the NumPy-2 rename does not have to be
+# rediscovered.
 _trapezoid = getattr(np, "trapezoid", None) or getattr(np, "trapz")
 
 
@@ -197,6 +200,81 @@ class DynamicEnvelopeConfig:
             raise ValueError("dynamic envelope locator_top_k must be positive")
 
 
+#: Statistics computed for every IMF (and for the residue).  ``_component_features``
+#: is the only producer, but the set is named here so ``EMDConfig.validate`` and
+#: the reporting helpers can talk about the columns without recomputing them.
+_COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
+    "mean",
+    "std",
+    "rms",
+    "energy",
+    "abs_mean",
+    "peak_abs",
+    "zero_crossing_rate",
+    "spectral_centroid",
+)
+
+#: Ready-made ``EMDConfig.feature_names`` sets.
+#:
+#: ``mean`` is deliberately absent from every preset except ``legacy``.  EMD
+#: sifting drives each IMF's mean towards zero by construction, so on this data
+#: the column holds little but float32 round-off (measured ``std = 3.6e-5`` for
+#: branch 1, against a ``peak_abs`` of ``8.4e-2``).  That is small enough to look
+#: harmless once standardised, but it is still a dead input to the first dense
+#: layer, and dropping it was worth real accuracy: on
+#: ``form_top3_mean__regions_dyn_envelope__channels_1`` (161 training samples,
+#: 5-fold CV repeated over 8 seeds) removing just ``mean`` moved accuracy
+#: ``0.686 -> 0.700`` and AUC ``0.788 -> 0.799``.
+#:
+#: ``rms`` and ``energy`` are *not* duplicates after pooling, even though
+#: ``energy == rms ** 2`` holds per IMF: pooling averages ``sqrt(mean(x^2))`` and
+#: ``mean(x^2)`` separately, so the two final columns end up 0.95 (branch 1) /
+#: 0.91 (branch 2) correlated rather than identical.  Dropping ``energy`` too was
+#: neutral on accuracy and slightly worse on AUC (``0.796`` vs ``0.799``), so
+#: ``lean`` is available but ``compact`` is the default.
+EMD_FEATURE_PRESETS: dict[str, tuple[str, ...]] = {
+    "legacy": _COMPONENT_FEATURE_NAMES,
+    "compact": tuple(name for name in _COMPONENT_FEATURE_NAMES if name != "mean"),
+    "lean": tuple(
+        name for name in _COMPONENT_FEATURE_NAMES if name not in {"mean", "energy"}
+    ),
+}
+
+#: Ready-made ``EMDConfig.locator_features`` sets.  A locator feature describes
+#: *where* the dynamic envelope put the main window on the depth axis, which the
+#: branch signals themselves cannot express: the window is cut out of the trace
+#: and resampled, so every echo inside it is re-aligned to the window start and
+#: the absolute arrival depth is thrown away.
+#:
+#: ``core`` is the measured default.  On the same 8-seed CV above, adding the
+#: merged crossing (``onset_mm``) moved accuracy ``0.686 -> 0.715`` and AUC
+#: ``0.788 -> 0.800``; adding the envelope peak on top was neutral
+#: (``0.714`` / ``0.798``) but the two are complementary across feature sets, so
+#: both are kept.  A *larger* block is worse, not better: the full six-feature
+#: table scored ``0.696`` / ``0.793``, because the extra entries are near
+#: collinear with ``onset_mm`` and mostly add variance.
+LOCATOR_FEATURE_PRESETS: dict[str, tuple[str, ...]] = {
+    "core": ("onset_mm", "peak_mm"),
+    "full": (
+        "onset_mm",
+        "weak_onset_mm",
+        "peak_mm",
+        "rise_mm",
+        "merge_extension_mm",
+        "peak_amplitude",
+    ),
+    "none": (),
+}
+
+#: Name of the branch whose geometry the locator features describe.
+LOCATOR_BRANCH_NAME = "dynamic_main_window"
+
+#: Name of the fixed tail branch.  Both names are part of the feature layout:
+#: ``feature_dimension_names`` prefixes every column with them, so anything that
+#: labels a branch must read them here rather than repeat the literals.
+TAIL_BRANCH_NAME = "dynamic_tail_window"
+
+
 @dataclass(frozen=True)
 class EMDConfig:
     """EMD and feature-extraction settings."""
@@ -206,7 +284,7 @@ class EMDConfig:
     sift_sd_threshold: float = 0.2
     include_residue: bool = True
     # Pooled mode averages component/stream statistics and keeps each branch
-    # at len(feature_names) dimensions. Branches remain independent and are
+    # close to len(feature_names) dimensions. Branches remain independent and are
     # concatenated by sample_feature_vector.
     stream_aggregation: str = "pooled"
     # ``per_channel`` extracts one feature group per selected channel and
@@ -216,16 +294,15 @@ class EMDConfig:
     # With a single channel the two settings are identical, so modes 1 and 2
     # produce the same features under either value.
     channel_aggregation: str = "per_channel"
-    feature_names: tuple[str, ...] = (
-        "mean",
-        "std",
-        "rms",
-        "energy",
-        "abs_mean",
-        "peak_abs",
-        "zero_crossing_rate",
-        "spectral_centroid",
-    )
+    #: Which per-IMF statistics to compute; see :data:`EMD_FEATURE_PRESETS`.
+    feature_names: tuple[str, ...] = EMD_FEATURE_PRESETS["compact"]
+    #: Which depth-locator features to append to the envelope branch; a key of
+    #: :data:`LOCATOR_FEATURE_PRESETS`.  ``"none"`` restores the pre-locator
+    #: layout.  Only the ``dynamic_main_window`` branch carries the block, so
+    #: with ``locator_features="core"`` and ``channel_aggregation="per_channel"``
+    #: the feature dimension is unchanged by the channel mode, and
+    #: ``pooled``/``per_channel`` still agree for a single channel.
+    locator_features: str = "core"
 
     def validate(self) -> None:
         if self.max_imfs <= 0:
@@ -238,6 +315,16 @@ class EMDConfig:
             raise ValueError("stream_aggregation must be 'pooled', 'flatten', or 'stats'")
         if self.channel_aggregation not in {"pooled", "per_channel"}:
             raise ValueError("channel_aggregation must be 'pooled' or 'per_channel'")
+        if not self.feature_names:
+            raise ValueError("feature_names cannot be empty")
+        unknown = set(self.feature_names) - set(_COMPONENT_FEATURE_NAMES)
+        if unknown:
+            raise ValueError(f"Unknown EMD feature names: {sorted(unknown)}")
+        if self.locator_features not in LOCATOR_FEATURE_PRESETS:
+            raise ValueError(
+                "locator_features must be one of "
+                f"{sorted(LOCATOR_FEATURE_PRESETS)}, got {self.locator_features!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -245,6 +332,7 @@ class MLPConfig:
     """Small MLP settings for the current small dataset."""
 
     hidden_dims: tuple[int, ...] = (64, 32)
+    num_classes: int = 2
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     dropout: float = 0.1
@@ -257,6 +345,8 @@ class MLPConfig:
     def validate(self) -> None:
         if not self.hidden_dims or any(v <= 0 for v in self.hidden_dims):
             raise ValueError("hidden_dims must contain positive integers")
+        if self.num_classes < 2:
+            raise ValueError("num_classes must be at least 2")
         if self.learning_rate <= 0:
             raise ValueError("learning_rate must be positive")
         if self.weight_decay < 0:
@@ -849,6 +939,10 @@ def locate_dynamic_span(
         "automatic_crossing_index": automatic_before_manual,
         "manual_correction_applied": corrected,
         "local_peak_index": peaks,
+        "local_peak_value": np.asarray(
+            [smoothed[channel, int(peaks[channel])] for channel in range(channel_count)],
+            dtype=np.float64,
+        ),
         "threshold_value": thresholds,
         "premerge_crossing_index": premerge,
         "peak_search_window": windows,
@@ -952,7 +1046,7 @@ def prepare_dynamic_envelope_branches(
 
     branch_info = [
         {
-            "name": "dynamic_main_window",
+            "name": LOCATOR_BRANCH_NAME,
             "start_index": int(starts[0]),
             "end_index_exclusive": int(ends[0]),
             "start_index_by_channel": starts.astype(int).tolist(),
@@ -962,7 +1056,7 @@ def prepare_dynamic_envelope_branches(
             "feature_length": None,
         },
         {
-            "name": "dynamic_tail_window",
+            "name": TAIL_BRANCH_NAME,
             "start_index": int(tail_start),
             "end_index_exclusive": int(tail_end),
             "start_index_by_channel": [int(tail_start)] * channel_count,
@@ -989,6 +1083,7 @@ def prepare_dynamic_envelope_branches(
         "automatic_crossing_index": span["automatic_crossing_index"].astype(int).tolist(),
         "manual_correction_applied": span["manual_correction_applied"].astype(bool).tolist(),
         "local_peak_index": span["local_peak_index"].astype(int).tolist(),
+        "local_peak_value": span["local_peak_value"].astype(float).tolist(),
         "threshold_value": span["threshold_value"].astype(float).tolist(),
         "premerge_crossing_index": span["premerge_crossing_index"].astype(int).tolist(),
         "peak_search_window": span["peak_search_window"].astype(int).tolist(),
@@ -1084,11 +1179,26 @@ def emd_decompose(
     return imfs, residue.astype(np.float32)
 
 
-def _component_features(signal: np.ndarray, feature_names: Sequence[str]) -> np.ndarray:
+def _component_features(
+    signal: np.ndarray,
+    feature_names: Sequence[str],
+    sample_spacing: float | None = None,
+) -> np.ndarray:
+    """Per-component statistics, in the order given by ``feature_names``.
+
+    ``sample_spacing`` is the physical distance between consecutive samples, in
+    millimetres.  When it is given, ``spectral_centroid`` is reported in
+    **cycles/mm**: the branches are resampled from windows of very different
+    physical length (branch 1 covers ~0.95 mm, branch 2 ~3.6 mm), so a centroid
+    on the raw DFT bin axis is not the same physical frequency in both and the
+    two columns are not comparable.  ``None`` keeps the historical
+    cycles-per-sample axis.
+    """
+
     signal = np.asarray(signal, dtype=np.float64).reshape(-1)
     energy = float(np.mean(signal * signal))
     power = np.abs(np.fft.rfft(signal)) ** 2
-    frequencies = np.fft.rfftfreq(signal.size, d=1.0)
+    frequencies = np.fft.rfftfreq(signal.size, d=1.0 if sample_spacing is None else float(sample_spacing))
     power_sum = float(np.sum(power)) + 1e-12
     features: dict[str, float] = {
         "mean": float(np.mean(signal)),
@@ -1106,8 +1216,34 @@ def _component_features(signal: np.ndarray, feature_names: Sequence[str]) -> np.
     return np.asarray([features[name] for name in feature_names], dtype=np.float32)
 
 
-def emd_feature_vector(streams: np.ndarray, config: EMDConfig) -> np.ndarray:
-    """Extract a fixed-size feature vector from ``[streams, samples]``."""
+def _resolve_sample_spacings(
+    sample_spacing: float | Sequence[float] | None,
+    channel_count: int,
+) -> list[float | None]:
+    """Normalise ``sample_spacing`` to exactly one entry per channel."""
+
+    if sample_spacing is None:
+        return [None] * channel_count
+    if np.ndim(sample_spacing) == 0:
+        return [float(sample_spacing)] * channel_count
+    values = [float(value) for value in sample_spacing]
+    if len(values) != channel_count:
+        raise ValueError(
+            f"sample_spacing has {len(values)} entries for {channel_count} channels"
+        )
+    return values
+
+
+def emd_feature_vector(
+    streams: np.ndarray,
+    config: EMDConfig,
+    sample_spacing: float | None = None,
+) -> np.ndarray:
+    """Extract a fixed-size feature vector from ``[streams, samples]``.
+
+    ``sample_spacing`` is forwarded to :func:`_component_features` and puts
+    ``spectral_centroid`` on a physical frequency axis.
+    """
 
     config.validate()
     streams = np.asarray(streams, dtype=np.float32)
@@ -1129,7 +1265,10 @@ def emd_feature_vector(streams: np.ndarray, config: EMDConfig) -> np.ndarray:
         while len(components) < component_count:
             components.append(np.zeros_like(stream))
         component_features = np.concatenate(
-            [_component_features(component, config.feature_names) for component in components]
+            [
+                _component_features(component, config.feature_names, sample_spacing)
+                for component in components
+            ]
         )
         per_stream.append(component_features)
     matrix = np.stack(per_stream, axis=0)
@@ -1147,7 +1286,9 @@ def emd_feature_vector(streams: np.ndarray, config: EMDConfig) -> np.ndarray:
 
 
 def emd_feature_groups(
-    block: np.ndarray, config: EMDConfig
+    block: np.ndarray,
+    config: EMDConfig,
+    sample_spacing: float | Sequence[float] | None = None,
 ) -> tuple[np.ndarray, tuple[int, ...]]:
     """Extract one branch's EMD features, keeping channels as separate groups.
 
@@ -1157,6 +1298,12 @@ def emd_feature_groups(
     concatenated; ``"pooled"`` reproduces the historical behaviour, where the
     channel axis was folded into the stream axis before pooling.
 
+    ``sample_spacing`` is either one value per channel or a single value applied
+    to all of them, in millimetres per sample.  Under ``"pooled"`` the channel
+    axis becomes part of the stream axis, so the per-channel spacings are
+    averaged -- that keeps the centroid on a physical axis instead of silently
+    mixing cycles/sample with cycles/mm.
+
     Returns the concatenated vector plus the width of every group in order, so
     the caller knows where one channel's features end and the next one's begin.
     """
@@ -1165,20 +1312,105 @@ def emd_feature_groups(
     block = np.asarray(block, dtype=np.float32)
     if block.ndim != 3:
         raise ValueError(f"Expected [streams, channels, samples], got {block.shape}")
+    spacings = _resolve_sample_spacings(sample_spacing, int(block.shape[1]))
     if config.channel_aggregation == "pooled":
         # Fold the channel axis into the stream axis, exactly like the flat
         # ``[streams * channels, samples]`` form used before per-channel
         # grouping existed.
-        groups = [emd_feature_vector(block.reshape(-1, block.shape[-1]), config)]
+        merged = None if spacings[0] is None else float(np.mean(spacings))
+        groups = [emd_feature_vector(block.reshape(-1, block.shape[-1]), config, merged)]
     else:
         groups = [
-            emd_feature_vector(block[:, channel, :], config)
+            emd_feature_vector(block[:, channel, :], config, spacings[channel])
             for channel in range(block.shape[1])
         ]
     widths = tuple(int(group.size) for group in groups)
     if len(set(widths)) > 1:
         raise ValueError(f"per-channel feature widths differ: {widths}")
     return np.concatenate(groups).astype(np.float32), widths
+
+
+def _locator_feature_table(
+    dynamic_info: Mapping[str, Any], mapper: DepthMapper
+) -> dict[str, np.ndarray]:
+    """Every depth-locator descriptor for one dynamic-envelope split.
+
+    Positions are converted to millimetres so that they are comparable across
+    channel modes and independent of ``--signal-length``.
+    """
+
+    mm_per_index = mapper.max_depth_mm / max(1, mapper.signal_length)
+
+    def positions(key: str) -> np.ndarray:
+        return np.asarray(dynamic_info[key], dtype=np.float64) * mm_per_index
+
+    onset = positions("crossing_index")
+    peak = positions("local_peak_index")
+    return {
+        # Start of the leading packet that survived merging: the arrival time of
+        # the first echo the detector decided was real.
+        "onset_mm": onset,
+        # Depth of the envelope maximum inside the main window.
+        "peak_mm": peak,
+        # First crossing of the fixed weak threshold, kept for comparison: it is
+        # the best single locator on its own but adds nothing on top of
+        # ``onset_mm``, which is why it is not in the default preset.
+        "weak_onset_mm": positions("reference_index"),
+        # How long the envelope takes to climb from onset to peak.
+        "rise_mm": peak - onset,
+        # How far merging pulled the onset earlier than the anchor packet.
+        "merge_extension_mm": positions("premerge_crossing_index") - onset,
+        # Smoothed envelope height at the peak, i.e. echo strength.
+        "peak_amplitude": np.asarray(dynamic_info["local_peak_value"], dtype=np.float64),
+    }
+
+
+def locator_feature_matrix(
+    dynamic_info: Mapping[str, Any],
+    mapper: DepthMapper,
+    preset: str,
+) -> np.ndarray:
+    """``[channels, dims]`` depth-locator block for one sample, in preset order."""
+
+    if preset not in LOCATOR_FEATURE_PRESETS:
+        raise ValueError(
+            f"locator preset must be one of {sorted(LOCATOR_FEATURE_PRESETS)}, got {preset!r}"
+        )
+    names = LOCATOR_FEATURE_PRESETS[preset]
+    if not names:
+        raise ValueError("the 'none' locator preset has no features to build")
+    table = _locator_feature_table(dynamic_info, mapper)
+    return np.column_stack([table[name] for name in names]).astype(np.float32)
+
+
+def feature_dimension_names(info: Mapping[str, Any], emd_config: EMDConfig) -> list[str]:
+    """Name every column of the vector produced by :func:`sample_feature_vector`.
+
+    Mirrors the group-major layout (group, then branch, then statistics, then the
+    branch's locator block) so that a column identified numerically -- a
+    degenerate one, or the strongest univariate feature -- can be reported by
+    name instead of by index.  ``group_widths`` in the feature info holds the
+    statistic width published by :func:`emd_feature_groups`, so the locator
+    entries are appended from ``locator_features`` rather than counted out of it.
+    """
+
+    group_count = int(info.get("feature_groups", 0))
+    statistic_names = list(emd_config.feature_names)
+    names: list[str] = []
+    for group in range(group_count):
+        suffix = f"[ch{group + 1}]" if group_count > 1 else ""
+        for branch in info.get("branches", []):
+            widths = [int(width) for width in branch.get("group_widths", [])]
+            statistic_count = widths[group] if group < len(widths) else 0
+            branch_name = str(branch.get("name", "branch"))
+            names.extend(
+                f"{branch_name}{suffix}.{name}" for name in statistic_names[:statistic_count]
+            )
+            names.extend(
+                f"{branch_name}{suffix}.{name}"
+                for name in (branch.get("locator_features") or [])
+            )
+    return names
 
 
 def sample_feature_vector(
@@ -1206,6 +1438,7 @@ def sample_feature_vector(
     branch_features: list[np.ndarray] = []
     branch_info: list[dict[str, Any]] = []
     dynamic_info: dict[str, Any] | None = None
+    branch_specs: list[dict[str, Any]] = []
     if dynamic_envelope_config is not None:
         # The locator always comes from the raw selected frames, so the split
         # does not depend on which frame form is being evaluated.
@@ -1218,56 +1451,94 @@ def sample_feature_vector(
             point_id=point_id,
             physical_channels=physical_channels,
         )
-        branch_specs: list[tuple[str, np.ndarray, int, int, float | None, float | None]] = []
         for branch_index, branch_signals in enumerate(branch_signals_list):
             dynamic_branch = dynamic_info["branches"][branch_index]
             branch_specs.append(
-                (
-                    str(dynamic_branch["name"]),
-                    branch_signals,
-                    int(dynamic_branch["start_index"]),
-                    int(dynamic_branch["end_index_exclusive"]),
-                    None,
-                    None,
-                )
+                {
+                    "name": str(dynamic_branch["name"]),
+                    "block": branch_signals,
+                    "start_index": int(dynamic_branch["start_index"]),
+                    "end_index_exclusive": int(dynamic_branch["end_index_exclusive"]),
+                    "start_mm": None,
+                    "end_mm": None,
+                    "start_by_channel": [
+                        int(value) for value in dynamic_branch["start_index_by_channel"]
+                    ],
+                    "end_by_channel": [
+                        int(value)
+                        for value in dynamic_branch["end_index_exclusive_by_channel"]
+                    ],
+                }
             )
     else:
-        branch_specs = []
         for region in regions:
             start, end = mapper.slice_bounds(region)
+            block = prepare_branch_block(
+                processed,
+                region,
+                mapper=mapper,
+                target_length=target_length,
+                tukey_alpha=tukey_alpha,
+            )
+            channel_count = int(block.shape[1])
             branch_specs.append(
-                (
-                    region.label,
-                    prepare_branch_block(
-                        processed,
-                        region,
-                        mapper=mapper,
-                        target_length=target_length,
-                        tukey_alpha=tukey_alpha,
-                    ),
-                    start,
-                    end,
-                    region.start_mm,
-                    region.end_mm,
-                )
+                {
+                    "name": region.label,
+                    "block": block,
+                    "start_index": start,
+                    "end_index_exclusive": end,
+                    "start_mm": region.start_mm,
+                    "end_mm": region.end_mm,
+                    "start_by_channel": [start] * channel_count,
+                    "end_by_channel": [end] * channel_count,
+                }
             )
 
+    # Depth-locator block, already split the way the feature groups are: one row
+    # per group, in group order.  ``per_channel`` keeps a row per channel;
+    # ``pooled`` folds the channel axis, exactly like the EMD statistics do.
+    locator_blocks: list[np.ndarray] | None = None
+    if dynamic_info is not None and emd_config.locator_features != "none":
+        locator_matrix = locator_feature_matrix(
+            dynamic_info, mapper, emd_config.locator_features
+        )
+        if emd_config.channel_aggregation == "pooled":
+            locator_blocks = [
+                np.mean(locator_matrix, axis=0, dtype=np.float64).astype(np.float32)
+            ]
+        else:
+            locator_blocks = [row for row in locator_matrix]
+
+    mm_per_index = mapper.max_depth_mm / max(1, mapper.signal_length)
     branch_widths: list[tuple[int, ...]] = []
-    for name, branch_signals, start, end, start_mm, end_mm in branch_specs:
-        features, widths = emd_feature_groups(branch_signals, emd_config)
+    for spec in branch_specs:
+        block = spec["block"]
+        channel_count = int(block.shape[1])
+        # Physical spacing of the *resampled* branch, so ``spectral_centroid`` is
+        # in cycles/mm.  Branch 1 is resampled from ~0.95 mm and branch 2 from
+        # ~3.6 mm, so a per-sample axis would not be the same frequency in both.
+        spacing = [
+            mm_per_index * float(end_c - start_c) / max(1, target_length)
+            for start_c, end_c in zip(spec["start_by_channel"], spec["end_by_channel"])
+        ]
+        assert len(spacing) == channel_count
+        features, widths = emd_feature_groups(block, emd_config, sample_spacing=spacing)
         branch_features.append(features)
         branch_widths.append(widths)
         branch_info.append(
             {
-                "name": name,
-                "start_mm": start_mm,
-                "end_mm": end_mm,
-                "start_index": start,
-                "end_index_exclusive": end,
-                "input_streams": int(np.prod(branch_signals.shape[:2])),
+                "name": spec["name"],
+                "start_mm": spec["start_mm"],
+                "end_mm": spec["end_mm"],
+                "start_index": spec["start_index"],
+                "end_index_exclusive": spec["end_index_exclusive"],
+                "input_streams": int(np.prod(block.shape[:2])),
                 "feature_length": int(features.size),
                 "feature_groups": len(widths),
                 "group_widths": [int(width) for width in widths],
+                # Empty for every branch except the envelope main window.
+                "locator_features": [],
+                "sample_spacing_mm_by_channel": [float(value) for value in spacing],
             }
         )
 
@@ -1282,14 +1553,30 @@ def sample_feature_vector(
                 "every branch must yield the same number of feature groups; got "
                 f"{[len(w) for w in branch_widths]}"
             )
+    if locator_blocks is not None:
+        if len(locator_blocks) != group_count:
+            raise ValueError(
+                f"locator block has {len(locator_blocks)} rows but there are "
+                f"{group_count} feature groups"
+            )
+        # Every branch list starts with the envelope main window, which is the
+        # branch the locator describes; the tail window has no locator of its own.
+        branch_info[0]["locator_features"] = list(
+            LOCATOR_FEATURE_PRESETS[emd_config.locator_features]
+        )
     per_group: list[list[np.ndarray]] = [[] for _ in range(group_count)]
-    for features, widths in zip(branch_features, branch_widths):
+    for branch_index, (features, widths) in enumerate(zip(branch_features, branch_widths)):
         offset = 0
         for group, width in enumerate(widths):
-            per_group[group].append(features[offset : offset + width])
+            chunk = features[offset : offset + width]
             offset += width
+            if locator_blocks is not None and branch_index == 0:
+                chunk = np.concatenate([chunk, locator_blocks[group]])
+            per_group[group].append(chunk)
+    locator_width = 0 if locator_blocks is None else int(locator_blocks[0].size)
     group_dims = tuple(
-        int(sum(widths[group] for widths in branch_widths)) for group in range(group_count)
+        int(sum(widths[group] for widths in branch_widths)) + locator_width
+        for group in range(group_count)
     )
     info = {
         "form": canonical_form(form),
@@ -1300,6 +1587,8 @@ def sample_feature_vector(
         "branches": branch_info,
         "feature_groups": group_count,
         "feature_group_dims": list(group_dims),
+        "component_features": list(emd_config.feature_names),
+        "locator_features": list(LOCATOR_FEATURE_PRESETS[emd_config.locator_features]),
     }
     if dynamic_info is not None:
         info["dynamic_envelope"] = dynamic_info
@@ -1367,6 +1656,118 @@ def load_split(data_dir: Path | str, split: str) -> tuple[np.ndarray, np.ndarray
     return x, y, samples
 
 
+LABEL_SCHEME_FILE = "label_scheme.json"
+# The names stored in the historical binary ``y.npy`` files.  They describe the
+# clinical reading of the label, not the label's numeric value, so they are the
+# right default whenever no ``label_scheme.json`` records anything better.
+BINARY_CLASS_NAMES: tuple[str, str] = ("即将穿透", "安全")
+
+
+def read_label_scheme(data_dir: Path | str) -> dict[str, Any] | None:
+    """Return ``<data_dir>/label_scheme.json``, or ``None`` when it is absent.
+
+    Datasets written by ``raw_data/relabel_by_thickness.py`` ship this file, so
+    downstream code can recover the physical thresholds instead of assuming the
+    historical 1.0 mm split.  ``raw_data/`` predates the file and returns None,
+    which is what keeps the original binary artefacts reproducible.
+    """
+
+    path = Path(data_dir) / LABEL_SCHEME_FILE
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def label_scheme_tag(label_scheme: Mapping[str, Any] | None) -> str | None:
+    """Filesystem-safe identifier for a label scheme, or ``None``.
+
+    Experiment and visualisation file names carry this tag, so a dataset with
+    different thresholds (say a 3-class 0.8/1.2 mm variant) never overwrites the
+    historical binary artefacts.
+    """
+
+    if not label_scheme:
+        return None
+    tag = label_scheme.get("tag")
+    if tag is None:
+        thresholds = label_scheme.get("thresholds_mm") or []
+        if not thresholds:
+            return None
+        tag = "thr" + "-".join(str(value) for value in thresholds)
+    cleaned = "".join(
+        character if character.isalnum() or character in "._-" else "-"
+        for character in str(tag)
+    ).strip("-.")
+    return cleaned or None
+
+
+def config_label_scheme_tag(config: Mapping[str, Any] | None) -> str | None:
+    """Label-scheme tag of a saved run, read from its ``config.json``.
+
+    A run records the scheme inline; older ``config.json`` files predate that
+    key and only carry ``data_dir``, so the dataset itself is consulted as a
+    fallback.  ``None`` means the historical 1.0 mm binary split, which is what
+    every ``raw_data`` experiment reports.
+    """
+
+    if not config:
+        return None
+    scheme = config.get("label_scheme")
+    if isinstance(scheme, Mapping) and scheme:
+        return label_scheme_tag(scheme)
+    data_dir = config.get("data_dir")
+    if data_dir:
+        return label_scheme_tag(read_label_scheme(data_dir))
+    return None
+
+
+def label_thresholds(label_scheme: Mapping[str, Any] | None) -> list[float]:
+    """The inclusive thickness thresholds recorded in a label scheme."""
+
+    if not label_scheme:
+        return []
+    thresholds = label_scheme.get("thresholds_mm") or []
+    values: list[float] = []
+    for threshold in thresholds:
+        try:
+            values.append(float(threshold))
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def class_display_names(
+    label_scheme: Mapping[str, Any] | None,
+    num_classes: int,
+) -> list[str]:
+    """Human-readable name for every label ``0 .. num_classes - 1``.
+
+    Preference order: the ``class_names`` recorded by the relabelling script
+    (for example ``"depth < 0.8"``), then the historical Chinese binary names,
+    then a plain ``label=k``.  ``num_classes`` wins over a longer or shorter
+    recorded list, so a caller that inferred a different k still gets one name
+    per label.
+    """
+
+    num_classes = int(num_classes)
+    if num_classes < 2:
+        raise ValueError("num_classes must be at least 2")
+    names: list[str] = []
+    recorded = (label_scheme or {}).get("class_names")
+    if isinstance(recorded, (list, tuple)):
+        names = [str(entry) for entry in recorded]
+    if num_classes == 2 and len(names) != 2:
+        names = list(BINARY_CLASS_NAMES)
+    return [
+        names[label] if label < len(names) else f"label={label}"
+        for label in range(num_classes)
+    ]
+
+
 def build_feature_matrix(
     x: np.ndarray,
     form: str,
@@ -1420,28 +1821,69 @@ def build_feature_matrix(
 
 
 class StandardScaler:
-    """Small NumPy-only standard scaler fitted on the training split."""
+    """Small NumPy-only standard scaler fitted on the training split.
 
-    def __init__(self) -> None:
+    Columns that carry no usable variation are flagged instead of being divided
+    by whatever rounding noise happens to be in their standard deviation.  The
+    previous guard substituted ``scale = 1.0`` for any ``std < 1e-8``, which left
+    a ~1e-8 column untouched but still amplified anything just above the cut
+    (``(x - mean) / 1e-7`` is ``O(1)``).  A degenerate column is now mapped to a
+    constant ``0.0``, and the mask is persisted so a report can name the columns
+    that the classifier is ignoring.
+    """
+
+    def __init__(
+        self,
+        absolute_tolerance: float = 1e-8,
+        relative_tolerance: float = 1e-6,
+    ) -> None:
+        self.absolute_tolerance = float(absolute_tolerance)
+        self.relative_tolerance = float(relative_tolerance)
         self.mean_: np.ndarray | None = None
         self.scale_: np.ndarray | None = None
+        self.degenerate_: np.ndarray | None = None
 
     def fit(self, values: np.ndarray) -> "StandardScaler":
         values = np.asarray(values, dtype=np.float32)
         self.mean_ = np.mean(values, axis=0)
         scale = np.std(values, axis=0)
-        self.scale_ = np.where(scale < 1e-8, 1.0, scale).astype(np.float32)
+        # Two-sided test: constant either in absolute terms, or tiny relative to
+        # the column's own mean (which is what a float32 round-off column of a
+        # mathematically zero-mean signal looks like).
+        self.degenerate_ = np.asarray(
+            scale <= self.absolute_tolerance + self.relative_tolerance * np.abs(self.mean_),
+            dtype=bool,
+        )
+        self.scale_ = np.where(self.degenerate_, 1.0, scale).astype(np.float32)
         return self
 
     def transform(self, values: np.ndarray) -> np.ndarray:
         if self.mean_ is None or self.scale_ is None:
             raise RuntimeError("StandardScaler must be fitted before transform")
-        return ((values - self.mean_) / self.scale_).astype(np.float32)
+        scaled = ((values - self.mean_) / self.scale_).astype(np.float32)
+        if self.degenerate_ is not None and self.degenerate_.any():
+            scaled[:, self.degenerate_] = 0.0
+        return scaled
+
+    @property
+    def degenerate_indices(self) -> list[int]:
+        """Positions of the columns that were mapped to a constant zero."""
+
+        if self.degenerate_ is None:
+            return []
+        return np.flatnonzero(self.degenerate_).astype(int).tolist()
 
     def save(self, path: Path) -> None:
-        if self.mean_ is None or self.scale_ is None:
+        if self.mean_ is None or self.scale_ is None or self.degenerate_ is None:
             raise RuntimeError("Cannot save an unfitted scaler")
-        np.savez(path, mean=self.mean_, scale=self.scale_)
+        np.savez(
+            path,
+            mean=self.mean_,
+            scale=self.scale_,
+            degenerate=self.degenerate_,
+            absolute_tolerance=np.asarray(self.absolute_tolerance),
+            relative_tolerance=np.asarray(self.relative_tolerance),
+        )
 
 
 def _softmax(logits: np.ndarray) -> np.ndarray:
@@ -1482,19 +1924,135 @@ def binary_metrics(y_true: np.ndarray, probabilities: np.ndarray, threshold: flo
 
 
 def _roc_auc(y_true: np.ndarray, scores: np.ndarray) -> float | None:
-    positives = y_true == 1
-    negatives = y_true == 0
-    positive_count = int(np.sum(positives))
-    negative_count = int(np.sum(negatives))
+    """ROC AUC via the Mann-Whitney U statistic, with average ranks for ties.
+
+    The previous implementation integrated the ROC staircase over the scores
+    sorted by value.  That is exact while all scores are distinct -- which is
+    what the MLP produces -- but it silently reports **0.0** for a constant
+    score vector, because every tie lands in one staircase step whose width in
+    FPR is zero.  A constant predictor is the single most important reference
+    point when comparing models (it is the 0.5 line), so ties are now given
+    their average rank, which yields exactly 0.5 there.  Verified to leave every
+    stored MLP metric untouched to 2.2e-16.
+    """
+
+    y_true = np.asarray(y_true).ravel()
+    scores = np.asarray(scores, dtype=np.float64).ravel()
+    positive_count = int(np.sum(y_true == 1))
+    negative_count = int(np.sum(y_true == 0))
     if positive_count == 0 or negative_count == 0:
         return None
-    order = np.argsort(-scores, kind="mergesort")
-    sorted_y = y_true[order]
-    tps = np.cumsum(sorted_y == 1)
-    fps = np.cumsum(sorted_y == 0)
-    tpr = np.concatenate(([0.0], tps / positive_count, [1.0]))
-    fpr = np.concatenate(([0.0], fps / negative_count, [1.0]))
-    return float(_trapezoid(tpr, fpr))
+    order = np.argsort(scores, kind="mergesort")
+    sorted_scores = scores[order]
+    ranks = np.empty(scores.size, dtype=np.float64)
+    start = 0
+    while start < sorted_scores.size:
+        end = start
+        while end + 1 < sorted_scores.size and sorted_scores[end + 1] == sorted_scores[start]:
+            end += 1
+        # 1-based average rank of the tied block (identical to the midrank that
+        # scipy.stats.rankdata uses for method="average").
+        ranks[order[start : end + 1]] = 0.5 * (start + end) + 1.0
+        start = end + 1
+    positive_rank_sum = float(np.sum(ranks[y_true == 1]))
+    return float(
+        (positive_rank_sum - positive_count * (positive_count + 1) / 2.0)
+        / (positive_count * negative_count)
+    )
+
+
+def classification_metrics(
+    y_true: np.ndarray,
+    probabilities: np.ndarray,
+    num_classes: int | None = None,
+    threshold: float = 0.5,
+) -> dict[str, Any]:
+    """Metrics for a binary or k-class softmax model, without scikit-learn.
+
+    The two-class case delegates to :func:`binary_metrics` so every stored
+    binary artefact keeps the exact same keys and values as before, including
+    ``tn``/``fp``/``fn``/``tp`` and the negative-class-free definitions of
+    precision/sensitivity/specificity.
+
+    For ``k > 2`` the macro statistics are averaged only over the classes that
+    are actually present in ``y_true``: a class with no support in a split
+    would otherwise contribute a zero F1 and deflate the macro average for
+    reasons that have nothing to do with the model.  ``confusion_matrix`` has
+    rows = true label, columns = predicted label.  ``auc`` is the macro one-vs-
+    rest AUC over classes that have both positives and negatives.
+    """
+
+    y_true = np.asarray(y_true, dtype=np.int64).ravel()
+    probabilities = np.asarray(probabilities, dtype=np.float64)
+    if probabilities.ndim != 2:
+        raise ValueError("probabilities must be a 2-D array of shape [n, num_classes]")
+    if num_classes is None:
+        num_classes = int(probabilities.shape[1])
+    num_classes = int(num_classes)
+    if probabilities.shape[1] != num_classes:
+        raise ValueError(
+            f"probabilities have {probabilities.shape[1]} columns but num_classes={num_classes}"
+        )
+    if y_true.size and (int(y_true.min()) < 0 or int(y_true.max()) >= num_classes):
+        raise ValueError(
+            f"labels run from {int(y_true.min())} to {int(y_true.max())} but num_classes={num_classes}"
+        )
+    if num_classes == 2:
+        return binary_metrics(y_true, probabilities, threshold)
+
+    predictions = np.argmax(probabilities, axis=1).astype(np.int64)
+    matrix = np.zeros((num_classes, num_classes), dtype=np.int64)
+    np.add.at(matrix, (y_true, predictions), 1)
+    total = max(1, y_true.size)
+    present = [label for label in range(num_classes) if int(matrix[label].sum()) > 0]
+    per_class: list[dict[str, Any]] = []
+    for label in range(num_classes):
+        tp = int(matrix[label, label])
+        fp = int(matrix[:, label].sum()) - tp
+        fn = int(matrix[label, :].sum()) - tp
+        tn = int(matrix.sum()) - tp - fp - fn
+        precision = tp / max(1, tp + fp)
+        recall = tp / max(1, tp + fn)
+        specificity = tn / max(1, tn + fp)
+        f1 = 2.0 * precision * recall / max(1e-12, precision + recall)
+        auc = _roc_auc((y_true == label).astype(np.int64), probabilities[:, label])
+        per_class.append(
+            {
+                "label": int(label),
+                "support": int(matrix[label, :].sum()),
+                "predicted": int(matrix[:, label].sum()),
+                "precision": float(precision),
+                "recall": float(recall),
+                "f1_score": float(f1),
+                "specificity": float(specificity),
+                "auc": None if auc is None else float(auc),
+                "tp": tp,
+                "fp": fp,
+                "fn": fn,
+                "tn": tn,
+            }
+        )
+    macro_f1 = float(np.mean([per_class[label]["f1_score"] for label in present])) if present else 0.0
+    macro_precision = float(np.mean([per_class[label]["precision"] for label in present])) if present else 0.0
+    macro_recall = float(np.mean([per_class[label]["recall"] for label in present])) if present else 0.0
+    macro_specificity = float(np.mean([per_class[label]["specificity"] for label in present])) if present else 0.0
+    aucs = [per_class[label]["auc"] for label in present if per_class[label]["auc"] is not None]
+    accuracy = float(np.trace(matrix) / total)
+    return {
+        "accuracy": accuracy,
+        # Macro aliases reuse the binary key names so history.csv, the training
+        # curves and the early-stopping rule keep working unchanged.
+        "precision": macro_precision,
+        "f1_score": macro_f1,
+        "sensitivity": macro_recall,
+        "specificity": macro_specificity,
+        "auc": None if not aucs else float(np.mean(aucs)),
+        "balanced_accuracy": float(0.5 * (macro_recall + macro_specificity)),
+        "num_classes": num_classes,
+        "classes_present": [int(label) for label in present],
+        "confusion_matrix": [[int(value) for value in row] for row in matrix],
+        "per_class": per_class,
+    }
 
 
 class NumpyMLPClassifier:
@@ -1504,9 +2062,10 @@ class NumpyMLPClassifier:
     two-phase model: one small **tower** per feature group (i.e. per ultrasound
     channel under ``channel_aggregation="per_channel"``) maps that group to
     ``hidden_dims[0]`` units, the towers are concatenated, and a shared **head**
-    (``hidden_dims[1:]`` followed by the 2-way output) fuses them.  With a
-    single group the towers collapse into the first dense layer, so the network
-    is exactly the historical ``in -> 64 -> 32 -> 2`` MLP.
+    (``hidden_dims[1:]`` followed by the ``config.num_classes``-way output)
+    fuses them.  With a single group the towers collapse into the first dense
+    layer, so the network is exactly the historical ``in -> 64 -> 32 -> 2`` MLP
+    whenever ``num_classes=2``.
     """
 
     def __init__(
@@ -1546,7 +2105,10 @@ class NumpyMLPClassifier:
             slice(index * tower_width, (index + 1) * tower_width)
             for index in range(self.tower_count)
         ]
-        head_dims = [*config.hidden_dims[1:], 2]
+        # The output width is the number of classes, so a k-class problem needs
+        # a k-way softmax head instead of the historical 2-way one.
+        self.num_classes = int(config.num_classes)
+        head_dims = [*config.hidden_dims[1:], self.num_classes]
         dimensions = [(width, tower_width) for width in group_dims]
         fan_in = tower_width * self.tower_count
         for fan_out in head_dims:
@@ -1703,6 +2265,15 @@ class NumpyMLPClassifier:
             raise ValueError("Train and validation features must be 2-D with the same width")
         if x_test is not None and (x_test.ndim != 2 or x_test.shape[1] != x_train.shape[1]):
             raise ValueError("Test features must be 2-D with the same width as train features")
+        for name, targets in (("train", y_train), ("val", y_val), ("test", y_test)):
+            if targets is None:
+                continue
+            if targets.size and (int(targets.min()) < 0 or int(targets.max()) >= self.num_classes):
+                raise ValueError(
+                    f"{name} labels run from {int(targets.min())} to {int(targets.max())} but this "
+                    f"model was built for num_classes={self.num_classes}; set MLPConfig.num_classes "
+                    "to the number of classes in the dataset"
+                )
         m_weights = [np.zeros_like(w) for w in self.weights]
         v_weights = [np.zeros_like(w) for w in self.weights]
         m_biases = [np.zeros_like(b) for b in self.biases]
@@ -1745,8 +2316,10 @@ class NumpyMLPClassifier:
 
             train_probabilities = self.predict_proba(x_train)
             val_probabilities = self.predict_proba(x_val)
-            train_metrics = binary_metrics(y_train, train_probabilities)
-            val_metrics = binary_metrics(y_val, val_probabilities)
+            train_metrics = classification_metrics(
+                y_train, train_probabilities, self.num_classes
+            )
+            val_metrics = classification_metrics(y_val, val_probabilities, self.num_classes)
             val_loss = -float(np.mean(np.log(np.maximum(val_probabilities[np.arange(y_val.size), y_val], 1e-12))))
             test_loss = None
             if x_test is not None and y_test is not None:

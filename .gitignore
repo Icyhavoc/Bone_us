@@ -10,6 +10,13 @@ raw_data/
 after_split_data/
 reference_code/
 
+# Relabelled datasets built by ``raw_data/relabel_by_thickness.py`` (one folder
+# per threshold scheme, ~96 MB each). Derived data, same policy as ``raw_data/``
+# -- regenerate with the script instead of committing it. Note that
+# ``raw_data/`` above also hides the script itself; it is tracked via
+# ``git add -f raw_data/relabel_by_thickness.py``.
+raw_data_relabeled/
+
 # Reproducible generated experiment and visualization outputs.
 # Use ``experiments/*`` rather than ``experiments/``: the directory itself stays
 # visible to git so the ``!`` rule below can keep its notes tracked.

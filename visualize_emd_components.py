@@ -30,18 +30,24 @@ from emd_pipeline import (
     prepare_branch_signals,
     prepare_dynamic_envelope_branches,
     process_frames,
+    read_label_scheme,
     select_channels,
 )
 from dyn_cli import add_dyn_arguments, dyn_config_from_args
 from run_emd_experiments import DYNAMIC_REGION_NAME, REGION_CHOICES, REGION_PRESETS
 from visualize_preprocessing import (
-    CLASS_NAMES,
     CHANNEL_COLORS,
     _draw_plot_cell,
+    _fit_title,
     _font,
+    _parse_optional_labels,
     _resolve_region_experiments,
     _safe_name,
+    class_file_token,
+    class_names_for_data_dir,
+    dynamic_branch_title,
     load_split_records,
+    resolve_class_labels,
     select_class_indices,
 )
 
@@ -57,6 +63,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3], default=3)
     parser.add_argument("--imminent-label", type=int, default=0)
     parser.add_argument("--safe-label", type=int, default=1)
+    parser.add_argument(
+        "--class-labels",
+        default=None,
+        help=(
+            "comma-separated class labels to draw, e.g. \"0,1,2\" for a 3-class "
+            "dataset; defaults to --imminent-label/--safe-label"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--target-length", type=int, default=512)
     parser.add_argument("--tukey-alpha", type=float, default=0.3)
@@ -113,8 +127,8 @@ def _component_y_limits(
 def _make_component_sheet(
     form: str,
     region_name: str,
-    regions: Sequence[RegionSpec],
     class_label: int,
+    class_name: str,
     sample_index: int,
     record: dict[str, Any],
     split_name: str,
@@ -124,7 +138,8 @@ def _make_component_sheet(
     target_length: int,
     component_limits: Sequence[Sequence[tuple[float, float]]],
     include_residue: bool,
-    branch_ranges: Sequence[tuple[float, float]] | None,
+    branch_ranges: Sequence[tuple[float, float]],
+    branch_titles: Sequence[str],
     output_path: Path,
 ) -> None:
     cell_width = 500
@@ -139,7 +154,6 @@ def _make_component_sheet(
 
     image = Image.new("RGB", (width, height), (255, 255, 255))
     draw = ImageDraw.Draw(image)
-    class_name = CLASS_NAMES.get(class_label, f"label={class_label}")
     sample_id = record.get("sample_id", f"sample_{sample_index}")
     depth_value = record.get("depth_value", "?")
     draw.text(
@@ -162,16 +176,13 @@ def _make_component_sheet(
     )
     for column in range(branch_count):
         x0 = left_margin + column * cell_width
-        if branch_ranges is None:
-            branch_title = f"Branch {column + 1}: {regions[column].label}"
-            start_mm, end_mm = regions[column].start_mm, regions[column].end_mm
-        else:
-            branch_title = (
-                "Branch 1: merged leading packet window (170 samples)"
-                if column == 0
-                else "Branch 2: fixed tail [251, 896)"
-            )
-            start_mm, end_mm = branch_ranges[column]
+        branch_title = _fit_title(
+            draw,
+            [branch_titles[column]],
+            _font(14, bold=True),
+            cell_width - 16,
+        )
+        start_mm, end_mm = branch_ranges[column]
         draw.text(
             (x0 + 8, 80),
             branch_title,
@@ -219,13 +230,26 @@ def main() -> None:
     ]
     region_experiments = _resolve_region_experiments(args.region_set, args.regions_json)
     x, labels, records, split_names = load_split_records(args.data_dir, args.split)
+    num_classes = int(labels.max()) + 1 if labels.size else 2
+    class_names = class_names_for_data_dir(args.data_dir, num_classes)
+    class_labels = resolve_class_labels(
+        labels,
+        _parse_optional_labels(args.class_labels),
+        args.imminent_label,
+        args.safe_label,
+    )
+    file_tokens = {
+        label: class_file_token(label, args.imminent_label, args.safe_label, num_classes)
+        for label in class_labels
+    }
     selected = select_class_indices(
         labels,
-        [args.imminent_label, args.safe_label],
+        class_labels,
         samples_per_class=1,
         seed=args.seed,
     )
     mapper = DepthMapper(args.max_depth_mm, args.signal_length, args.rounding)
+    mm_per_index = mapper.max_depth_mm / mapper.signal_length
     dynamic_envelope_config = dyn_config_from_args(args)
     emd_config = EMDConfig(
         max_imfs=args.max_imfs,
@@ -239,6 +263,16 @@ def main() -> None:
         "split": args.split,
         "seed": args.seed,
         "class_labels": {"imminent": args.imminent_label, "safe": args.safe_label},
+        "num_classes": num_classes,
+        "label_scheme": read_label_scheme(args.data_dir),
+        "classes": [
+            {
+                "label": label,
+                "name": class_names[label],
+                "file_token": file_tokens[label],
+            }
+            for label in class_labels
+        ],
         "forms": forms,
         "regions": {name: regions for name, regions in region_experiments},
         "mapper": mapper,
@@ -249,7 +283,7 @@ def main() -> None:
         "selections": {},
     }
     for label, indices in selected.items():
-        name = "imminent" if label == args.imminent_label else "safe"
+        name = file_tokens[label]
         index = int(indices[0])
         manifest["selections"][name] = {
             "index": index,
@@ -261,7 +295,8 @@ def main() -> None:
     for form in forms:
         for region_name, regions in region_experiments:
             selected_components: dict[int, list[np.ndarray]] = {}
-            selected_ranges: dict[int, list[tuple[float, float]] | None] = {}
+            selected_ranges: dict[int, list[tuple[float, float]]] = {}
+            selected_titles: dict[int, list[str]] = {}
             for label, indices in selected.items():
                 index = int(indices[0])
                 selected_channels = select_channels(x[index], args.channel_mode)
@@ -274,6 +309,7 @@ def main() -> None:
                 )
                 branch_components: list[np.ndarray] = []
                 branch_ranges: list[tuple[float, float]] = []
+                branch_titles: list[str] = []
                 if region_name == DYNAMIC_REGION_NAME:
                     dynamic_branches, dynamic_info = prepare_dynamic_envelope_branches(
                         processed,
@@ -285,11 +321,22 @@ def main() -> None:
                         physical_channels=physical_channels,
                     )
                     branch_items = zip(dynamic_branches, dynamic_info["branches"])
-                    for branch_flat, branch_info in branch_items:
+                    for branch_index, (branch_flat, branch_info) in enumerate(branch_items):
+                        branch_start = int(branch_info["start_index"])
+                        branch_end = int(branch_info["end_index_exclusive"])
                         branch_ranges.append(
                             (
-                                mapper.index_to_depth(int(branch_info["start_index"])),
-                                mapper.index_to_depth(int(branch_info["end_index_exclusive"])),
+                                mapper.index_to_depth(branch_start),
+                                mapper.index_to_depth(branch_end),
+                            )
+                        )
+                        branch_titles.append(
+                            dynamic_branch_title(
+                                branch_index,
+                                str(branch_info["name"]),
+                                branch_end - branch_start,
+                                mm_per_index,
+                                args.target_length,
                             )
                         )
                         branch_components.append(
@@ -318,8 +365,13 @@ def main() -> None:
                             )
                         )
                     branch_ranges = [(region.start_mm, region.end_mm) for region in regions]
+                    branch_titles = [
+                        f"Branch {column + 1}: {region.label}"
+                        for column, region in enumerate(regions)
+                    ]
                 selected_components[label] = branch_components
-                selected_ranges[label] = None if region_name != DYNAMIC_REGION_NAME else branch_ranges
+                selected_ranges[label] = branch_ranges
+                selected_titles[label] = branch_titles
                 manifest.setdefault("frame_selections", {})[
                     f"{form}/{region_name}/{label}"
                 ] = None if selected_frames is None else selected_frames.tolist()
@@ -331,7 +383,7 @@ def main() -> None:
                 for branch_index in range(len(selected_components[next(iter(selected_components))]))
             ]
             for label, indices in selected.items():
-                class_name = "imminent" if label == args.imminent_label else "safe"
+                class_name = file_tokens[label]
                 index = int(indices[0])
                 file_name = (
                     f"form_{form}__regions_{_safe_name(region_name)}__"
@@ -341,8 +393,8 @@ def main() -> None:
                 _make_component_sheet(
                     form,
                     region_name,
-                    regions,
                     label,
+                    class_names[label],
                     index,
                     records[index],
                     split_names[index],
@@ -353,6 +405,7 @@ def main() -> None:
                     component_limits,
                     args.include_residue,
                     selected_ranges[label],
+                    selected_titles[label],
                     output_dir / file_name,
                 )
     output_dir.mkdir(parents=True, exist_ok=True)
