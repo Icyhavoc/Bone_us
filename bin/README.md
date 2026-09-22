@@ -1,6 +1,7 @@
 # `bin/` —— 项目归档区
 
 创建时间：2026-09-21
+最近整理：2026-09-22（移入 `_ab*`、`_baseline_*`、`_dimcheck`、`_vis3f`、`_gui_dataset`、`_kclass_check`、`_relabel_check`）
 
 根目录只保留**当前仍在用**的脚本与文档。一次性脚本、被取代的实现、专项诊断出图、
 以及临时运行产物，统一移到这里，让根目录一眼能看出哪些是流水线的一部分。
@@ -20,7 +21,17 @@
 | `_recon_check/` | 根目录 | 2026-09-17 的临时 `--output-dir` 冒烟输出（2 组实验）。 | 用相同命令行重跑即可，不需要恢复 |
 | `_smoke_all/` | 根目录 | 2026-09-17 的全矩阵冒烟输出（16 组 `channels_3` 短跑）。**早于双塔 MLP 默认改写**，指标不可直接引用。 | 同上；正式结果请写到 `experiments/` |
 | `_verify_fix/` | 根目录 | 2026-09-17 校验 `dyn_envelope` 修复时的临时输出（3 组）。 | 同上 |
-| `__pycache__/` | 根目录 | Python 字节码缓存，其中 `dynamic_split*.pyc`、`_grad_check*.pyc` 对应的**源文件已从仓库删除**，只会造成误导。 | 可随时删除，Python 会自动重建 |
+| `_ab2/` | 根目录 | 2026-09-22 特征集 A/B 扫描的**原始输出**：`legacy_none` 与 `compact_core` 两组定位特征 × seed 42–46，共 10 组实验（`_ab_run.ps1` 的产物）。结论已写进 `PROJECT_SUMMARY.md` §8.4，目录本身只是留档。 | `bin\_ab_run.ps1` 重跑（在项目根目录执行） |
+| `_ab_legacy/` | 根目录 | 同一轮 A/B 扫描里 legacy 侧的早期输出（只有 `form_top3_mean__regions_dyn_envelope__channels_1` 一组），已被 `_ab2/` 取代。 | 不需要恢复，看 `_ab2/` |
+| `_ab_run.ps1` | 根目录 | 驱动上述扫描的 PowerShell 脚本：按 `legacy_none` / `compact_core` × seeds 42–46 逐组调用 `run_emd_experiments.py`。**是文件不是目录**，所以仍被 git 跟踪。 | `powershell -File bin\_ab_run.ps1`（必须在项目根目录执行，脚本内路径都是相对的） |
+| `_baseline_full/` | 根目录 | 浅层基线的**全量**输出（`baseline_report.txt` / `baseline_results.json`），对应 `PROJECT_SUMMARY.md` §10 记录的结论。 | 用文档里的 `run_baseline_models.py` 命令重跑 |
+| `_baseline_smoke/` | 根目录 | 同上的短跑冒烟版，只用来验证 CLI 与输出格式，指标不可引用。 | 同上 |
+| `_dimcheck/` | 根目录 | 特征维度自检的临时输出（`channels_3` 一组），用于核对 `PROJECT_SUMMARY.md` §8.3 的维度表。 | 重跑对应命令即可 |
+| `_vis3f/` | 根目录 | 可视化回归对照输出（`emd/`、`pre/` 各 2 张图 + `selection_manifest.json`），留给 `bin/_gui_dataset/regress_vis.py` 做快照比对。 | `python bin\_gui_dataset\regress_vis.py compare ...` |
+| `_gui_dataset/` | 根目录 | 2026-09-22 多数据集选择器的**无头冒烟脚本**：`smoke_dataset_gui.py`（GUI 列结构）、`smoke_dataset_switch.py`（数据层 `discover_datasets` / `ExperimentCatalog`）、`smoke_kclass_figures.py`（k 分类图表可见性），外加可视化回归工具 `regress_vis.py` 与两份快照 JSON。 | `python bin\_gui_dataset\smoke_dataset_switch.py`（脚本内 `APP_DIR` 已随搬家改成 `parents[2]`，可直接跑） |
+| `_kclass_check/` | 根目录 | k 分类重构（`label_scheme` / `classification_metrics`）的校验脚本与回归输出：`check_metrics.py`（纯计算自检）、`check_binary_regression.py` ＋ `bin_regression/`（与既有二分类实验逐位对照）、`cls2_run/` `cls3_run/`（2/3 类实跑）、`baseline_regression/`、`cm_regression/`、`vis_regression/`、`json_deep_diff.py`。 | `python bin\_kclass_check\check_metrics.py`（脚本内 `ROOT` 已改成 `parents[2]`） |
+| `_relabel_check/` | 根目录 | 按厚度重标注的校验数据集 `cls3/`（3 类、约 96 MB，与 `raw_data_relabeled/cls3_thr0.8_1.2` 同族）＋一次性还原脚本 `restore_raw_data.py`。 | 数据集可直接用（`--data-dir bin/_relabel_check/cls3`）；`restore_raw_data.py` 是历史记录：它引用的 `keep/manifest.csv` 已不存在，`cls3/README.txt` 里的路径也是搬家前的 |
+| `__pycache__/` | 根目录 | Python 字节码缓存，其中 `dynamic_split*.pyc`、`_grad_check*.pyc` 对应的**源文件已从仓库删除**，只会造成误导。 | 可随时删除，Python 会自动重建（根目录会再生成一个，属正常现象） |
 
 ## 约定
 
@@ -39,3 +50,20 @@
 5. ⚠️ `bin/reference_code/` 里 `pipeline.py` 开头按相对位置找 `vendor`：
    原来 `parents[1]` = `骨分层/`，现在 = 项目根，所以那个可选路径失效（`if vendor.exists()` 保护，
    不会报错）。需要单独重跑参考脚本时，手工把 `scipy` 等依赖装上即可。
+6. **搬家后要检查 `parents[N]`**：脚本里凡是 `Path(__file__).resolve().parents[1]` 来找项目根的，
+   下沉一层后都得多走一级。2026-09-22 这次已把以下脚本改成 `parents[2]` 并验证仍可运行，
+   路径拼接里也补上了 `bin/`：
+   - `bin/_gui_dataset/smoke_dataset_gui.py`、`smoke_dataset_switch.py`、`smoke_kclass_figures.py`（`APP_DIR`）
+   - `bin/_kclass_check/check_metrics.py`（`ROOT`）、`check_binary_regression.py`（`ROOT` 与 `NEW`）
+   - `bin/_relabel_check/restore_raw_data.py`（`ROOT` 与 `MANIFEST`）
+
+   > 仍然失效的两处只影响“当时怎么跑的”这类历史信息，不影响代码：
+   > `bin/_relabel_check/restore_raw_data.py` 依赖的 `keep/manifest.csv` 已经不存在，
+   > `bin/_relabel_check/cls3/README.txt` 与 `bin/_kclass_check/**/summary.json`、
+   > `baseline_results.json` 里记录的 `_xxx_check/...` 路径是搬家前的位置。
+
+## 当前根目录剩下的临时目录
+
+无。`_*/` 规则只匹配目录，所以根目录下已不再有临时目录；剩下四个目录都是流水线的一部分：
+`bin/`（归档区）、`experiments/`（实验输出）、`visualizations/`（出图）、
+`raw_data/` ＋ `raw_data_relabeled/`（数据）。根目录里由 Python 自动重建的 `__pycache__/` 属正常现象，可随时删除

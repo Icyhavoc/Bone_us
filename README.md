@@ -20,22 +20,76 @@ raw_data
 - `gui_app.py`：Tkinter 图形界面。
 - `visualize_*.py`：五张图的可视化脚本（预处理、EMD 分量、训练曲线、混淆矩阵、错分厚度分布）。
 - `verify_*.py`：三份可重跑的回归自检。
+- `raw_data/relabel_by_thickness.py`：按指定厚度阈值重建数据集（二分类 / 多分类），见「标签方案与 k 分类」。
 - `bin/`：**归档区**（一次性脚本、历史快照、参考实现与参考数据），清单见 `bin/README.md`。
 - `README.md`：使用说明。
 
 > 根目录只保留仍在用的脚本：每次整理时把“已经用不到”的东西移入 `bin/`，
-> 而不是删除。`bin/` 里的内容被 `.gitignore` 忽略，但两个脚本文件（`bin/_recon.ps1`、
-> `bin/visualize_dyn_envelope_cases.py`）仍在版本控制中。
+> 而不是删除。`bin/` 里的内容被 `.gitignore` 忽略，但三个脚本文件（`bin/_recon.ps1`、
+> `bin/_ab_run.ps1`、`bin/visualize_dyn_envelope_cases.py`）仍在版本控制中。
+> 根目录如今只剩 `bin/`、`experiments/`、`visualizations/`、`raw_data/`、`raw_data_relabeled/`
+> 五个目录（`__pycache__/` 是 Python 自动生成、随时可删）。
 
 ## 数据格式
 
 默认从 `raw_data` 读取数据。每个 `train`、`val`、`test` 子目录包含：
 
 - `X.npy`：`[N, 50, 2, 896]`，依次为样本、帧、物理通道、采样点。
-- `y.npy`：二分类标签。
+- `y.npy`：整数类别标签（默认数据集是二分类）。
 - `samples.json`：样本编号、深度值和标签信息。
 
 当前数据集的标签保持不变：`label=0` 对应 `depth < 1 mm`，`label=1` 对应 `depth >= 1 mm`。
+需要换一组厚度阈值时见下一节，不必改动 `raw_data/` 本身。
+
+## 标签方案与 k 分类
+
+默认数据集 `raw_data/` 的标签规则是 `label = depth_value >= 1.0`（mm），全流程按二分类运行，
+行为与改造前**逐位一致**（二分类路径未做任何数值改动，只是多记录一个 `num_classes: 2`）。
+
+要换阈值，用 `raw_data/relabel_by_thickness.py` 生成新数据集，不要覆盖 `raw_data/`：
+
+```powershell
+# 只预览类别分布，不写任何文件（未给 --output-dir 时自动 --dry-run）
+python raw_data/relabel_by_thickness.py --thresholds 1.3
+
+# 二分类：depth >= 1.3mm 记为 1 类
+python raw_data/relabel_by_thickness.py --thresholds 1.3 --output-dir raw_data_relabeled/cls2_thr1.3
+
+# 三分类：0.8mm / 1.2mm 两个下界
+python raw_data/relabel_by_thickness.py --thresholds 0.8,1.2 --output-dir raw_data_relabeled/cls3_thr0.8_1.2
+```
+
+- 阈值是**闭区间下界**（`numpy.digitize` 语义）：`--thresholds 1.0` 表示 `depth >= 1.0` 记为 1 类，
+  与既有 `y.npy` 的构造规则完全相同；k 个阈值 → k+1 个类别。
+- 脚本从现有 train/val/test 反推 268 个样本的原始池（`indices.npy` 保证可还原），再按新阈值
+  重新分层划分；`--keep-split` 可只重贴标签、沿用原划分。`--check_output_dir` 保护会拒绝写入
+  `raw_data/` 或任何与源目录重叠的路径（即使给了 `--overwrite`）。
+- 输出目录除 `train/val/test` 外多一个 `label_scheme.json`，记录 `thresholds_mm`、`class_names`、
+  `tag`（如 `cls3_thr0.8-1.2`）与判定规则。
+
+全流程据此自动切换类别数：
+
+```powershell
+python run_emd_experiments.py `
+  --data-dir raw_data_relabeled/cls3_thr0.8_1.2 `
+  --forms top3_mean --region-set dyn_envelope --channel-mode 1
+```
+
+- 类别数默认从标签推断，`--num-classes` 可显式覆盖（给得比数据里的小会直接报错，不会静默）。
+- `label_scheme.json` 的 `tag` 会追到实验目录名后面（`...__channels_1__cls3_thr0.8-1.2`），
+  三分类结果不会覆盖二分类结果；`config.json` 与 `metrics.json` 也会记录 `num_classes` 与 `label_scheme`。
+- 指标：两类时与原来完全一致（Accuracy / Precision / F1 / Sensitivity / Specificity / AUC 加
+  `TN`/`FP`/`FN`/`TP`）；多于两类时改用 argmax 判定，给出逐类与宏平均指标、`k×k` 混淆矩阵
+  （行 = 真实，列 = 预测）。多于两类时 `auc` 是各类一站式（one-vs-rest）AUC 的宏平均。
+- 浅层基线 `run_baseline_models.py` 同样自动识别类别数：多于两类时把每个基模型包成
+  `OneVsRestClassifier`（`prior` 除外，它直接输出训练集类别频率）。注意 OvR 的各列概率**不要求和为 1**。
+- 特征排序里的 `|AUC-0.5|` 在多类时改用**成对平均 AUC**（Hand & Till）：逐对类别算 AUC 再平均。
+  这里不能沿用一站式宏平均——对完全单调的三类特征，一站式 AUC 分别是 0.0 / 0.5 / 1.0，均值恰好 0.5，
+  最好的特征反而排在最后。
+- 可视化：`visualize_preprocessing.py` / `visualize_emd_components.py` 用 `--class-labels` 选择要画的类别
+  （省略时仍是历史两类，文件名用 `class_imminent` / `class_safe`；多类时改用 `class_label{k}`）；
+  `visualize_error_by_thickness.py` 的参考线优先读实验的 `label_scheme`，可用 `--label-thresholds` 覆盖；
+  `visualize_confusion_matrix.py` 按 `metrics.json` 的类别数自动切换 k×k 画法。
 
 ## 四种帧处理方式
 
@@ -184,32 +238,68 @@ channel_mode=1 / 2                    channel_mode=3 (per_channel)
 
 ## EMD 特征
 
-当前实现包含一个仅依赖 NumPy 的确定性 EMD 实现。默认最多提取 5 个 IMF，并保留残余项。每个 IMF/残余项提取：
+当前实现包含一个仅依赖 NumPy 的确定性 EMD 实现。默认最多提取 5 个 IMF，并保留残余项。每个 IMF/残余项可提取以下统计量，具体启用哪些由 `--feature-set` 决定：
 
-- Mean
+- Mean（**默认不启用**，见下）
 - Std
 - RMS
 - Energy
 - Mean absolute value
 - Peak absolute value
 - Zero-crossing rate
-- Spectral centroid
+- Spectral centroid（以 **cycles/mm** 为单位，见下）
 
-默认使用 `--stream-aggregation pooled`：对每个 branch 内的所有 EMD 分量和信号流做均值池化，每个 branch 的每组特征得到 8 个统计量；多个 branch 之间不做均值，而是直接拼接。
+| `--feature-set` | 包含 | 说明 |
+|---|---|---|
+| `legacy` | 全部 8 个 | 历史行为，用于复现旧结果 |
+| `compact`（默认） | 7 个，去掉 `Mean` | EMD 筛分本身把每个 IMF 的均值压向 0，该列在本数据上几乎只剩 float32 舍入误差（branch 1 实测 `std = 3.6e-5`，而 `peak_abs = 8.4e-2`） |
+| `lean` | 6 个，再去掉 `Energy` | 备选对照 |
+
+`Spectral centroid` 用分支的实际物理间距 `sample_spacing_mm`（物理深度跨度 ÷ 重采样点数）把 bin 索引换算成 **cycles/mm**，因此主窗口与尾窗口之间可以比较——两个 branch 都重采样到 512 点，但主窗口只覆盖约 0.95 mm、尾窗口约 3.60 mm。
+
+默认使用 `--stream-aggregation pooled`：对每个 branch 内的所有 EMD 分量和信号流做均值池化，每个 branch 的每组特征得到 `len(feature_names)` 个统计量；多个 branch 之间不做均值，而是直接拼接。
+
+### 定位特征 `--locator-features`
+
+`dyn_envelope` 的主窗口是从信号里**切出来再重采样**的，窗口内所有回波被重新对齐到窗口起点，**绝对到达深度被丢弃了**。因此额外的定位特征直接描述检测器把主窗口放在了深度轴的哪个位置：
+
+| 取值 | 包含 |
+|---|---|
+| `core`（默认） | `onset_mm`、`peak_mm` |
+| `full` | 再加 `weak_onset_mm`、`rise_mm`、`merge_extension_mm`、`peak_amplitude`（实测更差：额外列与 `onset_mm` 高度共线） |
+| `none` | 空，即 change #1 之前的行为 |
 
 通道方向由 `--channel-aggregation` 决定：`per_channel`（默认）让每个通道各成一组，组间拼接；`pooled` 把通道轴并入流轴一起池化，只剩一组。
 
-因此每个 branch 的宽度是 `8 × 通道组数 × branch 数`：
+每组宽度 = `len(feature_names) × branch 数`，`dyn_envelope` 的主 branch 再追加定位特征：
 
 | 区域组合 | `--channel-mode 1` / `2` | 通道 3（`per_channel`） | 通道 3（`pooled`） |
 |---|---:|---:|---:|
-| `full` / `bone` | 8 | 16 | 8 |
-| `bone_plus_post` | 16 | 32 | 16 |
+| `full` / `bone` | 7 | 14 | 7 |
+| `bone_plus_post` | 14 | 28 | 14 |
 | `dyn_envelope` | 16 | 32 | 16 |
+
+加 `--locator-features none --feature-set legacy` 即可还原历史宽度（8 / 16 / 32）。
 
 这里的"信号流"既包括 `mean_std` 的两条流（均值/标准差）或 `raw50` 的 50 帧，也包括通道 3 展开出的两个通道——在 `pooled` 下它们都被同一个均值池化掉。
 
 `flatten` 和 `stats` 仍保留作对照实验，不再设置最终特征维数上限。
+
+### 浅层基线对照
+
+`run_baseline_models.py` 在同一份特征、同一份划分上跑没有隐藏层的模型（LDA / L2 & L1 逻辑回归 / RBF-LSSVM / 最近质心），用于判断瓶颈在特征还是在 MLP 容量：
+
+```powershell
+python run_baseline_models.py `
+  --experiments bin/_ab2/compact_core_s42/form_top3_mean__regions_dyn_envelope__channels_1 `
+  --output-dir bin/_baseline_full `
+  --feature-selection forward
+```
+
+它只读已保存的 `features_{split}.npy`，不重跑 EMD、不改动任何训练结果。结论（详细数据见 `PROJECT_SUMMARY.md` §10）：线性模型达到甚至略优于 MLP，前向选择把 16 列砍到 5 列反而**提高**了准确率，说明有效维度远小于 16，加 MLP 容量不会有帮助。
+
+数据集是 k 分类时它也能直接跑：类别数从标签推断，多于两类时每个基模型自动包成
+`OneVsRestClassifier`（`prior` 除外），报告额外打印各类样本数与多数类基线。
 
 ## MLP 分类头
 
@@ -239,9 +329,11 @@ Linear(input_dim, 64)
 塔的宽度取 `hidden_dims[0]`，共享头取 `hidden_dims[1:]` 再接 2 类输出。只有一组时塔会塌缩成第一层
 全连接，网络与历史结构**完全等价**（已用逐位回归验证）。
 
-MLP 只负责 branch 特征融合和二分类，不使用 CNN。标准化参数只在训练集上拟合，验证集用于早停；测试集不参与训练或模型选择，每个 epoch 的 test loss 仅用于曲线观察。
+上图的输出层是二元的情况；k 分类时最后一层换成 `Linear(32, k)`，其余不变（`--num-classes` 或从标签自动推断）。
 
-当前 MLP 使用两个输出节点的 softmax 交叉熵。对于二分类，它与单输出节点 sigmoid BCE 数学等价，因此不需要仅因为类别数为 2 而更换 loss；测试集 loss 只记录用于训练曲线，不参与模型选择。
+MLP 只负责 branch 特征融合和分类，不使用 CNN。标准化参数只在训练集上拟合，验证集用于早停；测试集不参与训练或模型选择，每个 epoch 的 test loss 仅用于曲线观察。
+
+当前 MLP 使用 k 个输出节点的 softmax 交叉熵。对于二分类，它与单输出节点 sigmoid BCE 数学等价，因此不需要仅因为类别数为 2 而更换 loss；测试集 loss 只记录用于训练曲线，不参与模型选择。
 
 ## 运行方式
 
@@ -300,6 +392,9 @@ python verify_channel_aggregation.py  # 通道聚合语义与网络拓扑
 `per_channel` 与 `pooled` 逐位相同；通道 3 下 `per_channel` 的特征宽度是 `pooled` 的两倍、
 `tower_count=2`、共享头首层输入翻倍。加 `--keep` 可保留临时目录 `_agg_regress/`。
 
+另有 `run_baseline_models.py`，它读已有实验目录的 `features_{split}.npy` 跑浅层基线，
+不重跑 EMD、不写回训练结果（用法与结论见上面「浅层基线对照」）。
+
 ## 输出文件
 
 默认输出到 `experiments/`，每组实验一个目录：
@@ -330,7 +425,7 @@ experiments/
   summary.json
 ```
 
-`metrics.json` 保存 `best_epoch`、`trained_epochs`、最佳验证集指标，以及 Accuracy、Precision、F1-score、Sensitivity、Specificity、AUC 和混淆矩阵计数。
+`metrics.json` 保存 `best_epoch`、`trained_epochs`、最佳验证集指标，以及 Accuracy、Precision、F1-score、Sensitivity、Specificity、AUC 和混淆矩阵计数；多分类（多于两类）时额外给出逐类指标、宏平均与 `balanced_accuracy`、`k×k` 混淆矩阵，并记录 `num_classes` 与 `label_scheme`。
 
 ## 图形化实验查看器
 
@@ -344,17 +439,26 @@ python gui_app.py
 
 界面功能：
 
-- 选择 `全部预处理方式` 时，显示当前已生成实验的 summary 对比表。
-- Summary 显示特征维数、Best Epoch、实际训练 Epoch 数和 Train/Val/Test 指标；Best Epoch 遵循训练检查点规则（默认 `min_delta=1e-4`），优先选择验证集 AUC 改善的 epoch，AUC 相同时选择 validation loss 改善的 epoch。
+- 顶部“数据集”下拉框决定使用哪套骨头厚度阈值划分，且整个界面都跟随该选择：
+  - `默认 · 二分类 · depth >= 1.0 mm` 对应仓库里的 `raw_data/`（历史划分，没有 `label_scheme.json`）；
+  - `raw_data_relabeled/` 下每个带 `label_scheme.json` 的子目录都会自动出现在下拉框中，显示为例如 `二分类 · 阈值 1.3 mm · cls2_thr1.3` 或 `三分类 · 阈值 0.8 / 1.2 mm · cls3_thr0.8_1.2`。
+  - 切换数据集只显示属于该 `label_scheme` 标签的实验，不会把两个方案的结果混在一起。
+- 选择 `全部预处理方式` 时，显示当前数据集下已生成实验的 summary 对比表。
+- Summary 显示特征维数、Best Epoch、实际训练 Epoch 数和 Train/Val/Test 指标；Best Epoch 遵循训练检查点规则（默认 `min_delta=1e-4`），优先选择验证集 AUC 改善的 epoch，AUC 相同时选择 validation loss 改善的 epoch。多分类时这些指标为宏平均。
 - 选择单一预处理方式时，显示对应的预处理信号图和 EMD 分量图。
 - “Training Curve” 页位于预处理可视化和 EMD 分解之间，显示当前筛选实验的 validation loss/test loss-epoch 曲线，并标出 Best Epoch。
-- “Confusion Matrix” 页显示当前顶部筛选对应的 test 集混淆矩阵，并可在右侧选择栏中独立选择其他已生成实验进行对比。
+- “Confusion Matrix” 页显示当前顶部筛选对应的 test 集混淆矩阵，并可在右侧选择栏中独立选择其他已生成实验进行对比。二分类画 2×2 矩阵，三分类及以上画 k×k 矩阵。
 - “错分厚度分布” 页显示当前顶部筛选对应的“骨头厚度—错分数”柱状分布（浅色宽柱为该厚度桶的全部样本，深色窄柱为 train/val/test 各自的错分样本，1 mm 处有 label 分界参考线），并可在右侧选择栏中独立选择其他已生成实验进行对比。
-- 预处理页不再提供全局类别下拉框；四个等宽列分别显示当前组合 label=0/1 和目标组合 label=0/1。顶部筛选条件只控制当前组合，目标组合选择栏可独立选择所有已生成的 form/region/channel 结果。四列共用横向滑动条，按图片序号同步切换，多 branch 图像可横向查看。
-- 支持区域组合和通道模式筛选；EMD 页默认同时显示两个类别。
-- 点击“开始训练”后，会按当前预处理方式、区域组合和通道模式调用现有训练脚本；训练在后台执行，日志会显示在 Summary 页底部。
+- 预处理页不再提供全局类别下拉框；`2k` 个等宽列分别显示当前组合和目标组合的每个类别（二分类即历史的 label=0/1 四列，三分类为六列）。顶部筛选条件只控制当前组合，目标组合选择栏可独立选择所有已生成的 form/region/channel 结果。所有列共用横向滑动条，按图片序号同步切换，多 branch 图像可横向查看。
+- 支持区域组合和通道模式筛选；EMD 页默认显示所有类别。
+- 点击“开始训练”后，会按当前数据集、预处理方式、区域组合和通道模式调用现有训练脚本；训练在后台执行，日志会显示在 Summary 页底部。
 - 默认训练完成后自动生成对应的预处理图、EMD 分量图、训练曲线图、test 集混淆矩阵图和错分厚度分布图；可以取消“训练后生成图像”。
 - 旧版不含通道号的图片文件也可以读取；新生成的图片文件名会包含通道模式，避免不同通道结果互相覆盖。
+
+数据集相关产物的存放位置：
+
+- 实验统一放在 `experiments/`，实验目录名带 `label_scheme` 标签后缀（例如 `...channels_3__cls3_thr0.8-1.2`），没有 `label_scheme.json` 时保持历史命名不变。
+- 图库按数据集分目录：历史默认数据集仍写入 `visualizations/<kind>/`，带标签的数据集写入 `visualizations/<kind>/<tag>/`，文件名再带 `__<tag>` 后缀。这样切换数据集不会覆盖旧图。
 
 训练时需要选择具体通道 1、2 或 3，不能选择“全部通道”。预处理方式和区域组合可以选择“全部”，这会按现有命令行脚本运行多组实验。
 
@@ -368,7 +472,8 @@ python gui_app.py
 - `visualize_emd_components.py`：对 EMD 得到的 IMF 和 Residue 进行可视化，每个类别随机选择 1 个样本。
 - `visualize_training_curves.py`：读取 `history.json`，绘制 validation loss 和 test loss 随 epoch 的变化；test loss 不参与 early stopping。
 - `visualize_confusion_matrix.py`：读取 `metrics.json`，绘制 test 集混淆矩阵。
-- `visualize_error_by_thickness.py`：读取 `samples_{split}.json` 与 `probabilities_{split}.npy`/`labels_{split}.npy`，按骨头厚度分桶统计 train/val/test 的错分样本个数并绘制堆叠柱状图；默认桶宽 0.05 mm、判定阈值 0.5。
+- `visualize_error_by_thickness.py`：读取 `samples_{split}.json` 与 `probabilities_{split}.npy`/`labels_{split}.npy`，按骨头厚度分桶统计 train/val/test 的错分样本个数并绘制堆叠柱状图；默认桶宽 0.05 mm、判定阈值 0.5，
+  参考线优先读该实验的 `label_scheme`（多分类会逐阈画线），可用 `--label-thresholds` 覆盖。
 
 两个脚本默认都使用：
 
@@ -378,6 +483,9 @@ python gui_app.py
 - `train + val + test` 的全部样本池；
 - 四种帧处理方式和四种区域组合（`full`、`bone`、`bone_plus_post`、`dyn_envelope`）；
 - 通道模式 3，即同时保留物理通道 1 和 2。
+
+前两条是默认数据集的语义；换数据集（例如三分类）时给这两个脚本加 `--data-dir` 指向新目录，
+并用 `--class-labels 0,1,2` 指定要画的类别。二分类下省略这两个参数，行为与图片文件名都不变。
 
 运行预处理结果可视化：
 
