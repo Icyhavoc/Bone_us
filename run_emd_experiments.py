@@ -21,6 +21,8 @@ from typing import Sequence
 import numpy as np
 
 from emd_pipeline import (
+    BRANCH_RATIO_PRESETS,
+    CHANNEL_CONTRAST_KINDS,
     DepthMapper,
     EMD_FEATURE_PRESETS,
     EMDConfig,
@@ -126,6 +128,29 @@ def _parse_args() -> argparse.Namespace:
             "crossing, rise time, merge extension and peak amplitude, none disables it"
         ),
     )
+    parser.add_argument(
+        "--channel-contrast",
+        choices=list(CHANNEL_CONTRAST_KINDS),
+        default="none",
+        help=(
+            "append one extra feature group contrasting the first two channels "
+            "elementwise (S4): 'normalized' is (a-b)/(|a|+|b|), invariant to a common "
+            "gain, 'log_ratio' is the signed log of the attenuation ratio, "
+            "'difference' keeps the raw units; 'none' leaves the layout untouched"
+        ),
+    )
+    parser.add_argument(
+        "--branch-ratio",
+        choices=sorted(BRANCH_RATIO_PRESETS),
+        default="none",
+        help=(
+            "append cross-branch contrast columns inside every channel group (S3b): "
+            "'ratio' divides the deep window's statistics by the shallow window's, "
+            "'attenuation' takes the same contrasts in log form; both add one "
+            "separation-normalised attenuation coefficient in 1/mm. Requires a "
+            "region plan with two or more windows; 'none' leaves the layout untouched"
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--patience", type=int, default=40)
     parser.add_argument("--hidden-dims", default="64,32")
@@ -169,6 +194,8 @@ def _experiment_name(
     channel_mode: int,
     channel_aggregation: str = "per_channel",
     label_tag: str | None = None,
+    channel_contrast: str = "none",
+    branch_ratio: str = "none",
 ) -> str:
     """Directory name for one experiment.
 
@@ -181,10 +208,23 @@ def _experiment_name(
     ``raw_data/relabel_by_thickness.py``) appends its tag for the same reason:
     a 3-class run must not land on top of the binary results it is meant to be
     compared with.
+
+    A cross-channel contrast is likewise its own experiment -- it adds a feature
+    group and therefore a classifier tower -- so it gets a tag too.  Without one,
+    a ``channels_3`` contrast run would overwrite the plain ``channels_3``
+    baseline it exists to be compared against.
+
+    A cross-branch ratio adds columns but no tower, so it would not change the
+    model layout; it still gets a tag, because its feature dimension differs and a
+    silent mix-up would be impossible to spot from the metrics alone.
     """
     name = f"form_{form}__regions_{region_name}__channels_{channel_mode}"
     if channel_aggregation != "per_channel":
         name = f"{name}__{channel_aggregation}"
+    if channel_contrast != "none":
+        name = f"{name}__contrast_{channel_contrast}"
+    if branch_ratio != "none":
+        name = f"{name}__branchratio_{branch_ratio}"
     if label_tag:
         name = f"{name}__{label_tag}"
     return name
@@ -297,6 +337,8 @@ def run_one(
         channel_aggregation=args.channel_aggregation,
         feature_names=EMD_FEATURE_PRESETS[args.feature_set],
         locator_features=args.locator_features,
+        channel_contrast=args.channel_contrast,
+        branch_ratio=args.branch_ratio,
     )
     dynamic_envelope_config = (
         dyn_config_from_args(args) if region_name == DYNAMIC_REGION_NAME else None
@@ -473,7 +515,13 @@ def main() -> None:
     for form in forms:
         for region_name, regions in region_experiments:
             experiment_name = _experiment_name(
-                form, region_name, args.channel_mode, args.channel_aggregation, dataset_tag
+                form,
+                region_name,
+                args.channel_mode,
+                args.channel_aggregation,
+                dataset_tag,
+                args.channel_contrast,
+                args.branch_ratio,
             )
             experiment_dir = output_dir / experiment_name
             result = run_one(

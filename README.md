@@ -19,7 +19,8 @@ raw_data
 - `dyn_cli.py`：`--dyn-*` 参数的统一定义，供三个入口脚本和 GUI 共用。
 - `gui_app.py`：Tkinter 图形界面。
 - `visualize_*.py`：五张图的可视化脚本（预处理、EMD 分量、训练曲线、混淆矩阵、错分厚度分布）。
-- `verify_*.py`：三份可重跑的回归自检。
+- `verify_*.py`：七份可重跑的回归自检（动态包络、MLP 梯度、通道聚合、通道对比度、跨 branch 比值、特征族、标准化器）。
+- `compare_label_schemes.py`：配对评价协议，把「特征提取」与「阈值选择」解耦（见下）。
 - `raw_data/relabel_by_thickness.py`：按指定厚度阈值重建数据集（二分类 / 多分类），见「标签方案与 k 分类」。
 - `bin/`：**归档区**（一次性脚本、历史快照、参考实现与参考数据），清单见 `bin/README.md`。
 - `README.md`：使用说明。
@@ -172,6 +173,9 @@ python run_emd_experiments.py `
 
 通道选择与深度 branch 是两个独立维度；物理通道不会被误当成深度 branch。
 
+> 通道 3 还有一个额外的可选开关 `--channel-contrast`，会把两个通道的特征**对比度**
+> 作为第三个特征组追加进去（见「通道对比特征」）。
+
 ### 通道 3 如何处理两个通道
 
 两个通道**各自独立**切片、重采样、做 EMD，各得一组特征；两组特征**拼接**后进入分类头，
@@ -255,9 +259,25 @@ channel_mode=1 / 2                    channel_mode=3 (per_channel)
 | `compact`（默认） | 7 个，去掉 `Mean` | EMD 筛分本身把每个 IMF 的均值压向 0，该列在本数据上几乎只剩 float32 舍入误差（branch 1 实测 `std = 3.6e-5`，而 `peak_abs = 8.4e-2`） |
 | `lean` | 6 个，再去掉 `Energy` | 备选对照 |
 
+在 `compact` 之上还可以叠加三个可选族（默认**都不开**，实测无增益，见 `PROJECT_SUMMARY.md` §11.2）：
+
+| `--feature-set` | 追加的统计量 |
+|---|---|
+| `shape` | `kurtosis`、`skewness`、`crest_factor` |
+| `spectral_ext` | `spectral_bandwidth`、`spectral_rolloff`（85% 累计能量分位）、`spectral_flatness`、`spectral_entropy`、`spectral_slope`（在 20 dB 动态范围上拟合，故与增益无关） |
+| `envelope` | `envelope_decay`、`envelope_half_width` |
+
+由此得到 `shape`(10) / `spectral_ext`(12) / `envelope`(9) / `shape_spectral`(15) / `rich`(17)
+五个预设（数字为单个 branch 的列数）。这些族全部对退化输入（全零 / 常量 / 单点）返回有限值，
+不会把 NaN 带进列均值。
+
 `Spectral centroid` 用分支的实际物理间距 `sample_spacing_mm`（物理深度跨度 ÷ 重采样点数）把 bin 索引换算成 **cycles/mm**，因此主窗口与尾窗口之间可以比较——两个 branch 都重采样到 512 点，但主窗口只覆盖约 0.95 mm、尾窗口约 3.60 mm。
 
 默认使用 `--stream-aggregation pooled`：对每个 branch 内的所有 EMD 分量和信号流做均值池化，每个 branch 的每组特征得到 `len(feature_names)` 个统计量；多个 branch 之间不做均值，而是直接拼接。
+
+这里的"信号流"既包括 `mean_std` 的两条流（均值/标准差）或 `raw50` 的 50 帧，也包括通道 3 展开出的两个通道——在 `pooled` 下它们都被同一个均值池化掉。
+
+`flatten` 和 `stats` 仍保留作对照实验，不再设置最终特征维数上限。
 
 ### 定位特征 `--locator-features`
 
@@ -281,9 +301,38 @@ channel_mode=1 / 2                    channel_mode=3 (per_channel)
 
 加 `--locator-features none --feature-set legacy` 即可还原历史宽度（8 / 16 / 32）。
 
-这里的"信号流"既包括 `mean_std` 的两条流（均值/标准差）或 `raw50` 的 50 帧，也包括通道 3 展开出的两个通道——在 `pooled` 下它们都被同一个均值池化掉。
+### 跨 branch 比值特征 `--branch-ratio`
 
-`flatten` 和 `stats` 仍保留作对照实验，不再设置最终特征维数上限。
+两个 branch 是同一件事在**不同深度**上的两次观测，二者之比就是衰减本身。
+该开关在每个通道组上**追加**一个派生块（不修改任何已有列），只能用于有两个窗口的 `dyn_envelope`：
+
+| 取值 | 追加的列 |
+|---|---|
+| `none`（默认） | 无 |
+| `ratio` | `std`、`peak_abs`、`zero_crossing_rate`、`spectral_centroid` 的 `浅/深` 比值 |
+| `attenuation` | 上述四个量的 `log(浅/深)` |
+
+两种取值都再追加一列 `attenuation_per_mm`（再除以两窗口中心距离，单位 1/mm）。
+主窗口起点是逐样本动态的，不除以实际距离就会把「衰减」与「窗口恰好放得多远」混在一起。
+`energy` 与 `rms` 刻意排除：`log(E_a/E_b) ≡ 2·log(rms_a/rms_b)`，且 EMD 分量近零均值使 `rms ≈ std`。
+对单窗口区域（`full` / `bone` / `bone_plus_post`）请求该特征会直接报错，不会静默忽略。
+
+### 通道对比特征 `--channel-contrast`
+
+两个物理通道从不同角度探测同一部位，它们的**对比度**是不需要新数据就能得到的真正新信息。
+该开关在通道分组之后**追加一个额外的特征组**（需要 `--channel-mode 3`，单通道会直接报错），
+对前两组逐元素做对比：
+
+| 取值 | 形式 | 性质 |
+|---|---|---|
+| `none`（默认） | — | 布局不变 |
+| `difference` | `a - b` | 保留原始单位 |
+| `normalized` | `(a - b) / (\|a\| + \|b\|)` | 对共同增益不变 → 抵消探头压力与耦合剂差异 |
+| `log_ratio` | `signed_log(a) - signed_log(b)` | 增益差变成加性偏移 |
+
+新组会作为**第三座塔**接到共享头，`feature_info.json` 以 `contrast_group` 记录它的来源组、来源通道与宽度。
+`--branch-ratio` 与 `--channel-contrast` 都会写进实验目录名
+（`...__channels_3__contrast_normalized__branchratio_attenuation__cls2_thr1.3`），所以不同的消融臂不会互相覆盖。
 
 ### 浅层基线对照
 
@@ -327,7 +376,8 @@ Linear(input_dim, 64)
 ```
 
 塔的宽度取 `hidden_dims[0]`，共享头取 `hidden_dims[1:]` 再接 2 类输出。只有一组时塔会塌缩成第一层
-全连接，网络与历史结构**完全等价**（已用逐位回归验证）。
+全连接，网络与历史结构**完全等价**（已用逐位回归验证）。塔的数量等于**特征组数**，不是写死的 2：
+加上 `--channel-contrast` 会得到 3 座塔，共享头首层输入随之从 128 变成 192。
 
 上图的输出层是二元的情况；k 分类时最后一层换成 `Linear(32, k)`，其余不变（`--num-classes` 或从标签自动推断）。
 
@@ -380,20 +430,61 @@ python run_emd_experiments.py `
 
 ### 自检脚本
 
-三个脚本不依赖 `experiments/` 里的历史产物，可用当前代码直接重跑：
+七个脚本不依赖 `experiments/` 里的历史产物，可用当前代码直接重跑：
 
 ```powershell
 python verify_dyn_envelope.py         # 动态包络切分与参考实现逐位一致
 python verify_mlp_gradients.py        # 双塔 MLP 的解析梯度（数值梯度对照）
 python verify_channel_aggregation.py  # 通道聚合语义与网络拓扑
+python verify_channel_contrast.py     # S4：对比组是追加的，单通道运行逐位不变
+python verify_branch_ratio.py         # S3b：比值块是追加的，默认下逐位不变
+python verify_emd_features.py         # S3a：历史列不变 + 新列定义正确 + 退化输入不产生 NaN
+python verify_scalers.py              # S1：standard / robust / rank 与逆正态分位表
 ```
 
 `verify_channel_aggregation.py` 会真实调用 CLI 跑 6 次小规模训练，验证：单通道下
 `per_channel` 与 `pooled` 逐位相同；通道 3 下 `per_channel` 的特征宽度是 `pooled` 的两倍、
 `tower_count=2`、共享头首层输入翻倍。加 `--keep` 可保留临时目录 `_agg_regress/`。
 
+`verify_channel_contrast.py` 与 `verify_branch_ratio.py` 会重放磁盘上早于该功能写入的实验目录，
+用来证明**默认行为没有被改动**。它们共用同一份重放夹具与同一个漂移上限常量；
+唯一被容忍的差异是 `dynamic_tail_window.spectral_centroid`（S3a 去掉了一个 `+1e-12`，
+实测相当于 2.1 个 float32 ulp），上限 8 ulp，超过一个数量级即判为真实改动。
+
 另有 `run_baseline_models.py`，它读已有实验目录的 `features_{split}.npy` 跑浅层基线，
 不重跑 EMD、不写回训练结果（用法与结论见上面「浅层基线对照」）。
+
+## 配对评价协议 `compare_label_schemes.py`
+
+换阈值、换特征集、换标准化器时，如果各自跑一次完整训练，得到的数字之间**不可比**：
+划分不同、随机种子不同，也没有配对区间，1 个百分点的差异到底是信号还是噪声无法判断。
+
+这个脚本把**特征提取**与**阈值选择**解耦：只读已保存的 `features_{split}.npy` 与
+`samples_{split}.json`（不重跑 EMD），把 train/val/test 合并成 268 个样本，
+按 **`depth_value` 分位数**分层做 5×5 交叉验证——**标签不参与划分**，
+所以一份提取可以同时支撑任意多套阈值方案，而且各方案用的是**同一折集**（这才叫配对）。
+标准化器每折只在训练折上拟合。
+
+```powershell
+python compare_label_schemes.py `
+  --experiment bin/_ab13_keep/form_top3_mean__regions_dyn_envelope__channels_1__cls2_thr1.3 `
+  --schemes 1.0 1.3 1.5 1.7 `
+  --scalers standard,robust,rank `
+  --feature-sets base16=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 `
+  --folds 5 --repeats 5 --seed 0 `
+  --models mlp,l2_logistic,lda,prior `
+  --output-dir bin/_s1_thresholds
+```
+
+- `--schemes`：每项是一组逗号分隔的阈值（`1.3` 或 `0.8,1.2`），可给多组；
+- `--scalers`：`standard` / `robust`（中位数 + IQR/1.349，除数刻意取 1.349 使正态列上尺度**等于**标准差，
+  这样它才是公平替换而不是另一个模型）/ `rank`（秩 → 逆正态分位）；
+- `--feature-sets`：直接给列下标做切片，可写 `名字=0,1,2` / 裸下标 / `all`；
+- `--models`：`mlp`（与训练同结构）、`l2_logistic`、`lda`、`prior`（多数类地板）。
+
+输出 `comparison_report.txt` 与 `comparison_results.json`。报告里的 `±` 是**配对差值**的 95% 区间，
+`*` 表示该区间不含 0，即名义显著。**任何新特征/新模型的效果，都必须在这张表上显示出不含 0 的区间才算数**
+（实测数据见 `PROJECT_SUMMARY.md` §11）。
 
 ## 输出文件
 
@@ -402,7 +493,12 @@ python verify_channel_aggregation.py  # 通道聚合语义与网络拓扑
 - `--channel-aggregation per_channel`（默认）：`form_<form>__regions_<region>__channels_<channel>/`
 - `--channel-aggregation pooled`（历史行为/消融对照）：同名 + `__pooled` 后缀
 
-单个通道下两种设置等价，但仍分开存放，便于对照。
+在 `__channels_<n>` 之后还会按顺序追加上后缀：`__contrast_<kind>`（`--channel-contrast`）、
+`__branchratio_<kind>`（`--branch-ratio`）、`__<label_tag>`（`--data-dir` 带 `label_scheme.json` 时）。
+例如 `form_top3_mean__regions_dyn_envelope__channels_3__contrast_normalized__branchratio_attenuation__cls2_thr1.3`。
+这样每条消融臂都有独立目录，不会覆盖基线，也能从目录名直接读出是哪组开关。
+
+单个通道下两种聚合设置等价，但仍分开存放，便于对照。
 
 ```text
 experiments/

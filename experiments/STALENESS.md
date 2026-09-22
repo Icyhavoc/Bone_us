@@ -1,6 +1,6 @@
 # `experiments/` 产物与当前代码的一致性
 
-更新时间：2026-09-17
+更新时间：2026-09-17（最近补充：2026-09-22，S1/S3a/S3b/S4 落地后的重放结论）
 
 > **当前状态**：本文件中提到的全部旧实验已归档到
 > `bin/backup/5_experiments_2026-09-17/`（27 个实验目录 + 1 个 `summary.json`）。
@@ -95,3 +95,20 @@ D:\Miniconda3\python.exe run_emd_experiments.py --forms all --region-set all --c
    |---|---:|---:|---:|---:|
    | 移植前（`bin/backup/4_stale_dyn_preport/`） | 0.7803 | 0.7016 | 0.6269 | 0.5556 |
    | 移植后（`bin/backup/5_experiments_2026-09-17/`） | 0.8813 | 0.8297 | 0.7313 | 0.8056 |
+
+## S1 / S3a / S3b / S4 落地后的重放结论（2026-09-22）
+
+本轮新增了配对评价协议（`compare_label_schemes.py`）与三个可选特征开关
+（`--feature-set shape/spectral_ext/envelope/...`、`--branch-ratio`、`--channel-contrast`）。
+它们的**默认值就等于历史行为**，因此上表四个目录仍然代表当前代码的输出：
+
+- 三个开关默认分别是 `compact`、`none`、`none`，不会改变任何已有列或网络拓扑；
+- 用 `experiments/form_top3_mean__regions_dyn_envelope__channels_1` 自己的 `config.json`
+  重放，`features_*.npy` 与原产物的 **16 列中有 15 列逐位相同**；
+- 唯一差异是 `dynamic_tail_window.spectral_centroid`，源自 S3a 去掉了谱质心功率和里的
+  一个 `+1e-12`，实测偏移为**相对 2.51e-07 = 2.1 个 float32 ulp**（纯舍入）。
+  该列已成为 `verify_branch_ratio.py` / `verify_channel_contrast.py` 里唯一被容忍的例外，
+  上限 8 ulp（超一个数量级即判为真实改动）。
+
+> S3b / S4 的 A/B 特征提取与配对报告都写在 `bin/_ab13_*`、`bin/_s3a_rich`、`bin/_stack_dim`，
+> 故意**不**落进 `experiments/`，以免与正式基线混在一起。

@@ -200,10 +200,13 @@ class DynamicEnvelopeConfig:
             raise ValueError("dynamic envelope locator_top_k must be positive")
 
 
-#: Statistics computed for every IMF (and for the residue).  ``_component_features``
-#: is the only producer, but the set is named here so ``EMDConfig.validate`` and
-#: the reporting helpers can talk about the columns without recomputing them.
-_COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
+#: The eight statistics the pipeline has always computed, in their original order.
+#: The order is load-bearing: ``feature_dimension_names`` publishes it, every
+#: stored ``features_*.npy`` was written with it, and ``compact`` / ``lean`` are
+#: derived by *removing* entries.  An insertion anywhere but the end would
+#: silently renumber every existing column, so new statistics are only ever
+#: appended -- see :data:`_COMPONENT_FEATURE_NAMES`.
+_CORE_COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
     "mean",
     "std",
     "rms",
@@ -213,6 +216,178 @@ _COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
     "zero_crossing_rate",
     "spectral_centroid",
 )
+
+#: Scale-invariant shape statistics, appended after the core block.
+#:
+#: All three are ratios of central moments or of envelope to rms, so multiplying
+#: a component by any positive gain leaves them unchanged.  That is the point:
+#: the amplitude columns are dominated by coupling, probe pressure and ADC gain
+#: rather than by thickness (measured: the 11 amplitude columns taken alone score
+#: AUC 0.806, *worse* than the single ``zero_crossing_rate`` column at 0.833),
+#: whereas an impulsive, spiky component looks the same at any gain.
+_SHAPE_COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
+    "kurtosis",
+    "skewness",
+    "crest_factor",
+)
+
+#: Spectral descriptors, appended after the shape block.
+#:
+#: ``spectral_slope`` is the one with a direct physical reading.  Bone attenuates
+#: high frequencies faster than low ones, so the slope of the log power spectrum
+#: *is* an attenuation estimate, and attenuation is the mechanism the thickness
+#: label is proxying for.  Until now the only frequency information in the whole
+#: vector was a single ``spectral_centroid`` per component.
+_SPECTRAL_COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
+    "spectral_bandwidth",
+    "spectral_rolloff",
+    "spectral_flatness",
+    "spectral_entropy",
+    "spectral_slope",
+)
+
+#: Envelope descriptors, appended after the spectral block.
+#:
+#: ``envelope_decay`` is the same attenuation idea measured in the spatial domain:
+#: a least-squares fit of ``log(envelope)`` against depth in millimetres.  A gain
+#: change shifts that log by a constant and leaves the slope alone, so it carries
+#: attenuation without carrying amplitude.
+_ENVELOPE_COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
+    "envelope_decay",
+    "envelope_half_width",
+)
+
+#: Every statistic ``_component_features`` can produce, in emission order.
+#:
+#: Statistics computed for every IMF (and for the residue).  ``_component_features``
+#: is the only producer, but the set is named here so ``EMDConfig.validate`` and
+#: the reporting helpers can talk about the columns without recomputing them.
+_COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
+    _CORE_COMPONENT_FEATURE_NAMES
+    + _SHAPE_COMPONENT_FEATURE_NAMES
+    + _SPECTRAL_COMPONENT_FEATURE_NAMES
+    + _ENVELOPE_COMPONENT_FEATURE_NAMES
+)
+
+#: Fraction of total spectral power below which the roll-off frequency is read.
+SPECTRAL_ROLLOFF_FRACTION = 0.85
+
+#: Dynamic range, in dB, of the band used for the log-spectrum attenuation fit.
+#: Bins below this floor are noise and have a flat log spectrum, so including
+#: them would bias the slope towards zero and make the feature depend on how much
+#: empty bandwidth the window happens to have.
+SPECTRAL_SLOPE_DYNAMIC_RANGE_DB = 20.0
+
+#: Fraction of the envelope peak that bounds the decay fit and the half-width.
+ENVELOPE_FLOOR_FRACTION = 0.1
+
+#: Reflection padding applied before the Hilbert transform when the envelope is
+#: used as a *feature*.
+#:
+#: The transform is circular: the sample before the first is treated as the last,
+#: so a component that is large at one edge and small at the other -- that is,
+#: every decaying burst, which is the shape these two features exist to measure --
+#: folds a step into the convolution and the far edge comes back near the peak
+#: instead of near zero.  Measured on a synthetic ``exp(-x) * cos(2*pi*5x)`` over
+#: 3.6 mm: the right-edge envelope reads 0.78 of the peak with no padding and
+#: 0.03 with it, against a true 0.028.  That error is not cosmetic, it turns
+#: ``envelope_half_width`` into "the whole window" for every real component.
+#:
+#: :func:`_hilbert_envelope` itself is deliberately left unpadded: the locator
+#: reproduces the reference implementation sample for sample.
+ENVELOPE_REFLECTION_PAD = 64
+
+#: Cross-channel contrast kinds accepted by :attr:`EMDConfig.channel_contrast`.
+#:
+#: The two physical channels look at the same site from different incidence
+#: angles, so their *difference* is a new observable rather than a copy of one
+#: channel.  Every contrast is elementwise over the first two channel groups,
+#: which are column-aligned by construction (same branches, same statistics,
+#: same locator block, only the channel differs), so column ``j`` of the
+#: contrast is statistic ``j`` seen by channel 1 minus channel 2.
+#:
+#: ``difference`` is the raw signed gap.  It is the least informative of the
+#: three because it is a linear function of columns the classifier already has,
+#: but it is the only one that preserves the physical units.
+#:
+#: ``normalized`` is ``(a - b) / (|a| + |b|)`` -- a bounded, symmetric relative
+#: contrast in ``[-1, 1]`` that is invariant to a *common* gain applied to both
+#: channels, which is what cancels probe pressure and coupling gel.  It is
+#: defined for zeros (unlike a plain ratio) and is sign-preserving.
+#:
+#: ``log_ratio`` is ``signed_log(a) - signed_log(b)``, i.e. ``log(a / b)``
+#: wherever the two share a sign.  This is the multiplicative counterpart of
+#: ``difference``: attenuation seen by one path relative to the other is exactly
+#: a log-ratio, so a gain difference becomes an additive offset instead of a
+#: rescaling, and the raw magnitude of an amplitude statistic stops dominating
+#: the comparison.
+CHANNEL_CONTRAST_KINDS: tuple[str, ...] = ("none", "difference", "normalized", "log_ratio")
+
+#: Floor on ``|value|`` inside the signed logarithm used by both the
+#: cross-channel contrast and the cross-branch ratio, so an exactly zero
+#: statistic -- which several of the extended statistics return deliberately --
+#: stays finite instead of becoming ``-inf``.
+CHANNEL_CONTRAST_EPSILON = 1e-30
+
+#: Column definitions for :attr:`EMDConfig.branch_ratio`, as
+#: ``(numerator statistic, denominator statistic, form)`` triples.
+#:
+#: This is strategy S3b: every statistic so far is measured **within one window**,
+#: so the extraction cannot see how a quantity *changes with depth*.  Branch 0 is
+#: the shallower window (the envelope main branch) and branch 1 the deeper one
+#: (the tail branch), so their ratio is the attenuation itself -- the textbook
+#: bone descriptor, and the one thing S3a's in-window fits only approximate.
+#:
+#: The four paired statistics are chosen because they are the four independent
+#: ways an attenuating medium changes a burst, all of which are already available
+#: in every feature preset:
+#:
+#: * ``std`` -- broadband level decay.
+#: * ``peak_abs`` -- peak decay, i.e. the same decay at the strongest component.
+#: * ``zero_crossing_rate`` -- pulse *broadening*: a low-pass medium removes the
+#:   fast oscillations, so the crossing rate falls with depth.  Scale-free
+#:   already, so its ratio measures shape change alone.
+#: * ``spectral_centroid`` -- spectral *downshift*, the frequency-domain statement
+#:   of the same effect.
+#:
+#: ``energy`` and ``rms`` are deliberately absent.  ``energy = mean(x**2)`` and
+#: ``rms = sqrt(mean(x**2))``, so ``log(energy_a / energy_b)`` is exactly
+#: ``2 * log(rms_a / rms_b)`` and ``rms`` and ``std`` coincide for the
+#: near-zero-mean components EMD produces.  Adding them would widen every group
+#: without adding a dimension of information -- which matters, because the whole
+#: dataset is 161 training samples.
+BRANCH_RATIO_STATISTICS: tuple[str, ...] = (
+    "std",
+    "peak_abs",
+    "zero_crossing_rate",
+    "spectral_centroid",
+)
+
+BRANCH_RATIO_PRESETS: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "none": (),
+    # The 比值特征 of the S3 proposal, in the plain multiplicative form.
+    "ratio": tuple(
+        (statistic, statistic, "ratio") for statistic in BRANCH_RATIO_STATISTICS
+    ),
+    # The same contrasts additively, i.e. attenuation in nepers: a gain applied
+    # to both windows becomes an offset instead of a rescaling, and the largest
+    # amplitude statistic stops dominating the comparison.
+    "attenuation": tuple(
+        (statistic, statistic, "log_ratio") for statistic in BRANCH_RATIO_STATISTICS
+    ),
+}
+
+#: Name of the extra column that divides the level log-ratio by the *actual*
+#: separation of the two window centres, giving an attenuation coefficient in
+#: 1/mm.
+#:
+#: The normalisation is not cosmetic under ``dyn_envelope``: the main window
+#: starts at a per-sample dynamic index, so the distance between the two window
+#: centres changes from sample to sample.  Without dividing by it,
+#: ``log_ratio:std/std`` conflates attenuation with how far apart the detector
+#: happened to place the windows.
+BRANCH_ATTENUATION_FEATURE = "attenuation_per_mm"
+
 
 #: Ready-made ``EMDConfig.feature_names`` sets.
 #:
@@ -234,11 +409,32 @@ _COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
 #: ``lean`` is available but ``compact`` is the default.
 EMD_FEATURE_PRESETS: dict[str, tuple[str, ...]] = {
     "legacy": _COMPONENT_FEATURE_NAMES,
-    "compact": tuple(name for name in _COMPONENT_FEATURE_NAMES if name != "mean"),
+    "compact": tuple(name for name in _CORE_COMPONENT_FEATURE_NAMES if name != "mean"),
     "lean": tuple(
-        name for name in _COMPONENT_FEATURE_NAMES if name not in {"mean", "energy"}
+        name for name in _CORE_COMPONENT_FEATURE_NAMES if name not in {"mean", "energy"}
     ),
 }
+
+#: Ablation presets for the statistics added after the core block.  Each one is
+#: the ``compact`` baseline plus exactly one new family, so an A/B against
+#: ``compact`` attributes any change to that family and nothing else.  ``mean``
+#: is dropped in all of them for the same reason ``compact`` drops it: it holds
+#: float32 round-off rather than signal (see the note above).
+_COMPACT_BASE: tuple[str, ...] = EMD_FEATURE_PRESETS["compact"]
+for _preset_name, _extra in (
+    ("shape", _SHAPE_COMPONENT_FEATURE_NAMES),
+    ("spectral_ext", _SPECTRAL_COMPONENT_FEATURE_NAMES),
+    ("envelope", _ENVELOPE_COMPONENT_FEATURE_NAMES),
+    ("shape_spectral", _SHAPE_COMPONENT_FEATURE_NAMES + _SPECTRAL_COMPONENT_FEATURE_NAMES),
+    (
+        "rich",
+        _SHAPE_COMPONENT_FEATURE_NAMES
+        + _SPECTRAL_COMPONENT_FEATURE_NAMES
+        + _ENVELOPE_COMPONENT_FEATURE_NAMES,
+    ),
+):
+    EMD_FEATURE_PRESETS[_preset_name] = _COMPACT_BASE + _extra
+del _preset_name, _extra
 
 #: Ready-made ``EMDConfig.locator_features`` sets.  A locator feature describes
 #: *where* the dynamic envelope put the main window on the depth axis, which the
@@ -303,6 +499,27 @@ class EMDConfig:
     #: the feature dimension is unchanged by the channel mode, and
     #: ``pooled``/``per_channel`` still agree for a single channel.
     locator_features: str = "core"
+    #: Cross-channel contrast appended as **one extra feature group** right after
+    #: the channel groups; a value other than ``"none"`` (see
+    #: :data:`CHANNEL_CONTRAST_KINDS`).
+    #:
+    #: This is the only way to use the second physical channel without new data,
+    #: and it is deliberately additive: with ``channel_contrast="none"`` -- the
+    #: default -- :func:`sample_feature_vector` returns exactly what it returned
+    #: before this option existed, bit for bit.  So a ``channel_mode=1``
+    #: experiment cannot be affected by it, and a ``channel_mode=3`` contrast run
+    #: is a separate experiment that can be A/B tested against the single-channel
+    #: baseline.
+    channel_contrast: str = "none"
+    #: Cross-branch contrast appended **inside every channel group**, after that
+    #: group's branch columns and before any contrast group; a key of
+    #: :data:`BRANCH_RATIO_PRESETS`.
+    #:
+    #: Like ``channel_contrast`` this is strictly additive: with the default
+    #: ``"none"`` the returned vector is unchanged bit for bit.  Unlike it, this
+    #: branch needs **two** branches -- the numerator is branch 0, the shallower
+    #: window -- so it is refused for a single-region plan.
+    branch_ratio: str = "none"
 
     def validate(self) -> None:
         if self.max_imfs <= 0:
@@ -320,10 +537,25 @@ class EMDConfig:
         unknown = set(self.feature_names) - set(_COMPONENT_FEATURE_NAMES)
         if unknown:
             raise ValueError(f"Unknown EMD feature names: {sorted(unknown)}")
+        # A group's columns are attributed to statistics positionally, as
+        # ``feature_names[j % n]``, so a repeated name would make two different
+        # statistics share a column and silently corrupt every derived ratio.
+        if len(set(self.feature_names)) != len(self.feature_names):
+            raise ValueError(f"feature_names must not repeat a statistic: {list(self.feature_names)}")
         if self.locator_features not in LOCATOR_FEATURE_PRESETS:
             raise ValueError(
                 "locator_features must be one of "
                 f"{sorted(LOCATOR_FEATURE_PRESETS)}, got {self.locator_features!r}"
+            )
+        if self.channel_contrast not in CHANNEL_CONTRAST_KINDS:
+            raise ValueError(
+                f"channel_contrast must be one of {list(CHANNEL_CONTRAST_KINDS)}, "
+                f"got {self.channel_contrast!r}"
+            )
+        if self.branch_ratio not in BRANCH_RATIO_PRESETS:
+            raise ValueError(
+                f"branch_ratio must be one of {sorted(BRANCH_RATIO_PRESETS)}, "
+                f"got {self.branch_ratio!r}"
             )
 
 
@@ -1179,6 +1411,237 @@ def emd_decompose(
     return imfs, residue.astype(np.float32)
 
 
+def _linear_slope(x: np.ndarray, y: np.ndarray) -> float:
+    """Least-squares slope of ``y`` against ``x``.
+
+    Returns ``0.0`` when there is nothing to fit -- fewer than two points, or an
+    ``x`` with no spread -- because a missing slope and a zero slope should both
+    leave a downstream scaler with the neutral value rather than a NaN.
+    """
+
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+    if x.size != y.size or x.size < 2:
+        return 0.0
+    centered = x - float(x.mean())
+    spread = float(np.sum(centered * centered))
+    if spread <= 0.0:
+        return 0.0
+    slope = float(np.sum(centered * (y - float(y.mean()))) / spread)
+    return slope if np.isfinite(slope) else 0.0
+
+
+def _usable_spectral_band(power: np.ndarray) -> np.ndarray:
+    """Bins within :data:`SPECTRAL_SLOPE_DYNAMIC_RANGE_DB` of the spectral peak.
+
+    The band floor is scaled by the peak rather than fixed, so the mask does not
+    depend on the absolute amplitude of the component -- which is what keeps the
+    fitted slope scale-invariant, and therefore a measure of attenuation rather
+    than of gain.
+    """
+
+    power = np.asarray(power, dtype=np.float64).reshape(-1)
+    if power.size == 0:
+        return np.zeros(0, dtype=bool)
+    peak = float(np.max(power))
+    if not np.isfinite(peak) or peak <= 0.0:
+        return np.zeros(power.size, dtype=bool)
+    floor = peak * 10.0 ** (-SPECTRAL_SLOPE_DYNAMIC_RANGE_DB / 10.0)
+    return power >= floor
+
+
+def _padded_hilbert_envelope(signal: np.ndarray) -> np.ndarray:
+    """Hilbert envelope with reflection padding, for *feature* measurement.
+
+    See :data:`ENVELOPE_REFLECTION_PAD` for why the padding is needed and why
+    :func:`_hilbert_envelope` is not changed.  Short components are returned
+    unpadded, because reflecting a handful of samples cannot buy anything and the
+    slice arithmetic would start to overlap itself.
+    """
+
+    signal = np.asarray(signal, dtype=np.float64).reshape(-1)
+    pad = int(min(ENVELOPE_REFLECTION_PAD, max(0, signal.size // 8)))
+    if pad < 8:
+        return np.asarray(_hilbert_envelope(signal), dtype=np.float64)
+    padded = np.concatenate((signal[pad:0:-1], signal, signal[-2 : -(pad + 2) : -1]))
+    envelope = np.asarray(_hilbert_envelope(padded), dtype=np.float64)
+    return envelope[pad : pad + signal.size]
+
+
+def _channel_contrast(first: np.ndarray, second: np.ndarray, kind: str) -> np.ndarray:
+    """Elementwise contrast between two column-aligned channel feature groups.
+
+    See :data:`CHANNEL_CONTRAST_KINDS` for what each ``kind`` measures and why
+    the contrast is meaningful at all.  The two inputs must have the same width,
+    which :func:`sample_feature_vector` guarantees because both groups are built
+    from the same branches with the same statistics and locator preset.
+
+    Every branch is written so that a degenerate statistic is ``0.0`` rather than
+    NaN or a division blow-up, so the contrast has to survive zeros too instead
+    of sending them on to the scaler as ``inf``:
+
+    * ``normalized`` falls back to ``0.0`` only when *both* inputs are zero, i.e.
+      when there is genuinely no information to compare.
+    * ``log_ratio`` uses a signed logarithm ``sign(x) * log(|x| + eps)``, which
+      keeps the direction of a contrast (unlike ``|x|``) and degrades to a large
+      but finite number as one side approaches zero.
+    """
+
+    first = np.asarray(first, dtype=np.float64).reshape(-1)
+    second = np.asarray(second, dtype=np.float64).reshape(-1)
+    if first.shape != second.shape:
+        raise ValueError(
+            f"channel contrast needs two equally wide groups, got {first.shape} and {second.shape}"
+        )
+    if kind == "difference":
+        values = first - second
+    elif kind == "normalized":
+        denominator = np.abs(first) + np.abs(second)
+        nonzero = denominator > 0.0
+        values = np.divide(
+            first - second,
+            np.where(nonzero, denominator, 1.0),
+        )
+        values = np.where(nonzero, values, 0.0)
+    elif kind == "log_ratio":
+        values = _signed_log(first) - _signed_log(second)
+    else:
+        raise ValueError(
+            f"channel_contrast must be one of {list(CHANNEL_CONTRAST_KINDS)}, got {kind!r}"
+        )
+    return np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+
+def _signed_log(values: np.ndarray) -> np.ndarray:
+    """``sign(x) * log(|x| + eps)``; the additive form of a log ratio."""
+
+    values = np.asarray(values, dtype=np.float64)
+    epsilon = CHANNEL_CONTRAST_EPSILON * max(1.0, float(np.max(np.abs(values))) or 1.0)
+    return np.sign(values) * np.log(np.abs(values) + epsilon)
+
+
+def _signed_log_value(value: float) -> float:
+    """The scalar branch of :func:`_signed_log`, so both paths share one epsilon.
+
+    The two are the same expression -- both the cross-channel contrast's
+    ``log_ratio`` and the cross-branch ratio go through here rather than
+    re-deriving the floor, because a mismatch between the scalar and array
+    versions would only show up on the rare exactly-zero statistic.
+    """
+
+    return float(_signed_log(np.asarray([value], dtype=np.float64))[0])
+
+
+def _statistic_summary(feature_names: Sequence[str], group: np.ndarray) -> dict[str, float]:
+    """Summarise one feature group as ``statistic name -> value``.
+
+    :func:`emd_feature_vector` lays a group out as ``feature_names`` repeated once
+    per reducer, so column ``j`` always carries ``feature_names[j % n]`` whichever
+    ``stream_aggregation`` is in force.  Under the default ``"pooled"`` there is
+    exactly one column per statistic and the summary *is* that column; ``"stats"``
+    repeats each statistic across four reducers and ``"flatten"`` across streams
+    and components, and the mean of those columns is the documented summary.
+    """
+
+    names = list(feature_names)
+    if not names:
+        raise ValueError("feature_names cannot be empty")
+    columns = np.asarray(group, dtype=np.float64).reshape(-1)
+    if columns.size % len(names):
+        raise ValueError(
+            f"a group of {columns.size} columns is not a whole number of "
+            f"{len(names)}-statistic cycles, so its columns cannot be attributed to statistics"
+        )
+    return {
+        name: float(np.mean(columns[index :: len(names)]))
+        for index, name in enumerate(names)
+    }
+
+
+def _branch_ratio_block(
+    numerator: np.ndarray,
+    denominator: np.ndarray,
+    widths: Sequence[int],
+    pairs: Sequence[tuple[str, str, str]],
+    feature_names: Sequence[str],
+    distance_mm: Sequence[float],
+) -> tuple[np.ndarray, tuple[int, ...], list[str]]:
+    """Contrast two branches window-by-window; see :data:`BRANCH_RATIO_PRESETS`.
+
+    ``numerator`` is the shallower branch and ``denominator`` the deeper one, both
+    in the same ``[group][columns]`` layout and therefore column-aligned by
+    construction.  One column is emitted per pair, plus the separation-normalised
+    attenuation coefficient -- so the returned width is the same for every group
+    and the caller can append it as one more group per channel.
+
+    Returns the concatenated block, its per-group widths, and the column names.
+    """
+
+    widths = [int(width) for width in widths]
+    distances = [float(value) for value in distance_mm]
+    if len(distances) != len(widths):
+        raise ValueError(
+            f"got {len(distances)} window separations for {len(widths)} feature group(s)"
+        )
+    if int(np.sum(widths)) != int(np.size(numerator)) or int(np.sum(widths)) != int(
+        np.size(denominator)
+    ):
+        raise ValueError(
+            f"group widths {widths} do not tile the branches "
+            f"({int(np.size(numerator))} and {int(np.size(denominator))} columns)"
+        )
+
+    needed = {statistic for first, second, _ in pairs for statistic in (first, second)}
+    needed.add("std")
+    missing = sorted(needed - set(feature_names))
+    if missing:
+        raise ValueError(
+            f"branch_ratio needs the statistics {missing}, but the feature set is {list(feature_names)}"
+        )
+    names = [f"{form}:{first}/{second}" for first, second, form in pairs]
+    names.append(f"{BRANCH_ATTENUATION_FEATURE}:std/std")
+
+    column_count = len(pairs) + 1
+    values = np.empty(len(widths) * column_count, dtype=np.float64)
+    numerator_offset = 0
+    denominator_offset = 0
+    for group, width in enumerate(widths):
+        first = _statistic_summary(
+            feature_names, numerator[numerator_offset : numerator_offset + width]
+        )
+        second = _statistic_summary(
+            feature_names, denominator[denominator_offset : denominator_offset + width]
+        )
+        numerator_offset += width
+        denominator_offset += width
+        separation = distances[group]
+        if not separation > 0.0:
+            raise ValueError(
+                f"the two branches are {separation!r} mm apart for feature group {group}, "
+                "so their attenuation cannot be normalised by the separation"
+            )
+        for offset, (numerator_name, denominator_name, form) in enumerate(pairs):
+            upper = first[numerator_name]
+            lower = second[denominator_name]
+            if form == "ratio":
+                # Exactly zero denominators carry no ratio; the column is then
+                # flagged as degenerate by the training-time audit, which is
+                # better than inventing a magnitude for it here.
+                value = upper / lower if lower != 0.0 else 0.0
+            elif form == "log_ratio":
+                value = _signed_log_value(upper) - _signed_log_value(lower)
+            else:
+                raise ValueError(
+                    f"branch_ratio form must be 'ratio' or 'log_ratio', got {form!r}"
+                )
+            values[group * column_count + offset] = value
+        values[group * column_count + len(pairs)] = (
+            _signed_log_value(first["std"]) - _signed_log_value(second["std"])
+        ) / separation
+
+    return values.astype(np.float32), tuple(column_count for _ in widths), names
+
+
 def _component_features(
     signal: np.ndarray,
     feature_names: Sequence[str],
@@ -1187,33 +1650,174 @@ def _component_features(
     """Per-component statistics, in the order given by ``feature_names``.
 
     ``sample_spacing`` is the physical distance between consecutive samples, in
-    millimetres.  When it is given, ``spectral_centroid`` is reported in
-    **cycles/mm**: the branches are resampled from windows of very different
-    physical length (branch 1 covers ~0.95 mm, branch 2 ~3.6 mm), so a centroid
-    on the raw DFT bin axis is not the same physical frequency in both and the
-    two columns are not comparable.  ``None`` keeps the historical
-    cycles-per-sample axis.
+    millimetres.  When it is given, every frequency-domain statistic is reported
+    on a **cycles/mm** axis and every spatial statistic in **mm**: the branches
+    are resampled from windows of very different physical length (branch 1 covers
+    ~0.95 mm, branch 2 ~3.6 mm), so a centroid on the raw DFT bin axis is not the
+    same physical frequency in both and the two columns are not comparable.
+    ``None`` keeps the historical cycles-per-sample axis.
+
+    Statistics are evaluated **lazily**, so a preset that asks for three columns
+    does not pay for the other fourteen.  That is not a micro-optimisation: the
+    envelope and the rfft are each an FFT of the component, and this function is
+    called once per component per stream per channel per sample.
     """
 
     signal = np.asarray(signal, dtype=np.float64).reshape(-1)
-    energy = float(np.mean(signal * signal))
-    power = np.abs(np.fft.rfft(signal)) ** 2
-    frequencies = np.fft.rfftfreq(signal.size, d=1.0 if sample_spacing is None else float(sample_spacing))
-    power_sum = float(np.sum(power)) + 1e-12
-    features: dict[str, float] = {
-        "mean": float(np.mean(signal)),
-        "std": float(np.std(signal)),
-        "rms": float(np.sqrt(energy)),
-        "energy": energy,
-        "abs_mean": float(np.mean(np.abs(signal))),
-        "peak_abs": float(np.max(np.abs(signal))),
-        "zero_crossing_rate": float(_zero_crossings(signal) / max(1, signal.size - 1)),
-        "spectral_centroid": float(np.sum(frequencies * power) / power_sum),
-    }
-    unknown = set(feature_names) - set(features)
+    unknown = set(feature_names) - set(_COMPONENT_FEATURE_NAMES)
     if unknown:
         raise ValueError(f"Unknown EMD feature names: {sorted(unknown)}")
-    return np.asarray([features[name] for name in feature_names], dtype=np.float32)
+
+    axis_spacing = 1.0 if sample_spacing is None else float(sample_spacing)
+    sample_count = int(signal.size)
+    centered = signal - float(np.mean(signal)) if sample_count else signal
+    mean_square = float(np.mean(centered * centered)) if sample_count else 0.0
+    root_mean_square = float(np.sqrt(mean_square))
+    # Scale-free zero level for the two log-domain fits.  Tying it to the peak
+    # (rather than using a fixed epsilon) is what makes ``spectral_slope`` and
+    # ``envelope_decay`` invariant to the component's amplitude.
+    amplitude = float(np.max(np.abs(signal))) if sample_count else 0.0
+    epsilon = 1e-12 * max(amplitude, np.finfo(np.float64).tiny)
+
+    cache: dict[str, Any] = {}
+
+    def spectrum() -> tuple[np.ndarray, np.ndarray]:
+        if "spectrum" not in cache:
+            power = np.abs(np.fft.rfft(signal)) ** 2
+            frequencies = np.fft.rfftfreq(sample_count, d=axis_spacing)
+            cache["spectrum"] = (power, frequencies)
+        return cache["spectrum"]
+
+    def envelope() -> np.ndarray:
+        if "envelope" not in cache:
+            cache["envelope"] = _padded_hilbert_envelope(signal)
+        return cache["envelope"]
+
+    def spectral_centroid() -> float:
+        power, frequencies = spectrum()
+        total = float(np.sum(power))
+        if total <= 0.0:
+            return 0.0
+        return float(np.sum(frequencies * power) / total)
+
+    def ratio(numerator: float, denominator: float) -> float:
+        if denominator == 0.0 or not np.isfinite(denominator):
+            return 0.0
+        value = numerator / denominator
+        return float(value) if np.isfinite(value) else 0.0
+
+    def compute(name: str) -> float:
+        if name == "mean":
+            return float(np.mean(signal)) if sample_count else 0.0
+        if name == "std":
+            return float(np.sqrt(mean_square))
+        if name == "rms":
+            return float(np.sqrt(np.mean(signal * signal))) if sample_count else 0.0
+        if name == "energy":
+            return float(np.mean(signal * signal)) if sample_count else 0.0
+        if name == "abs_mean":
+            return float(np.mean(np.abs(signal))) if sample_count else 0.0
+        if name == "peak_abs":
+            return amplitude
+        if name == "zero_crossing_rate":
+            return float(_zero_crossings(signal) / max(1, sample_count - 1))
+        if name == "spectral_centroid":
+            return spectral_centroid()
+        if name == "kurtosis":
+            # Non-excess: 3.0 for a Gaussian, larger for a spiky component.
+            if mean_square <= 0.0:
+                return 0.0
+            fourth = float(np.mean(centered**4))
+            return ratio(fourth, mean_square * mean_square)
+        if name == "skewness":
+            if mean_square <= 0.0:
+                return 0.0
+            third = float(np.mean(centered**3))
+            return ratio(third, mean_square**1.5)
+        if name == "crest_factor":
+            return ratio(amplitude, root_mean_square)
+        if name == "spectral_bandwidth":
+            power, frequencies = spectrum()
+            total = float(np.sum(power))
+            if total <= 0.0:
+                return 0.0
+            centroid = spectral_centroid()
+            variance = float(np.sum(((frequencies - centroid) ** 2) * power) / total)
+            return float(np.sqrt(max(variance, 0.0)))
+        if name == "spectral_rolloff":
+            power, frequencies = spectrum()
+            total = float(np.sum(power))
+            if total <= 0.0 or power.size == 0:
+                return 0.0
+            cumulative = np.cumsum(power)
+            index = int(np.searchsorted(cumulative, SPECTRAL_ROLLOFF_FRACTION * total))
+            return float(frequencies[min(index, frequencies.size - 1)])
+        if name == "spectral_flatness":
+            power, _ = spectrum()
+            if power.size == 0:
+                return 0.0
+            arithmetic = float(np.mean(power))
+            if arithmetic <= 0.0:
+                return 0.0
+            # Geometric mean over arithmetic mean: 1.0 for white noise, near 0
+            # for a tonal component.  Both means scale with the power, so the
+            # ratio does not depend on the component's amplitude.
+            geometric = float(np.exp(np.mean(np.log(power + epsilon * epsilon))))
+            return min(ratio(geometric, arithmetic), 1.0)
+        if name == "spectral_entropy":
+            power, _ = spectrum()
+            total = float(np.sum(power))
+            if total <= 0.0 or power.size < 2:
+                return 0.0
+            probabilities = power / total
+            positive = probabilities > 0.0
+            entropy = -float(np.sum(probabilities[positive] * np.log(probabilities[positive])))
+            return float(entropy / np.log(power.size))
+        if name == "spectral_slope":
+            # Log power against frequency, fitted on the usable band only: the
+            # noise floor above it is flat, and a flat tail drags the slope
+            # towards zero in proportion to how much empty bandwidth the window
+            # has.  DC is excluded because a residual offset is not attenuation.
+            power, frequencies = spectrum()
+            band = _usable_spectral_band(power) & (frequencies > 0.0)
+            if np.count_nonzero(band) < 3:
+                return 0.0
+            return _linear_slope(
+                frequencies[band], np.log(power[band] + epsilon * epsilon)
+            )
+        if name == "envelope_decay":
+            # Slope of log-envelope against depth in mm.  Negative means the
+            # component decays along the trace; the magnitude is an attenuation
+            # rate per millimetre.
+            magnitude = envelope()
+            if magnitude.size < 2:
+                return 0.0
+            peak = float(np.max(magnitude))
+            if peak <= 0.0:
+                return 0.0
+            usable = magnitude >= ENVELOPE_FLOOR_FRACTION * peak
+            if np.count_nonzero(usable) < 2:
+                return 0.0
+            positions = np.arange(magnitude.size, dtype=np.float64) * axis_spacing
+            return _linear_slope(
+                positions[usable], np.log(magnitude[usable] + epsilon * 0.5)
+            )
+        if name == "envelope_half_width":
+            # Span, in mm, over which the envelope stays at or above half its
+            # peak: a geometric width that does not depend on amplitude.
+            magnitude = envelope()
+            if magnitude.size == 0:
+                return 0.0
+            peak = float(np.max(magnitude))
+            if peak <= 0.0:
+                return 0.0
+            above = np.flatnonzero(magnitude >= 0.5 * peak)
+            if above.size == 0:
+                return 0.0
+            return float(above[-1] - above[0]) * axis_spacing
+        raise ValueError(f"Unknown EMD feature name: {name!r}")
+
+    return np.asarray([compute(name) for name in feature_names], dtype=np.float32)
 
 
 def _resolve_sample_spacings(
@@ -1392,24 +1996,58 @@ def feature_dimension_names(info: Mapping[str, Any], emd_config: EMDConfig) -> l
     name instead of by index.  ``group_widths`` in the feature info holds the
     statistic width published by :func:`emd_feature_groups`, so the locator
     entries are appended from ``locator_features`` rather than counted out of it.
+
+    A cross-channel contrast group (:attr:`EMDConfig.channel_contrast`) sits after
+    the channel groups and reuses the names of the group it was derived from,
+    prefixed by ``contrast_<kind>:`` so every column stays traceable to the
+    statistic and branch that produced it.
+
+    A derived branch may publish its own column names in ``feature_names``
+    (:attr:`EMDConfig.branch_ratio` does, because its columns are ratios of two
+    branches' statistics rather than statistics of one component); those names
+    replace the positional ``statistic[j % n]`` attribution for that branch.
     """
 
     group_count = int(info.get("feature_groups", 0))
     statistic_names = list(emd_config.feature_names)
-    names: list[str] = []
+    names_by_group: list[list[str]] = []
     for group in range(group_count):
         suffix = f"[ch{group + 1}]" if group_count > 1 else ""
+        names: list[str] = []
         for branch in info.get("branches", []):
             widths = [int(width) for width in branch.get("group_widths", [])]
             statistic_count = widths[group] if group < len(widths) else 0
             branch_name = str(branch.get("name", "branch"))
+            recorded = branch.get("feature_names")
+            column_names = (
+                list(statistic_names) if recorded is None else [str(name) for name in recorded]
+            )
             names.extend(
-                f"{branch_name}{suffix}.{name}" for name in statistic_names[:statistic_count]
+                f"{branch_name}{suffix}.{name}" for name in column_names[:statistic_count]
             )
             names.extend(
                 f"{branch_name}{suffix}.{name}"
                 for name in (branch.get("locator_features") or [])
             )
+        names_by_group.append(names)
+
+    contrast = info.get("contrast_group")
+    if contrast:
+        source = int(contrast.get("source_groups", [0])[0])
+        if source >= len(names_by_group):
+            raise ValueError(
+                f"contrast group points at group {source} but only "
+                f"{len(names_by_group)} channel group(s) exist"
+            )
+        prefix = f"contrast_{contrast.get('kind', 'contrast')}:"
+        names_by_group.append([f"{prefix}{name}" for name in names_by_group[source]])
+
+    names = [name for group_names in names_by_group for name in group_names]
+    expected = int(sum(int(width) for width in info.get("feature_group_dims", [])))
+    if expected and len(names) != expected:
+        raise ValueError(
+            f"named {len(names)} columns but feature_group_dims describes {expected}"
+        )
     return names
 
 
@@ -1542,6 +2180,75 @@ def sample_feature_vector(
             }
         )
 
+    # Cross-branch ratio, S3b.  Appended as a *branch* so the existing
+    # group-major assembly below picks it up for free: one contrast column block
+    # per channel group, sitting right after that channel's own branch columns.
+    # It is added last, so it never receives the depth-locator block -- the
+    # locator describes where the windows are, not what they contain, and is
+    # already present in branch 0.
+    if emd_config.branch_ratio != "none":
+        if len(branch_specs) < 2:
+            raise ValueError(
+                f"branch_ratio={emd_config.branch_ratio!r} contrasts two windows, but this "
+                f"region plan produced only {len(branch_specs)} branch(es) "
+                f"({[str(spec['name']) for spec in branch_specs]})"
+            )
+        numerator_spec, denominator_spec = branch_specs[0], branch_specs[1]
+        separations = [
+            abs(
+                0.5 * (first_start + first_end) - 0.5 * (second_start + second_end)
+            )
+            * mm_per_index
+            for first_start, first_end, second_start, second_end in zip(
+                numerator_spec["start_by_channel"],
+                numerator_spec["end_by_channel"],
+                denominator_spec["start_by_channel"],
+                denominator_spec["end_by_channel"],
+            )
+        ]
+        if emd_config.channel_aggregation == "pooled":
+            # One group holds every channel, so the single attenuation column has
+            # to use one separation; the mean keeps it on the physical axis
+            # instead of silently pairing an averaged numerator with one channel's
+            # distance.
+            separations = [float(np.mean(separations))]
+        if len(separations) != len(branch_widths[0]):
+            raise ValueError(
+                f"computed {len(separations)} window separation(s) for "
+                f"{len(branch_widths[0])} feature group(s)"
+            )
+        ratio_features, ratio_widths, ratio_names = _branch_ratio_block(
+            branch_features[0],
+            branch_features[1],
+            branch_widths[0],
+            BRANCH_RATIO_PRESETS[emd_config.branch_ratio],
+            emd_config.feature_names,
+            separations,
+        )
+        branch_features.append(ratio_features)
+        branch_widths.append(ratio_widths)
+        assert len(ratio_widths) == len(branch_widths[0])
+        branch_info.append(
+            {
+                "name": f"branch_ratio[{emd_config.branch_ratio}]",
+                "start_mm": None,
+                "end_mm": None,
+                "start_index": None,
+                "end_index_exclusive": None,
+                "input_streams": 0,
+                "feature_length": int(ratio_features.size),
+                "feature_groups": len(ratio_widths),
+                "group_widths": [int(width) for width in ratio_widths],
+                "locator_features": [],
+                "sample_spacing_mm_by_channel": [float(value) for value in separations],
+                "numerator_branch": str(numerator_spec["name"]),
+                "denominator_branch": str(denominator_spec["name"]),
+                # A derived branch publishes its own column names, because its
+                # columns are not component statistics.
+                "feature_names": ratio_names,
+            }
+        )
+
     # Features are laid out group-major: everything a channel contributes is
     # contiguous across branches, so the classifier can slice one group per
     # tower.  With ``channel_aggregation="pooled"`` there is a single group and
@@ -1578,6 +2285,30 @@ def sample_feature_vector(
         int(sum(widths[group] for widths in branch_widths)) + locator_width
         for group in range(group_count)
     )
+    # Each channel group is complete on its own, so it is safe to concatenate
+    # them here rather than at the very end: the cross-channel contrast below
+    # needs complete groups to be elementwise comparable.  With
+    # ``channel_contrast="none"`` the final concatenation is unchanged.
+    group_vectors = [np.concatenate(parts) for parts in per_group]
+    contrast_info: dict[str, Any] | None = None
+    if emd_config.channel_contrast != "none":
+        if group_count < 2:
+            raise ValueError(
+                f"channel_contrast={emd_config.channel_contrast!r} contrasts two channels, "
+                f"but channel_mode={channel_mode} with channel_aggregation="
+                f"{emd_config.channel_aggregation!r} produced {group_count} feature group(s)"
+            )
+        contrast = _channel_contrast(
+            group_vectors[0], group_vectors[1], emd_config.channel_contrast
+        )
+        group_vectors.append(contrast)
+        group_dims = group_dims + (int(contrast.size),)
+        contrast_info = {
+            "kind": emd_config.channel_contrast,
+            "source_groups": [0, 1],
+            "source_channels": [int(value) for value in physical_channels[:2]],
+            "width": int(contrast.size),
+        }
     info = {
         "form": canonical_form(form),
         "channel_mode": channel_mode,
@@ -1590,9 +2321,11 @@ def sample_feature_vector(
         "component_features": list(emd_config.feature_names),
         "locator_features": list(LOCATOR_FEATURE_PRESETS[emd_config.locator_features]),
     }
+    if contrast_info is not None:
+        info["contrast_group"] = contrast_info
     if dynamic_info is not None:
         info["dynamic_envelope"] = dynamic_info
-    return np.concatenate([np.concatenate(parts) for parts in per_group]).astype(np.float32), info
+    return np.concatenate(group_vectors).astype(np.float32), info
 
 
 # The source ADC stores raw codes, and both 127 and 128 mean "zero": they

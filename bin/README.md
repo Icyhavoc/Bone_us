@@ -1,7 +1,9 @@
 # `bin/` —— 项目归档区
 
 创建时间：2026-09-21
-最近整理：2026-09-22（移入 `_ab*`、`_baseline_*`、`_dimcheck`、`_vis3f`、`_gui_dataset`、`_kclass_check`、`_relabel_check`）
+最近整理：2026-09-22（移入 `_ab*`、`_baseline_*`、`_dimcheck`、`_vis3f`、`_gui_dataset`、`_kclass_check`、`_relabel_check`）；
+        2026-09-22 晚（S1/S3a/S3b/S4 落地后追加 `_s1_check`、`_scheme_ab`、`_s1_thresholds`、`_s3a_rich`、
+        `_ab13_*`、`_s3b_replay`、`_stack_dim`）
 
 根目录只保留**当前仍在用**的脚本与文档。一次性脚本、被取代的实现、专项诊断出图、
 以及临时运行产物，统一移到这里，让根目录一眼能看出哪些是流水线的一部分。
@@ -31,6 +33,12 @@
 | `_gui_dataset/` | 根目录 | 2026-09-22 多数据集选择器的**无头冒烟脚本**：`smoke_dataset_gui.py`（GUI 列结构）、`smoke_dataset_switch.py`（数据层 `discover_datasets` / `ExperimentCatalog`）、`smoke_kclass_figures.py`（k 分类图表可见性），外加可视化回归工具 `regress_vis.py` 与两份快照 JSON。 | `python bin\_gui_dataset\smoke_dataset_switch.py`（脚本内 `APP_DIR` 已随搬家改成 `parents[2]`，可直接跑） |
 | `_kclass_check/` | 根目录 | k 分类重构（`label_scheme` / `classification_metrics`）的校验脚本与回归输出：`check_metrics.py`（纯计算自检）、`check_binary_regression.py` ＋ `bin_regression/`（与既有二分类实验逐位对照）、`cls2_run/` `cls3_run/`（2/3 类实跑）、`baseline_regression/`、`cm_regression/`、`vis_regression/`、`json_deep_diff.py`。 | `python bin\_kclass_check\check_metrics.py`（脚本内 `ROOT` 已改成 `parents[2]`） |
 | `_relabel_check/` | 根目录 | 按厚度重标注的校验数据集 `cls3/`（3 类、约 96 MB，与 `raw_data_relabeled/cls3_thr0.8_1.2` 同族）＋一次性还原脚本 `restore_raw_data.py`。 | 数据集可直接用（`--data-dir bin/_relabel_check/cls3`）；`restore_raw_data.py` 是历史记录：它引用的 `keep/manifest.csv` 已不存在，`cls3/README.txt` 里的路径也是搬家前的 |
+| `_scheme_ab/`、`_s1_check/` | 根目录 | `compare_label_schemes.py` **定稿前**的两次中间配对报告：前者只按 label scheme 分组，后者按 `scheme@scaler[cols]` 交叉。| 直接用定稿后的 `compare_label_schemes.py` 重跑（命令见 `PROJECT_SUMMARY.md` §11.1） |
+| `_s1_thresholds/` | 根目录 | **S1 正式结果**：4 个阈值 × `lda,prior` × 5×5 折的配对报告（`comparison_report.txt` / `comparison_results.json`），外加地板值/边界样本运算脚本 `_boundary.py`。`PROJECT_SUMMARY.md` §11.1 的两张表出自这里。 | 用 §11.1 的命令重跑；`_boundary.py` 和 `_s3a_rich/_layout.py`、`_s3b_replay/_compare.py` 一样是**一次性的辅助脚本，不参与归档流程** |
+| `_s3a_rich/` | 根目录 | S3a（`rich` 特征族）的**特征提取产物**（`form_top3_mean__regions_dyn_envelope__channels_1__cls2_thr1.3`）＋ `_paired` / `_paired2` 两份配对报告＋列布局核对脚本 `_layout.py`。§11.2 的表格出自 `_paired2`。 | 不加 `--feature-set` 相关开关重跑即可；`--experiment` 直接指向这个目录可复用特征 |
+| `_ab13_keep/`、`_ab13_ratio/`、`_ab13_atten/` | 根目录 | 1.3 mm 阈值下 S3b（`--branch-ratio`）的 **A/B 三件套**：`_ab13_keep` 是 16 列基线提取，`_ab13_ratio` / `_ab13_atten` 是 `ratio` / `attenuation` 臂。后两者各带配对报告；`_ab13_ratio/_paired_seed7/` 是把 fold 种子换成 7 的**独立重复**——§11.3 里唯一那个 +1.3 pt 正结果就在这里翻转成 −1.7 pt。 | `compare_label_schemes.py --experiment bin/_ab13_keep/...` 重跑；换种子用 `--seed 7 --output-dir .../_paired_seed7` |
+| `_s3b_replay/` | 根目录 | S3b 验证时**手工重放旧实验产物**用的目录（含 `form_top3_mean__regions_dyn_envelope__channels_1`）＋ `_compare.py` 逐位比对脚本。`verify_branch_ratio.py` / `verify_channel_contrast.py` 的夹具与它同源。 | 跑 `python verify_branch_ratio.py`（会自己重建同样的重放目录） |
+| `_stack_dim/` | 根目录 | **全选项叠加**（`rich` + `channels_3` + `contrast normalized` + `branch-ratio attenuation`）的维度核对输出，用来确认 §11.5 的 `feature_dim = 123` / `[41, 41, 41]` / `fan_in = 192`。 | 用 §11.5 的命令重跑 |
 | `__pycache__/` | 根目录 | Python 字节码缓存，其中 `dynamic_split*.pyc`、`_grad_check*.pyc` 对应的**源文件已从仓库删除**，只会造成误导。 | 可随时删除，Python 会自动重建（根目录会再生成一个，属正常现象） |
 
 ## 约定
@@ -38,7 +46,9 @@
 1. **判断标准**：能不能被 GUI 或 `README.md` / `PROJECT_SUMMARY.md` 里的推荐命令直接用到？
    不能，就进 `bin/`。
 2. **`verify_*.py` 不归档**：`verify_dyn_envelope.py`、`verify_mlp_gradients.py`、
-   `verify_channel_aggregation.py` 是三份**可重跑的回归自检**，两份文档都明确引用了它们，继续留在根目录。
+   `verify_channel_aggregation.py`、`verify_channel_contrast.py`、`verify_branch_ratio.py`、
+   `verify_emd_features.py`、`verify_scalers.py` 是七份**可重跑的回归自检**，两份文档都明确引用了它们，继续留在根目录。
+   同理，`compare_label_schemes.py` 是 S1 配对评价协议的正式工具（§11.1），也不归档。
    > `verify_dyn_envelope.py` 虽然留在根目录，但它读的参考数据在 `bin/after_split_data/`，
    > 所以搬动 `bin/after_split_data/` 时需同步改 `REFERENCE_DIR` 或设 `DYN_REFERENCE_DIR`。
    > 依赖方向是“根目录脚本 → bin 数据”，`bin/` 里的东西从不反向 import 根目录。

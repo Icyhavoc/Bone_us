@@ -153,7 +153,7 @@ channel_mode=1 / 2                     channel_mode=3
    这样分类头可以按 `feature_info.json` 里的 `feature_group_dims` 直接切片，
    把每组特征喂给对应的塔。
 4. 单通道时只有一组，`per_channel` 与 `pooled` **完全等价**，
-   已做逐位回归验证（见 §15）。
+   已做逐位回归验证（见 §16）。
 
 ### 4.2 `per_channel` 与「信号相加」的区别
 
@@ -351,6 +351,19 @@ EMD 使用当前 `emd_pipeline.py` 中的 NumPy 实现，默认最多提取 5 �
 | `compact`（默认） | 7 个，**去掉 `mean`** | 见 §8.3 |
 | `lean` | 6 个，再去掉 `energy` | 备选 |
 
+在 `compact` 之上还可以再叠加三个可选族（可单独启用以便归因，详见 §11.2）：
+
+| `--feature-set` | 追加的统计量 | 单个 branch 总宽度 |
+|---|---|---:|
+| `shape` | `kurtosis`、`skewness`、`crest_factor` | 10 |
+| `spectral_ext` | `spectral_bandwidth`、`spectral_rolloff`、`spectral_flatness`、`spectral_entropy`、`spectral_slope` | 12 |
+| `envelope` | `envelope_decay`、`envelope_half_width` | 9 |
+| `shape_spectral` | 上面两个 shape 与 spectral 族 | 15 |
+| `rich` | 全部三个族（共 17 个统计量） | 17 |
+
+> 实测结论是这些族**没有带来新信息**（准确率上升但 AUC 持平或下降），因此默认仍是
+> `compact`；对照数据见 §11.2。
+
 `spectral_centroid` 使用**物理单位**：`sample_spacing_mm` 由该分支的物理深度跨度除以重采样点数
 （`target_length`）得到，谱质心因此以 **cycles/mm** 表示，主窗口与尾窗口可以跨分支比较
 （两者重采样到同样点数，但物理跨度差约 3.8 倍，见 §6）。
@@ -391,6 +404,16 @@ EMD 使用当前 `emd_pipeline.py` 中的 NumPy 实现，默认最多提取 5 �
 
 `--feature-set legacy --locator-features none` 可还原历史宽度（`full`/`bone` 8 维、
 `bone_plus_post` 16 维、`dyn_envelope` 16 维 / 32 维）。
+
+两个可选开关会在此之上继续加宽（默认都关闭，因此上表就是默认布局）：
+
+| 开关 | 影响 | `channels_1` / `2` | `channels_3`（`per_channel`） |
+|---|---|---:|---:|
+| `--branch-ratio ratio\|attenuation` | 每个通道组追加 5 列（无法用于单窗口区域） | +5 | +5 × 2 |
+| `--channel-contrast <kind>` | 追加**一个完整的新组**（宽度等于单个通道组，且要求通道数为 2） | 拒绝 | +16 |
+
+所以 `rich` + `channels_3` + `contrast normalized` + `branch-ratio attenuation`
+在 `dyn_envelope` 上得到 `feature_dim = 123 = 41 × 3`（实测，含 3 座塔）。
 
 ### 8.4 `compact` + `core` 的实测效果（change #1 / #2）
 
@@ -443,9 +466,13 @@ Linear(input_dim, 64)
 - 因此 `--channel-mode 3` 的双通道不再在 MLP 之前被平均掉，两个通道的特征
   在分类头里**各自经过一层非线性**后才融合；
 - 只有一组时塔会塌缩成第一层全连接，网络与历史结构**完全等价**
-  （已用逐位回归验证，见 §15）；
+  （已用逐位回归验证，见 §16）；
+- 塔的**数量**就是特征组的数量，不是写死的 2：`--channel-mode 3` +（S4 的）
+  `--channel-contrast` 会得到 **3 座塔**，共享头首层随之变成 `Linear(192, 32)`；
+  实测 `feature_dim = 123`、`feature_group_dims = [41, 41, 41]` 时
+  `head_layers[0].fan_in = 192`（见 §11.5）；
 - `mlp_model.npz` 会额外记录 `group_dims` 与 `tower_count`，`feature_info.json`
-  会记录 `feature_groups` 与 `feature_group_dims`。
+  会记录 `feature_groups`、`feature_group_dims`，S4 还会额外写 `contrast_group`。
 
 当前使用 k 个输出节点的 softmax 交叉熵（k 默认 2，见 §2.2）。对于二分类，它与单输出 sigmoid BCE 在数学上等价。
 
@@ -466,7 +493,7 @@ Linear(input_dim, 64)
 在同一份特征、同一份划分上换成**没有隐藏层**的模型。若线性模型就能达到 MLP 的水平，
 说明再加网络容量不会有用，瓶颈在特征或数据。
 
-为此新增四个文件（见 §16.1），**不修改任何已有训练流程**：
+为此新增四个文件（见 §17.1），**不修改任何已有训练流程**：
 
 | 文件 | 作用 |
 |---|---|
@@ -545,7 +572,251 @@ python run_baseline_models.py `
 > 高于多数类地板 0.4179，与同数据的 MLP（test AUC 0.7662）基本持平——与二分类的结论
 > 一致：线性模型与 MLP 无差距，瓶颈在特征。
 
-## 11. GUI 功能
+## 11. 算法改进策略的实测（S1 / S3a / S3b / S4）
+
+§10 的结论是「瓶颈在特征，不在容量」。据此提出四条策略，其中 S2（改成厚度回归）
+按需求**暂不做**，当前仍坚持二分类。本节记录已实现的三条策略的实测结果。
+
+三条改动都遵守同一条硬约束：**默认取值下逐位不变**，开启后也只**追加**列/塔，
+不修改任何已有列的数值。因此每条策略的收益与损失都能单独归因，且历史实验目录永远可复现。
+
+### 11.1 S1 — 统一评价协议（`compare_label_schemes.py`）
+
+历史问题是：不同阈值、不同特征集、不同标准化器各自跑一次完整训练，指标之间**不可比**
+（划分不同、种子不同、没有配对区间，也无法判断 1 pt 的差异是信号还是噪声）。
+新脚本把**特征提取**与**阈值选择**彻底解耦：
+
+- 从任意已保存的实验目录读 `features_{split}.npy` + `samples_{split}.json`，不重跑 EMD；
+- 把 train/val/test **合并为 268 个样本**，按 **`depth_value` 分位数**分层做 5×5 交叉验证
+  ——标签不参与划分，所以一份提取可以支撑任意多套阈值方案，且各方案用的是**同一折集**；
+- 标准化器每折只在训练折上 fit；
+- 报告里的 `+-` 是**配对差值**的 95% 区间，`*` 表示该区间不含 0。
+
+```powershell
+python compare_label_schemes.py `
+  --experiment bin/_ab13_keep/form_top3_mean__regions_dyn_envelope__channels_1__cls2_thr1.3 `
+  --schemes 1.0 1.3 1.5 1.7 `
+  --scalers standard `
+  --folds 5 --repeats 5 --seed 0 `
+  --models lda,prior `
+  --output-dir bin/_s1_thresholds
+```
+
+四个模型：`mlp`（§9 的结构）、`l2_logistic`、`lda`、`prior`（多数类地板）。
+`--scalers` 支持 `standard` / `robust`（中位数 + IQR/1.349，除数刻意取 1.349 使正态列上
+尺度**等于**标准差，这样它才是公平替换而非另一个模型）/ `rank`（秩 → 逆正态分位）。
+`--feature-sets` 直接给列下标做切片，可写 `base16=0,1,...,15`、`all` 或裸下标。
+
+#### 结论一：1.0 mm 划分里有一半的错误来自标签本身
+
+| 阈值 | 类别数（`<thr` / `>=thr`） | 地板 | 深度 ±0.05 mm 内样本占比 |
+|---|---:|---:|---:|
+| 1.00 mm | 122 / 146 | 0.545 | **10.1%** |
+| 1.30 mm | 166 / 102 | 0.619 | 3.4% |
+| 1.50 mm | 188 / 80 | 0.701 | 2.6% |
+| 1.70 mm | 197 / 71 | 0.735 | 3.0% |
+
+1.0 mm 下有 27/268 个样本的厚度落在阈值 ±0.05 mm 内，即**十分之一**；1.3 mm 只有 9 个。
+这一项与模型完全无关，却是 §10 里「train/test 错误都在 25% 左右」的一个主要来源。
+
+#### 结论二：阈值越偏，可分性越高——但地板也越高
+
+同一深度分位数折集、`lda`、`compact+core`（16 列）：
+
+| 阈值 | acc | balanced acc | AUC |
+|---|---:|---:|---:|
+| 1.00 mm | 0.739 ± 0.017 | 0.737 | 0.807 ± 0.034 |
+| **1.30 mm** | **0.784 ± 0.077** | 0.761 | **0.848 ± 0.045** |
+| 1.50 mm | 0.802 ± 0.036 | 0.755 | 0.867 ± 0.034 |
+| 1.70 mm | 0.787 ± 0.053 | 0.707 | 0.877 ± 0.032 |
+
+AUC 随阈值单调上升（0.807 → 0.877），说明**物理上确实越偏越好分**：
+厚度靠近阈值的样本本来就更模糊。但**balanced accuracy 在 1.5 mm 之后掉头向下**
+（0.761 → 0.755 → 0.707），因为少数类只剩 71 个样本，模型开始放弃它。
+**1.3 mm 是「可分性收益」与「类别失衡代价」的折中点**，这也是默认改用它的依据。
+
+> S1 的副产品是把之前无法回答的问题变成了可回答的：**任何新特征/新模型的效果，
+> 现在都必须在这张配对表上显示出不含 0 的区间才算数**。下面三条策略都按这个标准判定。
+
+### 11.2 S3a — 尺度不变与谱描述特征族
+
+`--feature-set` 在 `compact` 基础上可再叠加三个族（可单独启用以便归因）：
+
+| 族 | 新增统计量 | 单个 branch 的宽度 |
+|---|---|---:|
+| `shape` | `kurtosis`、`skewness`、`crest_factor` | 3 |
+| `spectral_ext` | `spectral_bandwidth`、`spectral_rolloff`、`spectral_flatness`、`spectral_entropy`、`spectral_slope` | 5 |
+| `envelope` | `envelope_decay`、`envelope_half_width` | 2 |
+
+因此预设变为 `legacy`(8) / `compact`(7，默认) / `lean`(6) / `shape`(10) /
+`spectral_ext`(12) / `envelope`(9) / `shape_spectral`(15) / `rich`(17)。
+
+关键实现取值：`spectral_rolloff` 取累计能量的 `SPECTRAL_ROLLOFF_FRACTION = 0.85` 分位；
+`spectral_slope` 在 `SPECTRAL_SLOPE_DYNAMIC_RANGE_DB = 20 dB` 上线性拟合，故与增益无关；
+`envelope_*` 先按 `ENVELOPE_FLOOR_FRACTION = 0.1` 削底、再用 `ENVELOPE_REFLECTION_PAD = 64`
+反射填充，保证全零/常量/单点输入也返回有限值（NaN 会变成 NaN 列均值并静默毁掉一折）。
+
+`verify_emd_features.py` 守住三条：历史列**按原顺序**是 `compact`/`lean` 的子序列
+且数值与冻结的旧实现一致到 float32（否则所有已落盘的 `features_*.npy` 都会静默错位）；
+新增列确实具备声明的尺度不变性/解析斜率；退化输入不产生 NaN。
+
+**实测（thr 1.3、`dyn_envelope`、`channels_1`、深度分位数 5×5、配对 vs `compact` 16 列、seed 0）**：
+
+| 特征集 | 列数 | mlp acc | mlp AUC | lda acc | lda AUC | 配对显著项（vs 16 列） |
+|---|---:|---:|---:|---:|---:|---|
+| `compact`（现状） | 16 | 0.757 | 0.831 | 0.784 | **0.848** | — |
+| `+shape` | 22 | 0.776 | 0.835 | 0.772 | 0.841 | mlp acc **+0.019\***；但 `l2` acc −0.019\*、`lda` acc −0.011\* |
+| `+spectral_ext` | 26 | 0.757 | 0.834 | 0.806 | 0.846 | `lda` acc **+0.022\***、bal_acc +0.024\*；**AUC 无显著变化** |
+| `+envelope` | 20 | 0.750 | 0.796 | 0.784 | 0.850 | mlp AUC **−0.035\*** |
+| `+shape+spectral` | 32 | 0.806 | 0.826 | 0.798 | 0.841 | mlp acc **+0.048\***、bal_acc +0.040\*；mlp AUC −0.005（不显著） |
+| `rich`（全 17） | 36 | 0.783 | 0.798 | 0.787 | 0.839 | mlp AUC **−0.033\***、`lda` AUC −0.010\* |
+
+**结论：S3a 没有提供新信息。** 全表唯一的模式是**准确率上升而 AUC 持平或下降**：
+新增列改变的是**决策阈值的位置**（把少数类的分数整体推移），而不是把两类分得更开。
+`rich` 是最干净的证据——准确率 +2.6 pt 的同时 AUC 掉 3.3 pt，`lda` 同向。
+`+envelope` 让 mlp AUC 掉 3.5 pt，说明包络描述符不如它所替代的窗口内统计量。
+`+spectral_ext` 的 `lda` 增益（AUC 0.848 → 0.846，**不显著**）同样不能算数。
+
+> 因此**默认仍是 `compact` + `core`（16 列）**，三个新族保留为可选对照。
+> 这也再次印证 §10：问题不是「特征不够多」，而是**现有特征里已经没有被浪费的线性信号**。
+
+### 11.3 S3b — 跨 branch 的比值/衰减特征（`--branch-ratio ratio|attenuation`）
+
+S3a 的所有统计量都**在单个窗口内**测量，看不到「同一物理量随深度如何变化」。
+branch 0 是较浅的主窗口、branch 1 是较深的尾窗口，两者之比就是**衰减**本身——
+骨超声最经典的描述量，也是 S3a 的窗内拟合只能近似的东西。
+
+`BRANCH_RATIO_STATISTICS = ("std", "peak_abs", "zero_crossing_rate", "spectral_centroid")`，
+四个都是「衰减介质改变一段脉冲」的独立方式：宽带电平衰减、峰值衰减、
+脉冲**展宽**（低通介质滤掉快振荡，过零率随深度下降，本身已尺度无关）、
+谱**下移**（同一效应在频域的表述）。
+
+`energy` 与 `rms` 被**故意排除**：`energy = mean(x²)`、`rms = sqrt(mean(x²))`，
+故 `log(energy_a/energy_b) ≡ 2·log(rms_a/rms_b)`；而 EMD 分量近零均值使 `rms ≈ std`。
+加进来只会让每组变宽而不增加一个信息维度——这在只有 161 个训练样本时很致命。
+
+| `--branch-ratio` | 每个 channel 组追加的列 | 宽度 |
+|---|---|---:|
+| `none`（默认） | — | 0 |
+| `ratio` | 4 个 `a / b` | 5 |
+| `attenuation` | 4 个 `log(a / b)` | 5 |
+
+两种预置**都**再追加一列 `attenuation_per_mm = log(a/b) / 两窗口中心距离(mm)`，即衰减系数（1/mm）。
+除法不是装饰：`dyn_envelope` 的主窗口起点是**逐样本动态**的，两窗口中心距离每个样本都不同，
+不除就会把「衰减」与「检测器恰好把窗口放得多远」混在一起。列名形如
+`branch_ratio[ratio][ch1].ratio:std/std` … `branch_ratio[ratio][ch1].attenuation_per_mm:std/std`。
+
+单窗口区域（`full` / `bone` / `bone_plus_post`）请求比值会被**明确拒绝并给出原因**，
+而不是静默忽略。`verify_branch_ratio.py` 逐项验证：默认下无派生块、已有 32 列逐位不变、
+新块就是声明的算术（相对误差 3e-8）、衰减对两窗口共同增益不变（7.5× 增益只移动 4.4e-16）、
+浅窗口是分子深窗口是分母（按逐样本分离距离核对）、元数据与列名携带 `branch_ratio[...]` 前缀。
+
+**实测（thr 1.3、`dyn_envelope`、`channels_1`、深度分位数 5×5、配对 vs 16 列基线）**：
+
+| 臂 | 变体（列数） | mlp acc | mlp AUC | `l2` AUC | `lda` AUC |
+|---|---|---:|---:|---:|---:|
+| — | `base16`（= `compact+core`） | 0.757 | 0.831 | 0.841 | **0.848** |
+| `ratio` | `ratio_only`（5） | 0.765 | 0.782 | 0.774 | 0.737 |
+| `ratio` | `all`（21） | 0.761 | **0.844** | 0.835 | 0.842 |
+| `attenuation` | `atten_only`（5） | 0.776 | 0.831 | 0.805 | 0.807 |
+| `attenuation` | `all`（21） | 0.739 | 0.834 | 0.843 | 0.845 |
+
+配对差值要点：
+
+- **只用这 5 列会明显变差**：`lda` AUC 0.848 → 0.737（`ratio_only`）/ 0.807（`atten_only`），
+  配对区间都不含 0。比值特征不能替代原特征。
+- **追加进去**：seed 0 下 `ratio[all]` 的 mlp AUC **+0.013\*** 是唯一名义显著的正结果；
+  `attenuation[all]` 的 mlp AUC +0.003（不显著），但 mlp acc **−0.019**、bal_acc **−0.019**；
+  三个线性模型在两条臂上 AUC 全部**下降**（`l2` −0.005\*、`lda` −0.007\*）。
+- **换 fold 种子做独立重复，唯一那个正结果翻转**：同一条 `base16 → all` 对比在 seed 7 下
+  mlp AUC **−0.017\***、acc −0.023\*、bal_acc −0.039\*（基线 mlp AUC 本身从 0.831 涨到 0.857，
+  说明 0.013 这个量级完全在种子噪声里）。
+
+**结论：S3b 判定为「中性偏负」，默认保持 `none`。** 代码与自检保留，作为可复现的反例：
+它同时演示了 S1 协议的价值——**没有配对区间和种子重复，这个 +1.3 pt 就会被当成成果写进结论**。
+
+### 11.4 S4 — 使用第二个通道（`--channel-contrast difference|normalized|log_ratio`）
+
+两个通道从不同角度探测同一部位，它们的**对比度**是一个新的观测量，
+而且是不需要新数据就能获得的唯一真正新增信息。实现方式是在通道分组之后
+追加**一个额外的特征组**，对前两组逐元素做对比——两组列是**按构造对齐**的，
+因为它们由同样的 branch、同样的统计量、同样的定位特征预置生成。
+
+| `--channel-contrast` | 形式 | 性质 |
+|---|---|---|
+| `none`（默认） | — | 布局不变 |
+| `difference` | `a - b` | 保留原始单位，族中退化成员 |
+| `normalized` | `(a - b) / (\|a\| + \|b\|)` | 对共同增益不变 → 抵消探头压力与耦合剂 |
+| `log_ratio` | `signed_log(a) - signed_log(b)` | 衰减的对数形式，增益差变成加性偏移 |
+
+`CHANNEL_CONTRAST_EPSILON = 1e-30` 作为有符号对数的下限，避免「刻意返回 0」的统计量变成 $-\infty$。
+新组会作为**第 3 座塔**接到共享头上，`feature_info.json` 里以 `contrast_group` 记录
+`{"kind": ..., "source_groups": [0, 1], "source_channels": [0, 1], "width": W}`。
+
+`verify_channel_contrast.py` 检查 4 条，第 1 条最要紧：
+
+1. **对比度不能改变任何单通道运行。** 把磁盘上早于本功能写入的
+   `experiments/form_top3_mean__regions_dyn_envelope__channels_1` 用它自己的 `config.json`
+   重放，得到的 `features_train.npy` 必须与当时写入的产物**逐位相同**；
+   对单通道请求对比度会被**直接拒绝**而非静默忽略，所以 `channels_1` 永远不可能多出一个组。
+2. **对比度是追加的，不是织入的。** 开关前后前 `W` 列逐位相同，只有尾部 `W/2` 列是新的
+   （`channels_3` 下 `[16, 16]` → `[16, 16, 16]`）。
+3. **新列就是声明的算术**，包含 `normalized` 对共同增益的不变性。
+4. **公布的元数据描述了新组**：`feature_group_dims` 多一座塔，每个对比列名都带
+   `contrast_{kind}:` 前缀与其来源统计量。
+
+#### 唯一的已知数值漂移（已量化、已设上限）
+
+重放 claim 1 时发现：16 列里有 **15 列逐位相同**，只有
+`dynamic_tail_window.spectral_centroid` 变了。原因不是 S4，而是 S3a 顺手去掉了
+谱质心功率和里的一个 `+1e-12`：实测偏移为**相对 2.51e-07 = 2.1 个 float32 ulp**，
+即纯舍入。这是**唯一**被容忍的列，上限设为 8 ulp
+（`DOCUMENTED_DRIFT_SUFFIX = ".spectral_centroid"`、`DOCUMENTED_DRIFT_ULPS = 8.0`），
+超过一个数量级就判定为真实改动而非舍入。
+
+> 这也直接回答了「S4 会不会影响 channel 1 的结果」：**不会**。
+> 重放同一份产物，16 列中 15 列逐位相同，唯一差异是上述 S3a 引入的 float32 舍入。
+
+> S4 的**正确性**已完整验证，但它的**精度增益尚未在 S1 协议下配对测过**，
+> 所以默认仍是 `none`。需要跑的话：`--channel-mode 3 --channel-contrast normalized`。
+
+### 11.5 全部选项叠加时的维度
+
+`--feature-set rich --channel-mode 3 --channel-contrast normalized --branch-ratio attenuation`
+在 `dyn_envelope` 上的实测：
+
+```text
+feature_dim        = 123
+feature_group_dims = [41, 41, 41]
+model_layout       = {"tower_count": 3, "tower_dims": [41, 41, 41],
+                      "tower_outputs": 64,
+                      "head_layers": [{"fan_in": 192, "fan_out": 32},{"fan_in": 32, "fan_out": 2}]}
+```
+
+每个通道组 41 列 = `rich` 的 `17 × 2 branch + 2 locator = 36`，再加 5 列 `branch_ratio`；
+第三个组是对前两组的对比，宽度等于单个通道组（41）。三座塔各输出 64 维，
+共享头首层 `fan_in = 3 × 64 = 192`。
+
+### 11.6 策略小结
+
+| 策略 | 状态 | 实测结论 | 默认 |
+|---|---|---|---|
+| S1 统一评价协议 | ✅ | —— | 已用于全部后续判定 |
+| S2 改为厚度回归 | ⏸ 按需求暂不做 | —— | —— |
+| S3a 尺度不变/谱特征族 | ✅ | 无新信息（准确率↑但 AUC 持平或↓） | **关闭** |
+| S3b 跨 branch 比值/衰减 | ✅ | 中性偏负；唯一正结果在换种子后翻转 | **关闭** |
+| S4 第二通道对比度 | ✅ 已验证正确性 | 增益尚未配对测量 | **关闭** |
+| S5 标签噪声量化 | 未做 | —— | —— |
+| S6 拒识（`p ∈ [0.4, 0.6]`） | 未做 | —— | —— |
+| S7 小模型（LDA + 3 列，AUC 0.855） | 未做 | —— | —— |
+
+**这一轮最重要的产出不是某条策略的收益，而是把「改进」这件事变成可判定的**：
+S1 之前，S3b 那个 +1.3 pt 会被当成成果；S1 之后，它在换成另一个 fold 种子时
+翻转成 −1.7 pt，于是被正确判定为噪声。三条特征侧策略全部**证伪**，
+与 §10 的「瓶颈在特征、不在容量」一致——**当前 16 列的线性信号已被用尽**，
+继续在原地加同类特征不会有收益。
+
+## 12. GUI 功能
 
 `gui_app.py` 提供 Tkinter 图形化实验查看和训练工具：
 
@@ -576,7 +847,7 @@ python gui_app.py
 
 运行环境必须包含完整 Tcl/Tk。若基础 Python 环境缺少 `init.tcl`，需要使用带 Tcl/Tk 的 Python/conda 环境运行 GUI。
 
-## 12. 可视化脚本
+## 13. 可视化脚本
 
 - `visualize_preprocessing.py`：每个类别随机选择 10 个样本，绘制四种预处理结果；深度横轴显示到小数点后两位。
 - `visualize_emd_components.py`：每个类别随机选择 1 个样本，绘制每个 branch 的 IMF 和 residue。
@@ -591,7 +862,7 @@ python gui_app.py
 - 随机种子：42；
 - 样本池：train + val + test。
 
-## 13. 输出目录
+## 14. 输出目录
 
 训练默认输出：
 
@@ -624,6 +895,11 @@ experiments/
 > 用 `--data-dir` 指向带 `label_scheme.json` 的数据集时（§2.2），目录名再追加 `__<tag>`，
 > 例如 `form_top3_mean__regions_dyn_envelope__channels_1__cls3_thr0.8-1.2`，
 > 因此多分类实验与二分类实验平行存在、互不覆盖。
+>
+> S3b / S4 也各自占一个后缀，顺序是 `__channels_<n>` → `__contrast_<kind>` →
+> `__branchratio_<kind>` → `__<label_tag>`，例如
+> `form_top3_mean__regions_dyn_envelope__channels_3__contrast_normalized__branchratio_attenuation__cls2_thr1.3`。
+> 这样保证一次消融不会覆盖另一条臂的产物，也便于在 `summary.json` 里回查是哪一组开关。
 
 可视化默认输出到：
 
@@ -645,7 +921,7 @@ bin/_baseline_full/
 > `bin/_*` 都被 `.gitignore` 的 `_*/` 匹配，属于**本地产物**，不入库；
 > 需要时用 §10.2 的命令重新生成即可。
 
-## 14. 推荐运行命令
+## 15. 推荐运行命令
 
 运行全部帧处理方式、全部区域组合和指定通道：
 
@@ -698,6 +974,37 @@ python run_baseline_models.py `
 > `experiments/` 中部分目录早于本次算法移植或早于 §2.1 的直流归零，
 > 引用其中的指标前请先读 `experiments/STALENESS.md`。
 
+跑 S3b / S4 的消融（两者默认都是 `none`，不加开关就是历史布局）：
+
+```powershell
+# S3b：每个通道组追加 5 列跨 branch 比值/衰减
+python run_emd_experiments.py `
+  --data-dir raw_data_relabeled/cls2_thr1.3 `
+  --forms top3_mean --region-set dyn_envelope --channel-mode 1 `
+  --branch-ratio ratio
+
+# S4：追加一个对比通道 1 与通道 2 的新特征组（需要 --channel-mode 3）
+python run_emd_experiments.py `
+  --data-dir raw_data_relabeled/cls2_thr1.3 `
+  --forms top3_mean --region-set dyn_envelope --channel-mode 3 `
+  --channel-contrast normalized
+
+# S3a：叠加尺度不变与谱描述族（实测无增益，默认仍是 compact）
+python run_emd_experiments.py `
+  --forms top3_mean --region-set dyn_envelope --channel-mode 1 `
+  --feature-set rich
+```
+
+配对评价（S1，见 §11.1）：
+
+```powershell
+python compare_label_schemes.py `
+  --experiment bin/_ab13_keep/form_top3_mean__regions_dyn_envelope__channels_1__cls2_thr1.3 `
+  --schemes 1.0 1.3 1.5 1.7 `
+  --scalers standard --folds 5 --repeats 5 --seed 0 `
+  --models lda,prior --output-dir bin/_s1_thresholds
+```
+
 快速验证代码：
 
 ```powershell
@@ -725,7 +1032,7 @@ python run_baseline_models.py `
 只用已有实验目录的特征（`experiments/.../features_{split}.npy`），
 **不重跑** EMD、也不写回任何训练结果。
 
-## 15. 当前验证情况
+## 16. 当前验证情况
 
 已完成：
 
@@ -777,30 +1084,60 @@ python run_baseline_models.py `
     只有中间类可分的特征 0.015（确实无法用单一阈值刻画中间带）；
     二分类分支与旧 `_roc_auc` 公式数值一致。
 
-三个自检脚本都不依赖 `experiments/` 里的历史产物，可用当前代码直接重跑：
+**策略 S1 / S3a / S3b / S4 引入的新增验证（§11）**：
+
+- **`verify_emd_features.py`**（S3a）：`compact` / `lean` 是历史 8 个名字**按原顺序**的子序列，
+  且数值与冻结的旧实现一致到 float32；声称尺度不变的列在增益变化下不变；
+  `spectral_slope` / `envelope_*` 与解析值对照；全零/常量/1 点/2 点输入都返回**有限值**；
+  宽预设严格等于窄预设追加列；`feature_dimension_names` 长度与向量一致。
+- **`verify_scalers.py`**（S1）：`robust` 在正态列上的尺度恰好等于标准差（IQR 除数 1.349 的依据）；
+  `rank` 单调且与顺序型模型无关；手写的逆正态 CDF `_norm_ppf` 与精确分位数对到 ~15 位有效数字。
+- **`verify_branch_ratio.py`**（S3b，**5/5 通过**）：重放磁盘上的 `channels_1` 旧目录，
+  验证**默认 `none` 下 16 列逐位不变**（唯一例外是 §11.4 里已量化的
+  `dynamic_tail_window.spectral_centroid`，相对 2.51e-07 = 2.1 个 float32 ulp）；
+  单窗口区域请求比值被拒绝并给出原因；已有 32 列逐位不变且每组恰好 +5 列；
+  新列就是声明的算术（相对误差 3e-8）；衰减对两窗口共同增益不变（7.5× 增益只移动 4.4e-16）；
+  浅窗口是分子、深窗口是分母；列名与 `feature_group_dims` 一致；基线目录与比值目录共存不覆盖。
+- **`verify_channel_contrast.py`**（S4，**4/4 通过**）：重放早于本功能写入的
+  `experiments/form_top3_mean__regions_dyn_envelope__channels_1`，产物必须逐位相同；
+  对单通道请求对比度被**直接拒绝**；对比组是**追加**而非织入（前 `W` 列逐位相同）；
+  新列是声明的算术，含 `normalized` 对共同增益的不变性；
+  `feature_group_dims` 多一座塔且每个对比列名都带 `contrast_{kind}:` 前缀。
+- **`verify_branch_ratio.py` 与 `verify_channel_contrast.py` 共用一份重放夹具**，
+  后者提供 `REPLAY_EXPERIMENT`、`replay_args()` 与漂移上限常量，
+  因此两个脚本对“历史产物不可变”的判断标准严格一致。
+
+八个自检脚本都不依赖 `experiments/` 里的历史产物（除两个重放夹具需要那份被重放的目录），
+可用当前代码直接重跑：
 
 ```powershell
 python verify_dyn_envelope.py        # 动态包络切分与参考实现逐位一致
 python verify_mlp_gradients.py       # 双塔 MLP 解析梯度
 python verify_channel_aggregation.py # 通道聚合语义与网络拓扑
+python verify_channel_contrast.py    # S4：对比组是追加且单通道不可变
+python verify_branch_ratio.py        # S3b：比值块是追加且默认逐位不变
+python verify_emd_features.py        # S3a：历史列不变 + 新列定义正确 + 退化输入不产生 NaN
+python verify_scalers.py             # S1：三个标准化器与逆正态 CDF
+python compare_label_schemes.py      # S1：配对评价协议（需要 --experiment 参数）
 ```
 
-## 16. 项目结构与归档约定
+## 17. 项目结构与归档约定
 
-### 16.1 根目录（活跃代码与文档）
+### 17.1 根目录（活跃代码与文档）
 
 | 类别 | 文件 |
 |---|---|
 | 核心流水线 | `emd_pipeline.py`、`run_emd_experiments.py`、`dyn_cli.py` |
 | 浅层基线（change #3，见 §10） | `shallow_models.py`、`feature_selection.py`、`baseline_evaluation.py`、`run_baseline_models.py` |
+| 配对评价协议（S1，见 §11.1） | `compare_label_schemes.py` |
 | GUI | `gui_app.py` |
 | 可视化（GUI 调用 + 文档记录） | `visualize_preprocessing.py`、`visualize_emd_components.py`、`visualize_training_curves.py`、`visualize_confusion_matrix.py`、`visualize_error_by_thickness.py` |
-| 自检回归 | `verify_dyn_envelope.py`、`verify_mlp_gradients.py`、`verify_channel_aggregation.py` |
+| 自检回归 | `verify_dyn_envelope.py`、`verify_mlp_gradients.py`、`verify_channel_aggregation.py`、`verify_channel_contrast.py`、`verify_branch_ratio.py`、`verify_emd_features.py`、`verify_scalers.py` |
 | 文档 | `README.md`、`PROJECT_SUMMARY.md` |
 | 数据/输出（本地，多数被忽略） | `raw_data/`（唯一的训练数据源）、`experiments/`、`visualizations/` |
 | 数据重建 | `raw_data/relabel_by_thickness.py`（按指定厚度阈值重建数据集，见 §2.2） |
 
-### 16.2 `bin/`（归档区）
+### 17.2 `bin/`（归档区）
 
 根目录只保留仍然在用的脚本；一次性、已被取代或与项目无关的文件统一移入 `bin/`，
 具体清单与原因见 `bin/README.md`。当前 `bin/` 内有：
@@ -814,6 +1151,14 @@ python verify_channel_aggregation.py # 通道聚合语义与网络拓扑
 - `bin/_ab2/`、`bin/_ab_legacy/`（2026-09-22 特征集 A/B 扫描的 10 组输出，见 §8.4）
 - `bin/_baseline_full/`、`bin/_baseline_smoke/`（浅层基线的全量与冒烟输出，见 §10）
 - `bin/_dimcheck/`、`bin/_vis3f/`（维度自检与可视化回归的临时输出）
+- `bin/_s3a_rich/`（S3a 的 `rich` 特征提取产物 + `_paired` / `_paired2` 两份配对报告，见 §11.2）
+- `bin/_ab13_keep/`、`bin/_ab13_ratio/`、`bin/_ab13_atten/`（1.3 mm 阈值下 `branch-ratio` 的
+  A/B 提取与配对报告；`_ab13_ratio/` 内额外有 `_paired_seed7`，即 §11.3 里翻转那个正结果的独立重复）
+- `bin/_s1_thresholds/`（§11.1 四个阈值的配对对照报告与地板值运算脚本 `_boundary.py`）
+- `bin/_s1_check/`、`bin/_scheme_ab/`（S1 工具定稿前的两次中间配对输出：前者按
+  `scheme@scaler[cols]` 交叉，后者只按 scheme 分组；结论与 §11.1 一致，保留用于比对）
+- `bin/_s3b_replay/`（S3b 验证时手工重放旧实验产物用的目录 + `_compare.py` 逐位比对脚本）
+- `bin/_stack_dim/`（§11.5 全选项叠加的维度核对）
 - `bin/_ab_run.ps1`（驱动 A/B 扫描的 PowerShell 脚本；**是文件不是目录**，仍被 git 跟踪）
 - `bin/_gui_dataset/`、`bin/_kclass_check/`、`bin/_relabel_check/`（2026-09-22 多数据集选择器与
   k 分类重构的无头冒烟/校验脚本，外加按厚度重标注的校验数据集 `_relabel_check/cls3/`；
@@ -829,7 +1174,7 @@ python verify_channel_aggregation.py # 通道聚合语义与网络拓扑
 > `verify_dyn_envelope.py` 通过 `REFERENCE_DIR` 读取 `bin/after_split_data/`（可用环境变量
 > `DYN_REFERENCE_DIR` 重定向）。
 
-## 17. Git 发布说明
+## 18. Git 发布说明
 
 本目录已经是 Git 仓库根的子目录：远端为 `https://github.com/Icyhavoc/Bone_us.git`（原名
 `bone_us.git`，已改名），当前分支 `custom-dyn_envelop` 跟踪 `origin/custom-dyn_envelop`。
