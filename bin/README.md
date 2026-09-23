@@ -3,7 +3,9 @@
 创建时间：2026-09-21
 最近整理：2026-09-22（移入 `_ab*`、`_baseline_*`、`_dimcheck`、`_vis3f`、`_gui_dataset`、`_kclass_check`、`_relabel_check`）；
         2026-09-22 晚（S1/S3a/S3b/S4 落地后追加 `_s1_check`、`_scheme_ab`、`_s1_thresholds`、`_s3a_rich`、
-        `_ab13_*`、`_s3b_replay`、`_stack_dim`）
+        `_ab13_*`、`_s3b_replay`、`_stack_dim`）；
+        2026-09-23（补入 `_s3b_smoke*`、`_s3b_refuse`；并删除根目录与 `bin/` **内容重复**的
+        `_gui_dataset/`、`_kclass_check/`、`_relabel_check/` 三份副本，见下方说明）
 
 根目录只保留**当前仍在用**的脚本与文档。一次性脚本、被取代的实现、专项诊断出图、
 以及临时运行产物，统一移到这里，让根目录一眼能看出哪些是流水线的一部分。
@@ -30,14 +32,16 @@
 | `_baseline_smoke/` | 根目录 | 同上的短跑冒烟版，只用来验证 CLI 与输出格式，指标不可引用。 | 同上 |
 | `_dimcheck/` | 根目录 | 特征维度自检的临时输出（`channels_3` 一组），用于核对 `PROJECT_SUMMARY.md` §8.3 的维度表。 | 重跑对应命令即可 |
 | `_vis3f/` | 根目录 | 可视化回归对照输出（`emd/`、`pre/` 各 2 张图 + `selection_manifest.json`），留给 `bin/_gui_dataset/regress_vis.py` 做快照比对。 | `python bin\_gui_dataset\regress_vis.py compare ...` |
-| `_gui_dataset/` | 根目录 | 2026-09-22 多数据集选择器的**无头冒烟脚本**：`smoke_dataset_gui.py`（GUI 列结构）、`smoke_dataset_switch.py`（数据层 `discover_datasets` / `ExperimentCatalog`）、`smoke_kclass_figures.py`（k 分类图表可见性），外加可视化回归工具 `regress_vis.py` 与两份快照 JSON。 | `python bin\_gui_dataset\smoke_dataset_switch.py`（脚本内 `APP_DIR` 已随搬家改成 `parents[2]`，可直接跑） |
-| `_kclass_check/` | 根目录 | k 分类重构（`label_scheme` / `classification_metrics`）的校验脚本与回归输出：`check_metrics.py`（纯计算自检）、`check_binary_regression.py` ＋ `bin_regression/`（与既有二分类实验逐位对照）、`cls2_run/` `cls3_run/`（2/3 类实跑）、`baseline_regression/`、`cm_regression/`、`vis_regression/`、`json_deep_diff.py`。 | `python bin\_kclass_check\check_metrics.py`（脚本内 `ROOT` 已改成 `parents[2]`） |
-| `_relabel_check/` | 根目录 | 按厚度重标注的校验数据集 `cls3/`（3 类、约 96 MB，与 `raw_data_relabeled/cls3_thr0.8_1.2` 同族）＋一次性还原脚本 `restore_raw_data.py`。 | 数据集可直接用（`--data-dir bin/_relabel_check/cls3`）；`restore_raw_data.py` 是历史记录：它引用的 `keep/manifest.csv` 已不存在，`cls3/README.txt` 里的路径也是搬家前的 |
+| `_gui_dataset/` | 根目录（**原位置已无副本**，见下） | 2026-09-22 多数据集选择器的**无头冒烟脚本**：`smoke_dataset_gui.py`（GUI 列结构）、`smoke_dataset_switch.py`（数据层 `discover_datasets` / `ExperimentCatalog`）、`smoke_kclass_figures.py`（k 分类图表可见性），外加可视化回归工具 `regress_vis.py` 与两份快照 JSON。 | `python bin\_gui_dataset\smoke_dataset_switch.py`（脚本内 `APP_DIR` 已随搬家改成 `parents[2]`，可直接跑） |
+| `_kclass_check/` | 根目录（**原位置已无副本**，见下） | k 分类重构（`label_scheme` / `classification_metrics`）的校验脚本与回归输出：`check_metrics.py`（纯计算自检）、`check_binary_regression.py` ＋ `bin_regression/`（与既有二分类实验逐位对照）、`cls2_run/` `cls3_run/`（2/3 类实跑）、`baseline_regression/`、`cm_regression/`、`vis_regression/`、`json_deep_diff.py`。 | `python bin\_kclass_check\check_metrics.py`（脚本内 `ROOT` 已改成 `parents[2]`） |
+| `_relabel_check/` | 根目录（**原位置已无副本**，见下） | 按厚度重标注的校验数据集 `cls3/`（3 类、约 96 MB，与 `raw_data_relabeled/cls3_thr0.8_1.2` 同族）＋一次性还原脚本 `restore_raw_data.py`。 | 数据集可直接用（`--data-dir bin/_relabel_check/cls3`）；`restore_raw_data.py` 是历史记录：它引用的 `keep/manifest.csv` 已不存在，`cls3/README.txt` 里的路径也是搬家前的 |
 | `_scheme_ab/`、`_s1_check/` | 根目录 | `compare_label_schemes.py` **定稿前**的两次中间配对报告：前者只按 label scheme 分组，后者按 `scheme@scaler[cols]` 交叉。| 直接用定稿后的 `compare_label_schemes.py` 重跑（命令见 `PROJECT_SUMMARY.md` §11.1） |
 | `_s1_thresholds/` | 根目录 | **S1 正式结果**：4 个阈值 × `lda,prior` × 5×5 折的配对报告（`comparison_report.txt` / `comparison_results.json`），外加地板值/边界样本运算脚本 `_boundary.py`。`PROJECT_SUMMARY.md` §11.1 的两张表出自这里。 | 用 §11.1 的命令重跑；`_boundary.py` 和 `_s3a_rich/_layout.py`、`_s3b_replay/_compare.py` 一样是**一次性的辅助脚本，不参与归档流程** |
 | `_s3a_rich/` | 根目录 | S3a（`rich` 特征族）的**特征提取产物**（`form_top3_mean__regions_dyn_envelope__channels_1__cls2_thr1.3`）＋ `_paired` / `_paired2` 两份配对报告＋列布局核对脚本 `_layout.py`。§11.2 的表格出自 `_paired2`。 | 不加 `--feature-set` 相关开关重跑即可；`--experiment` 直接指向这个目录可复用特征 |
 | `_ab13_keep/`、`_ab13_ratio/`、`_ab13_atten/` | 根目录 | 1.3 mm 阈值下 S3b（`--branch-ratio`）的 **A/B 三件套**：`_ab13_keep` 是 16 列基线提取，`_ab13_ratio` / `_ab13_atten` 是 `ratio` / `attenuation` 臂。后两者各带配对报告；`_ab13_ratio/_paired_seed7/` 是把 fold 种子换成 7 的**独立重复**——§11.3 里唯一那个 +1.3 pt 正结果就在这里翻转成 −1.7 pt。 | `compare_label_schemes.py --experiment bin/_ab13_keep/...` 重跑；换种子用 `--seed 7 --output-dir .../_paired_seed7` |
 | `_s3b_replay/` | 根目录 | S3b 验证时**手工重放旧实验产物**用的目录（含 `form_top3_mean__regions_dyn_envelope__channels_1`）＋ `_compare.py` 逐位比对脚本。`verify_branch_ratio.py` / `verify_channel_contrast.py` 的夹具与它同源。 | 跑 `python verify_branch_ratio.py`（会自己重建同样的重放目录） |
+| `_s3b_smoke/`、`_s3b_smoke3/`、`_s3b_smoke_att/` | 根目录 | S3b（`--branch-ratio`）落地时的**冒烟输出**（`mean_std` 短跑，各 1 组）：分别是 `channels_1 + ratio`、`channels_3 + ratio`、`channels_1 + attenuation`。只用来确认目录名后缀、`feature_info.json` 的 `branch_ratio` 块与维度自洽，指标本身不可引用。 | `run_emd_experiments.py --form mean_std --region-set dyn_envelope --channel-mode 1 --branch-ratio ratio --output-dir <临时目录>` 重跑 |
+| `_s3b_refuse/` | 根目录 | S3b 的**负向检查证据**：对单窗口区域（`regions_full`）请求 `--branch-ratio ratio` 时应当**明确报错**。这里只留下报错前已写出的 `config.json`，正是“拒绝发生在特征提取之前”的痕迹。 | 重跑会发现没有 `metrics.json`，且进程以非零码退出并打印区域不支持的说明 |
 | `_stack_dim/` | 根目录 | **全选项叠加**（`rich` + `channels_3` + `contrast normalized` + `branch-ratio attenuation`）的维度核对输出，用来确认 §11.5 的 `feature_dim = 123` / `[41, 41, 41]` / `fan_in = 192`。 | 用 §11.5 的命令重跑 |
 | `__pycache__/` | 根目录 | Python 字节码缓存，其中 `dynamic_split*.pyc`、`_grad_check*.pyc` 对应的**源文件已从仓库删除**，只会造成误导。 | 可随时删除，Python 会自动重建（根目录会再生成一个，属正常现象） |
 
@@ -71,9 +75,18 @@
    > `bin/_relabel_check/restore_raw_data.py` 依赖的 `keep/manifest.csv` 已经不存在，
    > `bin/_relabel_check/cls3/README.txt` 与 `bin/_kclass_check/**/summary.json`、
    > `baseline_results.json` 里记录的 `_xxx_check/...` 路径是搬家前的位置。
+7. **不要在根目录和 `bin/` 各留一份同名脚本**。2026-09-22 搬家时，
+   `_gui_dataset/`、`_kclass_check/`、`_relabel_check/` 三个目录在根目录留下了**只含脚本、不含产物的副本**
+   （内容已是搬家后的版本，逐字节相同）。它们虽然被 `.gitignore` 忽略、不会污染 `git status`，
+   但实际有害：脚本里的 `parents[2]` 是按 `bin/xxx/` 的深度算的，从根目录跑会多退一级，
+   把仓库根变成 `骨分层/`，`import gui_app` 必然失败；普通文本搜索也搜不到被忽略目录的内容，
+   很容易让人以为“根目录那份才是新的”。三个副本已于 2026-09-23 删除，`bin/` 下是唯一权威版本。
+   > 判定重复时用逐文件哈希（`Get-FileHash`）而不是只看文件名：当年 `_smoke_all/` 与 `_verify_fix/`
+   > 同为冒烟输出，内容并不同。
 
 ## 当前根目录剩下的临时目录
 
-无。`_*/` 规则只匹配目录，所以根目录下已不再有临时目录；剩下四个目录都是流水线的一部分：
-`bin/`（归档区）、`experiments/`（实验输出）、`visualizations/`（出图）、
-`raw_data/` ＋ `raw_data_relabeled/`（数据）。根目录里由 Python 自动重建的 `__pycache__/` 属正常现象，可随时删除
+无。`_*/` 规则只匹配目录，所以根目录下已不再有临时目录（2026-09-23 删掉最后三个重复副本后回到这个状态）；
+剩下的目录都是流水线的一部分：`bin/`（归档区）、`experiments/`（实验输出）、`visualizations/`（出图）、
+`raw_data/` ＋ `raw_data_relabeled/`（数据）。根目录里由 Python 自动重建的 `__pycache__/` 属正常现象，可随时删除。
+> 检查方法：`Get-ChildItem -Directory -Filter '_*'`，只应看到 `__pycache__`。
