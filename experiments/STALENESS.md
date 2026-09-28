@@ -1,6 +1,8 @@
 # `experiments/` 产物与当前代码的一致性
 
-更新时间：2026-09-17（最近补充：2026-09-22，S1/S3a/S3b/S4 落地后的重放结论）
+更新时间：2026-09-17（最近补充：2026-09-22，S1/S3a/S3b/S4 落地后的重放结论；
+同日补：数据集 tag 冲突的修法与 `bin/_ab13_keep` 重新对齐；
+2026-09-23 补：严格 LOSO 测评、标本级划分与围栏对照落地后的引用规则）
 
 > **当前状态**：本文件中提到的全部旧实验已归档到
 > `bin/backup/5_experiments_2026-09-17/`（27 个实验目录 + 1 个 `summary.json`）。
@@ -26,6 +28,23 @@ D:\Miniconda3\python.exe run_emd_experiments.py --forms all --region-set all --c
 
 > 目录命名：默认 `per_channel` 沿用 `form_<form>__regions_<region>__channels_<channel>`；
 > `--channel-aggregation pooled` 会写成同名 + `__pooled` 后缀，两者不会互相覆盖。
+
+## 旧产物缺少围栏与阈值口径（2026-09-23）
+
+`experiments/` 下现存目录都生成于围栏对照与 `--threshold-source` 落地**之前**，
+所以它们的 `metrics.json` **没有 `controls` 和 `decision_threshold` 两块**。
+这不影响其中任何一个已存数字：`metrics.metrics[split]` 仍然按 0.5 计算，
+新代码在这块上**行为未变**（`--threshold-source` 只往 `decision_threshold` 里写）。
+
+需要引用时必须区分：
+
+- 要「本模型 vs 多数类 / 标本指纹」这条围栏，或要看三种阈值口径的敏感度
+  → 用 `run_emd_experiments.py` 重跑对应命令（§11.8），旧目录里的数字无法补出对照线；
+- 要**绝对可分性**结论 → `raw_data` 的划分是按**点**分层的
+  （train ∩ test 共享 43 块骨头），这些目录的 test 指标含乐观偏差，
+  应改用 `run_loso_evaluation.py`（§11.7）；
+- 要「A 特征是否优于 B」→ 用 `compare_label_schemes.py` 的配对报告（§11.1），
+  与目录里的单次 test 指标无关。
 
 ## 结论速览（已归档的旧产物）
 
@@ -112,3 +131,59 @@ D:\Miniconda3\python.exe run_emd_experiments.py --forms all --region-set all --c
 
 > S3b / S4 的 A/B 特征提取与配对报告都写在 `bin/_ab13_*`、`bin/_s3a_rich`、`bin/_stack_dim`，
 > 故意**不**落进 `experiments/`，以免与正式基线混在一起。
+
+## 数据集 tag 冲突与覆盖保护（2026-09-22 补）
+
+`label_scheme.json` 的 `tag` 只由**类别数**与**阈值**决定，不反映划分方式，因此
+`raw_data_relabeled/cls2_thr1.3`（`stratified_random_split`，seed 42）与
+`raw_data_relabeled/cls2_thr1.3_keepsplit`（`keep_source_split`，沿用 `raw_data` 划分）
+拿到的是**同一个 tag** `cls2_thr1.3`。两者阈值相同 → 标签相同，268 样本池相同 →
+`X` 逐位相同，但 train/val/test 归属不同（重叠 train 92/161、val 4/40、test 14/67，
+即 **268 个样本里有 158 个换了 split**）。
+
+而实验目录名是 `form_...__regions_...__channels_...__<tag>`，两轮实验会落到**同一个目录**：
+`run_emd_experiments.py` 原先是 `mkdir(exist_ok=True)` 后直接覆写，后跑的赢，
+`config.json` 的 `data_dir` 只指向最后那一次；GUI 的 `visualizations/<kind>/<tag>/` 同样冲突。
+
+同一命令只换 `--data-dir` 的实测差异（`top3_mean` + `dyn_envelope` + 通道 1）：
+
+| 数据源 | test accuracy |
+|---|---:|
+| `cls2_thr1.3`（stratified） | 0.8358 |
+| `cls2_thr1.3_keepsplit` | 0.7164 |
+
+> 这一步也解释了之前「两个 1.3 mm 数据集跑出来结果一样」的现象：
+> `compare_label_schemes.py` 的配对协议把 268 个样本合并后按 `depth_value` 分位数**重新**折分、
+> 根本不读已存 split，所以对它而言两份数据集逐位等价（报告 SHA256 相同）；
+> 而真正使用已存 split 的 `run_emd_experiments.py` 得到的是上表那两个不同的数。
+
+已实施的修法分两层：
+
+1. **结构性**：`raw_data/relabel_by_thickness.py` 新增 `dataset_tag(scheme, method)`，
+   在 `--keep-split` 时把 tag 追加成 `cls2_thr1.3_keepsplit`，目录名天然不同。
+   `label_scheme.json` / `split_metadata.json` / `README.txt` 都记录这个 tag，
+   下游的目录名、文件名、GUI 分桶全自动跟随。
+2. **兜底**：`run_emd_experiments._guard_existing_experiment()` 在写入任何文件**之前**
+   读目标目录的 `config.json`，若 `data_dir` / `regions` / `num_classes` / `label_scheme`
+   与本次请求不一致就 `SystemExit` 并打印 recorded vs requested；非致命项（如 `epochs`）
+   只打印 `[guard] …这些设置已变化`。确需覆盖时显式加 `--allow-config-mismatch`。
+   被拦下时**一个文件都不写**。
+
+已核实的安全性：用新代码重建 `cls2_thr1.3` 与 `cls2_thr1.3_keepsplit`，与磁盘上的旧版本比对
+**12 个 payload 文件（train/val/test × `X.npy`/`y.npy`/`indices.npy`/`samples.json`）SHA256 全部相同**，
+所以改 tag 不会破坏「`--thresholds 1.0 --keep-split` 逐位复现 `raw_data`」这一性质。
+
+### `bin/_ab13_keep` 的数据源对齐
+
+A/B 三件套里 `bin/_ab13_keep` 原先指向 `cls2_thr1.3_keepsplit`，而 `bin/_ab13_ratio` /
+`bin/_ab13_atten` 指向 `cls2_thr1.3`（三者目录名后缀当时都是 `__cls2_thr1.3`）。
+现已把 `_ab13_keep` 用 `--data-dir raw_data_relabeled/cls2_thr1.3 --allow-config-mismatch`
+重跑（新守护确实拦下了第一次尝试，拦截信息与 §2.3 描述一致），三件套现在同源。
+
+因为 §11.1 的 `bin/_s1_thresholds` 用的是**不读已存 split** 的配对协议，
+重跑后 `comparison_report.txt` 与 `comparison_results.json` 与归档件 **SHA256 完全相同**
+（`DD67C66C…` / `AC79F184…`），§11.1 的所有数字不受影响。新增 `test_accuracy` 为 0.8358。
+
+> 提醒：`bin/_ab13_*` / `bin/_s1_thresholds` 里的数字都由当时的数据集与代码产生，
+> 目录名里的 `__cls2_thr1.3` 是 **tag**，不代表目录内 `config.json` 的 `data_dir`。
+> 引用前先看 `config.json`。

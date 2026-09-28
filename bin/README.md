@@ -39,10 +39,13 @@
 | `_s1_thresholds/` | 根目录 | **S1 正式结果**：4 个阈值 × `lda,prior` × 5×5 折的配对报告（`comparison_report.txt` / `comparison_results.json`），外加地板值/边界样本运算脚本 `_boundary.py`。`PROJECT_SUMMARY.md` §11.1 的两张表出自这里。 | 用 §11.1 的命令重跑；`_boundary.py` 和 `_s3a_rich/_layout.py`、`_s3b_replay/_compare.py` 一样是**一次性的辅助脚本，不参与归档流程** |
 | `_s3a_rich/` | 根目录 | S3a（`rich` 特征族）的**特征提取产物**（`form_top3_mean__regions_dyn_envelope__channels_1__cls2_thr1.3`）＋ `_paired` / `_paired2` 两份配对报告＋列布局核对脚本 `_layout.py`。§11.2 的表格出自 `_paired2`。 | 不加 `--feature-set` 相关开关重跑即可；`--experiment` 直接指向这个目录可复用特征 |
 | `_ab13_keep/`、`_ab13_ratio/`、`_ab13_atten/` | 根目录 | 1.3 mm 阈值下 S3b（`--branch-ratio`）的 **A/B 三件套**：`_ab13_keep` 是 16 列基线提取，`_ab13_ratio` / `_ab13_atten` 是 `ratio` / `attenuation` 臂。后两者各带配对报告；`_ab13_ratio/_paired_seed7/` 是把 fold 种子换成 7 的**独立重复**——§11.3 里唯一那个 +1.3 pt 正结果就在这里翻转成 −1.7 pt。 | `compare_label_schemes.py --experiment bin/_ab13_keep/...` 重跑；换种子用 `--seed 7 --output-dir .../_paired_seed7` |
+| ↳ 三者的数据源 | — | 目录名后缀 `__cls2_thr1.3` 只是 **tag**，不代表 `config.json` 的 `data_dir`。**2026-09-22 已对齐**：`_ab13_keep` 原先指向 `cls2_thr1.3_keepsplit`（与另两臂不同源），现改为 `cls2_thr1.3`。重跑后 §11.1 的 `_s1_thresholds` 报告 SHA256 不变（协议不读已存 split）。 | 引用任何指标前先看该目录的 `config.json`；详见 `PROJECT_SUMMARY.md` §2.3 与 `experiments/STALENESS.md` |
 | `_s3b_replay/` | 根目录 | S3b 验证时**手工重放旧实验产物**用的目录（含 `form_top3_mean__regions_dyn_envelope__channels_1`）＋ `_compare.py` 逐位比对脚本。`verify_branch_ratio.py` / `verify_channel_contrast.py` 的夹具与它同源。 | 跑 `python verify_branch_ratio.py`（会自己重建同样的重放目录） |
 | `_s3b_smoke/`、`_s3b_smoke3/`、`_s3b_smoke_att/` | 根目录 | S3b（`--branch-ratio`）落地时的**冒烟输出**（`mean_std` 短跑，各 1 组）：分别是 `channels_1 + ratio`、`channels_3 + ratio`、`channels_1 + attenuation`。只用来确认目录名后缀、`feature_info.json` 的 `branch_ratio` 块与维度自洽，指标本身不可引用。 | `run_emd_experiments.py --form mean_std --region-set dyn_envelope --channel-mode 1 --branch-ratio ratio --output-dir <临时目录>` 重跑 |
 | `_s3b_refuse/` | 根目录 | S3b 的**负向检查证据**：对单窗口区域（`regions_full`）请求 `--branch-ratio ratio` 时应当**明确报错**。这里只留下报错前已写出的 `config.json`，正是“拒绝发生在特征提取之前”的痕迹。 | 重跑会发现没有 `metrics.json`，且进程以非零码退出并打印区域不支持的说明 |
 | `_stack_dim/` | 根目录 | **全选项叠加**（`rich` + `channels_3` + `contrast normalized` + `branch-ratio attenuation`）的维度核对输出，用来确认 §11.5 的 `feature_dim = 123` / `[41, 41, 41]` / `fan_in = 192`。 | 用 §11.5 的命令重跑 |
+| `_loso_metrics/` | 根目录 | `run_loso_evaluation.py` 的 **6 次正式测评产物**：`bands` / `dyn_envelope` / `full` × 1.0 / 1.3 mm 的 `metrics.json`（含 `protocol` / `pool` / `fences` / `probe_diagnostics`）、`folds.json`、`point_scores.csv`，外加两次二次探针的 `quad_l2_1` / `quad_l2_400`。§11.7 的两张表出自这里。 | `python run_loso_evaluation.py --feature-source bands --threshold-mm 1.0 --output-dir bin/_loso_metrics`（其余组合见 §11.7 / §15） |
+| `_thr_src/`、`_thr_src_s7/` | 根目录 | 阈值口径与围栏对照（§11.8）的**单次运行**输出：两者只差 `--seed`（42 / 7），用来证明口径排名会翻转、且单次准确率差异在 7 pt 以内不可解读。目录里只有一组实验，但 `metrics.json` 的 `decision_threshold.sensitivity` 同时含 `fixed` / `train` / `val` 三种口径的 test 准确率，以及 `controls` 三条对照线与 `specimen_overlap`。 | `run_emd_experiments.py --forms max1 --region-set dyn_envelope --channel-mode 1 --output-dir bin/_thr_src[_s7]` 重跑。换 `--threshold-source` 会写进**同一个目录**（`threshold_source` 不在 `_GUARD_FATAL_KEYS` 里，guard 只打一条“changed”提示），这是设计使然：三种口径都已在 `sensitivity` 里 |
 | `__pycache__/` | 根目录 | Python 字节码缓存，其中 `dynamic_split*.pyc`、`_grad_check*.pyc` 对应的**源文件已从仓库删除**，只会造成误导。 | 可随时删除，Python 会自动重建（根目录会再生成一个，属正常现象） |
 
 ## 约定
@@ -53,6 +56,8 @@
    `verify_channel_aggregation.py`、`verify_channel_contrast.py`、`verify_branch_ratio.py`、
    `verify_emd_features.py`、`verify_scalers.py` 是七份**可重跑的回归自检**，两份文档都明确引用了它们，继续留在根目录。
    同理，`compare_label_schemes.py` 是 S1 配对评价协议的正式工具（§11.1），也不归档。
+   同理，`run_loso_evaluation.py` 是严格留一标本测评的正式工具（§11.7），也不归档；
+   它**不依赖** `bin/_loso_metrics/`（产物只是留档，可随时重跑）。
    > `verify_dyn_envelope.py` 虽然留在根目录，但它读的参考数据在 `bin/after_split_data/`，
    > 所以搬动 `bin/after_split_data/` 时需同步改 `REFERENCE_DIR` 或设 `DYN_REFERENCE_DIR`。
    > 依赖方向是“根目录脚本 → bin 数据”，`bin/` 里的东西从不反向 import 根目录。
@@ -83,6 +88,12 @@
    很容易让人以为“根目录那份才是新的”。三个副本已于 2026-09-23 删除，`bin/` 下是唯一权威版本。
    > 判定重复时用逐文件哈希（`Get-FileHash`）而不是只看文件名：当年 `_smoke_all/` 与 `_verify_fix/`
    > 同为冒烟输出，内容并不同。
+8. **归档目录名里的 `__cls2_thr1.3` 之类是数据集 tag，不是 `data_dir` 的缩写**。tag 只由类别数与阈值
+   决定，不含划分方式，所以 `cls2_thr1.3` 与 `cls2_thr1.3_keepsplit` 曾经同名（修法见
+   `PROJECT_SUMMARY.md` §2.3）。引用归档里的任何指标前，先读它自己的 `config.json` 确认 `data_dir`。
+   同类保护现在是自动的：`run_emd_experiments.py` 若发现目标目录已有 `config.json` 且
+   `data_dir` / `regions` / `num_classes` / `label_scheme` 变了，会**拒绝写入**并打印
+   recorded vs requested；确需覆盖时加 `--allow-config-mismatch`（`bin/_ab13_keep` 的重跑就是这样做的）。
 
 ## 当前根目录剩下的临时目录
 

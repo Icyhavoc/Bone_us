@@ -21,6 +21,7 @@ raw_data
 - `visualize_*.py`：五张图的可视化脚本（预处理、EMD 分量、训练曲线、混淆矩阵、错分厚度分布）。
 - `verify_*.py`：七份可重跑的回归自检（动态包络、MLP 梯度、通道聚合、通道对比度、跨 branch 比值、特征族、标准化器）。
 - `compare_label_schemes.py`：配对评价协议，把「特征提取」与「阈值选择」解耦（见下）。
+- `run_loso_evaluation.py`：严格留一标本（LOSO）可分性测评，含三条围栏对照（见下）。
 - `raw_data/relabel_by_thickness.py`：按指定厚度阈值重建数据集（二分类 / 多分类），见「标签方案与 k 分类」。
 - `bin/`：**归档区**（一次性脚本、历史快照、参考实现与参考数据），清单见 `bin/README.md`。
 - `README.md`：使用说明。
@@ -63,10 +64,21 @@ python raw_data/relabel_by_thickness.py --thresholds 0.8,1.2 --output-dir raw_da
 - 阈值是**闭区间下界**（`numpy.digitize` 语义）：`--thresholds 1.0` 表示 `depth >= 1.0` 记为 1 类，
   与既有 `y.npy` 的构造规则完全相同；k 个阈值 → k+1 个类别。
 - 脚本从现有 train/val/test 反推 268 个样本的原始池（`indices.npy` 保证可还原），再按新阈值
-  重新分层划分；`--keep-split` 可只重贴标签、沿用原划分。`--check_output_dir` 保护会拒绝写入
-  `raw_data/` 或任何与源目录重叠的路径（即使给了 `--overwrite`）。
+  重新分层划分；`--keep-split` 可只重贴标签、沿用原划分 —— 此时 `tag` 会追加 `_keepsplit`
+  （`cls2_thr1.3_keepsplit`），因为同一组阈值下的两份数据集样本池相同、标签相同，仅 158/268 个样本
+  的 train/val/test 归属不同，共用 tag 会让两轮实验写进同一个目录并静默覆盖。
+  `--check_output_dir` 保护会拒绝写入 `raw_data/` 或任何与源目录重叠的路径（即使给了 `--overwrite`）。
 - 输出目录除 `train/val/test` 外多一个 `label_scheme.json`，记录 `thresholds_mm`、`class_names`、
   `tag`（如 `cls3_thr0.8-1.2`）与判定规则。
+- **划分粒度**：上述划分是按**点**分层的，同一块骨头的多个点可能分别落在 train 与 test 里
+  （实测 train∩test 共享 43 块骨头、train∩val 27、val∩test 13，共 95 块骨头 / 268 个点）。
+  要按**标本**隔离（任何「绝对准确率」的结论都应如此），加 `--group-by-specimen`：
+  95 块骨头 → 57 / 15 / 24，且脚本会校验零重叠（有任何重叠直接 `RuntimeError`）。
+  它与 `--keep-split` 互斥，tag 追 `_group`。两种划分下的绝对指标**不可比**（
+  按点划分会把「记住这块骨头」也算成正确，详见 `PROJECT_SUMMARY.md` §2.4）。
+- 兜底：`run_emd_experiments.py` 写任何文件前会先比对目标目录已有的 `config.json`，
+  若 `data_dir` / `regions` / `num_classes` / `label_scheme` 已变化则**直接退出**并打印
+  recorded vs requested（其余项如 `epochs` 只告警）。确需覆盖时显式加 `--allow-config-mismatch`。
 
 全流程据此自动切换类别数：
 
@@ -482,9 +494,56 @@ python compare_label_schemes.py `
 - `--feature-sets`：直接给列下标做切片，可写 `名字=0,1,2` / 裸下标 / `all`；
 - `--models`：`mlp`（与训练同结构）、`l2_logistic`、`lda`、`prior`（多数类地板）。
 
+> **注意**：本协议**不读**已存的 split，所以对 `cls2_thr1.3` 与 `cls2_thr1.3_keepsplit`
+> 这类「阈值相同、只有划分不同」的数据集会给出**逐位相同**的报告——这是设计使然，
+> 不代表两个数据集等价（`run_emd_experiments.py` 用已存 split 训练时 test acc 分别是
+> 0.8358 / 0.7164）。详见 `PROJECT_SUMMARY.md` §2.3。
+
 输出 `comparison_report.txt` 与 `comparison_results.json`。报告里的 `±` 是**配对差值**的 95% 区间，
 `*` 表示该区间不含 0，即名义显著。**任何新特征/新模型的效果，都必须在这张表上显示出不含 0 的区间才算数**
 （实测数据见 `PROJECT_SUMMARY.md` §11）。
+
+## 严格留一标本测评 `run_loso_evaluation.py`
+
+上一节的配对协议回答「A 特征是否比 B 好」，但它**故意不读已存 split**、按厚度分位折分，
+所以它不说「绝对可分性有多少」，而且它不解决「同一块骨头跨折」的问题。
+这个脚本单独回答那个问题：把 268 个点**合池**，按**标本**重新分折，每折只给一块骨头打分。
+
+```powershell
+# 6 列包络幅度，不依赖 EMD 特征，几秒钟出结果
+python run_loso_evaluation.py --feature-source bands --threshold-mm 1.0
+
+# EMD 特征 + 动态包络区域，1.3 mm 口径
+python run_loso_evaluation.py `
+  --feature-source emd --forms max1 --region-set dyn_envelope --threshold-mm 1.3 `
+  --output-dir bin/_loso_metrics
+
+# 只解析参数、打印合池与折构成，不训练也不写文件
+python run_loso_evaluation.py --forms max1 --region-set full --dry-run
+```
+
+它同时删掉三处泄漏：**留一标本**（分组键是 `point_id` 的前缀，**不是**每个样本唯一的 `sample_id`，
+后者会静默退化成点级划分）、**折内标准化**（每折只用训练折的均值/方差）、
+**折内阈值**（在训练折内部再按标本分嵌套组扫阈值）。标签不用 `y.npy`，
+而是用 `--threshold-mm` 从 `depth_value` 现算，所以合池一次就能同时回答 1.0 与 1.3 mm。
+
+指标分**点级**（每点由没见过它那块骨头的模型打分）与**标本级**（一块骨头的点分数取平均成一次判定），
+主指标是无阈值的 **AUC**；报告里同时给三条**围栏线**，缺了它们一个准确率数字无法解读：
+
+| 线 | 含义 |
+|---|---|
+| 多数类 | 什么都不学 |
+| 标本指纹 | **只记忆、不看信号**——在标本隔离下必然塌回地板（这正是泄漏已被切断的证据） |
+| 标本 oracle | 连标签噪声一起记住，是**作弊上界**，不是结果 |
+
+实测结论与完整表格见 `PROJECT_SUMMARY.md` §11.7：包络幅度带（6 列）在 1.3 mm 上点级 AUC 0.836、
+标本级 0.888，已足够证明可分性。另有一个坑：`--probe quadratic` 把 14 列展成 119 列、
+最小折只有 261 个训练行，此时 `--l2` 被摊薄而**欠惩罚**，结果会**朝下**失败（打 `[!]`），
+需要扫 `--l2`（如 400）而不是当成「非线性没用」。
+
+它把 `run_emd_experiments.py` 的 `build_parser()` 作为 `parents`（`conflict_handler="resolve"`），
+所以两个脚本不会在特征/区域默认值上漂移；代价是 `--forms` 只接受单一值（传 `all` 会被拒绝），
+`--region-set` 也不接受 `all`。
 
 ## 输出文件
 
@@ -522,6 +581,16 @@ experiments/
 ```
 
 `metrics.json` 保存 `best_epoch`、`trained_epochs`、最佳验证集指标，以及 Accuracy、Precision、F1-score、Sensitivity、Specificity、AUC 和混淆矩阵计数；多分类（多于两类）时额外给出逐类指标、宏平均与 `balanced_accuracy`、`k×k` 混淆矩阵，并记录 `num_classes` 与 `label_scheme`。
+
+它另外写入两块可追溯信息，两者都必须与主指标一起引用：
+
+- `controls`：`majority_class` / `specimen_fingerprint` / `specimen_oracle` 三条对照线
+  （与 `metrics` 在同一份划分上算出），外加 `specimen_overlap` / `specimen_overlap_max`
+  ——即跨 split 共享骨头的块数，是「划分泄漏」的直接度量；
+- `decision_threshold`：`--threshold-source {val,train,fixed}`（默认 `val`）选中的阈值
+  （`value` / `source_flag` / 各 split 的 `metrics`），以及三种口径各自的 `sensitivity`。
+  注意 `metrics.metrics[split]` **仍按 0.5 计算**，历史目录与训练曲线保持可比；
+  多分类下 `decision_threshold` 为 `null`。
 
 ## 图形化实验查看器
 

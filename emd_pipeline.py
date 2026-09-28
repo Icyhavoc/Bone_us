@@ -2788,6 +2788,59 @@ def classification_metrics(
     }
 
 
+def threshold_scan(
+    y_true: np.ndarray, probabilities: np.ndarray, num_steps: int = 201
+) -> dict[str, Any]:
+    """Accuracy-maximising decision threshold for a binary model.
+
+    The stated goal on this dataset is that the classes separate **at some
+    threshold**, which makes the threshold a fitted quantity.  Hardcoding it at
+    0.5 therefore answers a question nobody asked: with an imbalanced split the
+    0.5 rule trades sensitivity for specificity at a ratio that no one chose, and
+    the published accuracy then depends on that accident.
+
+    The sweep is over the observed score support, extended to cover 0 and 1 so
+    the constant-predictor cases are reachable.  Ties are broken towards 0.5, so
+    the chosen threshold stays as close to the unbiased default as the data
+    allows instead of drifting to an arbitrary edge of a plateau.
+
+    Scan the split you are allowed to fit on -- the train split, or a fold's
+    training specimens.  Selecting the threshold on the split whose accuracy is
+    then reported is the quiet way a threshold becomes a test-set hyperparameter.
+    """
+
+    y_true = np.asarray(y_true, dtype=np.int64).ravel()
+    probabilities = np.asarray(probabilities, dtype=np.float64)
+    if probabilities.ndim != 2 or probabilities.shape[1] < 2:
+        raise ValueError("threshold_scan expects binary probabilities of shape [n, 2]")
+    scores = probabilities[:, 1]
+    if y_true.size == 0:
+        raise ValueError("threshold_scan needs at least one labelled row")
+    lower = min(0.0, float(scores.min()))
+    upper = max(1.0, float(scores.max()))
+    grid = np.linspace(lower, upper, max(2, int(num_steps)))
+    positives = y_true == 1
+    best_threshold = 0.5
+    best_accuracy = -1.0
+    best_distance = float("inf")
+    for candidate in grid:
+        accuracy = float(np.mean((scores >= candidate) == positives))
+        distance = abs(float(candidate) - 0.5)
+        if accuracy > best_accuracy + 1e-12 or (
+            abs(accuracy - best_accuracy) <= 1e-12 and distance < best_distance
+        ):
+            best_threshold = float(candidate)
+            best_accuracy = accuracy
+            best_distance = distance
+    return {
+        "threshold": best_threshold,
+        "accuracy": best_accuracy,
+        "candidates": int(grid.size),
+        "seed_threshold": 0.5,
+        "seed_accuracy": float(np.mean((scores >= 0.5) == positives)),
+    }
+
+
 class NumpyMLPClassifier:
     """A compact ReLU MLP classifier with Adam optimization.
 

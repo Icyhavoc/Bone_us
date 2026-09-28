@@ -61,6 +61,7 @@ index = round(depth_mm / 5.0 * 896)
 ```powershell
 python raw_data/relabel_by_thickness.py --thresholds 1.3
 python raw_data/relabel_by_thickness.py --thresholds 1.3 --output-dir raw_data_relabeled/cls2_thr1.3
+python raw_data/relabel_by_thickness.py --thresholds 1.3 --keep-split --output-dir raw_data_relabeled/cls2_thr1.3_keepsplit
 python raw_data/relabel_by_thickness.py --thresholds 0.8,1.2 --output-dir raw_data_relabeled/cls3_thr0.8_1.2
 ```
 
@@ -73,12 +74,14 @@ python raw_data/relabel_by_thickness.py --thresholds 0.8,1.2 --output-dir raw_da
   （`--overwrite` 也不能绕过），避免又一次性事故。
 - 输出目录多一个 `label_scheme.json`（`thresholds_mm` / `num_classes` / `class_names` / `tag` /
   `label_rule`），`tag` 形如 `cls2_thr1.3`、`cls3_thr0.8-1.2`。
+  用 `--keep-split` 时 tag 会追加 `_keepsplit` 后缀（原因见 §2.3）。
 
 下游全链路自动跟随数据集切换类别数：
 
 - `run_emd_experiments.py --data-dir <新目录>`：类别数默认从标签推断，`--num-classes` 可覆盖
   （给得比数据里的小会直接报错）；`label_scheme` 与 `num_classes` 写入 `config.json`/`metrics.json`，
-  目录名追加 `__<tag>`，因此三分类结果不会覆盖已有的二分类目录。
+  目录名追加 `__<tag>`，因此三分类结果不会覆盖已有的二分类目录；同一阈值下不同划分的变体
+  也靠 tag 后缀区分（§2.3），并有写入前的 `config.json` 比对兜底。
 - `emd_pipeline.classification_metrics(y, p, num_classes)`：两类时逐字复现原有二分类指标（含
   `TN`/`FP`/`FN`/`TP` 键）；多于两类时改用 argmax，输出逐类 `precision/recall/f1/specificity`
   与一站式 AUC、`k×k` 混淆矩阵（行 = 真实，列 = 预测）、宏平均和 `balanced_accuracy`。
@@ -89,6 +92,79 @@ python raw_data/relabel_by_thickness.py --thresholds 0.8,1.2 --output-dir raw_da
   优先读 `label_scheme`（多阈逐线），混淆矩阵按 `metrics.json` 的类别数自动切换 k×k 画法。
 
 产物约定：二分类（默认 `raw_data/`，无 `label_scheme.json`）的所有历史行为与图纸、指标**逐位不变**。
+
+### 2.3 数据集 tag 与结果目录：同阈值 ≠ 同数据集
+
+`label_scheme.json` 的 `tag` 只由**类别数**与**阈值**决定（`cls{类数}_thr{阈值}`），
+不反映样本划分方式。于是下面两个数据集会产生**同一个 tag**：
+
+| 数据集 | 划分方式 | tag（修复前） |
+|---|---|---|
+| `raw_data_relabeled/cls2_thr1.3` | `stratified_random_split`（seed 42，池内重划） | `cls2_thr1.3` |
+| `raw_data_relabeled/cls2_thr1.3_keepsplit` | `keep_source_split`（沿用 `raw_data` 的划分） | `cls2_thr1.3` ❌ |
+
+两者阈值相同 → 标签相同；268 样本池相同 → `X` 逐位相同；但 train/val/test 归属不同
+（重叠 train 92/161、val 4/40、test 14/67，即 **268 个样本里有 158 个换了 split**）。
+而 `run_emd_experiments.py` 的目录名是 `form_...__regions_...__channels_...__<tag>`，
+两轮实验会落到**同一个目录**，靠 `mkdir(exist_ok=True)` 静默覆盖——后跑的赢，
+`config.json` 的 `data_dir` 只指向最后那一次；GUI 的 `visualizations/<kind>/<tag>/` 同样冲突。
+
+同一命令只换 `--data-dir` 的实测差异（`top3_mean` + `dyn_envelope` + 通道 1）：
+
+| 数据源 | test accuracy |
+|---|---:|
+| `cls2_thr1.3`（stratified） | 0.8358 |
+| `cls2_thr1.3_keepsplit` | 0.7164 |
+
+> 注意区分两种「结果一样」。`compare_label_schemes.py` 的配对协议把 268 个样本合并后
+> 用 `depth_value` 分位数**重新**折分、根本不读已存 split，因此对它而言这两个数据集
+> 逐位等价（报告 SHA256 相同）；上表的差异来自 `run_emd_experiments.py` 真正使用已存 split 的训练。
+
+修法分两层：
+
+1. **结构性**：`raw_data/relabel_by_thickness.py` 的 `dataset_tag()` 在 `--keep-split` 时
+   把 tag 追加成 `cls2_thr1.3_keepsplit`，目录名天然不同。
+2. **兜底**：`run_emd_experiments._guard_existing_experiment()` 在写入任何文件**之前**读目标目录的
+   `config.json`，若 `data_dir` / `regions` / `num_classes` / `label_scheme` 与本次请求不一致
+   就直接退出并打印 recorded vs requested；非致命项（如 `epochs`）只打印
+   `[guard] …这些设置已变化`。确需覆盖时显式加 `--allow-config-mismatch`。
+
+已核实：`--thresholds 1.0 --keep-split` 重建出的 12 个 payload 文件
+（train/val/test × `X.npy`/`y.npy`/`indices.npy`/`samples.json`）与原 `raw_data` 的
+SHA256 全部相同，因此 tag 改名不会破坏「逐位复现 `raw_data`」这一性质。
+
+### 2.4 划分粒度：已存的 split 是按**点**划的，不是按**标本**划的
+
+`raw_data` 的 train/val/test 由 `relabel_by_thickness.py` 的 `stratified_split` 产出，
+它在 **268 个采样点**上按标签分层，**没有把一块骨头当成一个整体**。于是同一块骨头上的
+几个采样点会落到不同 split 里，实测重叠：
+
+| 对 | 共享标本数 |
+|---|---:|
+| train ∩ test | 43 |
+| train ∩ val | 27 |
+| val ∩ test | 13 |
+
+268 个点来自 **95 块骨头**（平均 2.82 点/块，最少 1、最多 7）。其中 **37 块**骨头本身
+标签就是混的——因为「厚度」是**逐点**记录的（钻孔深度逐点不同），不是逐块记录的，
+所以「同一块骨头」并不等于「同一个标签」。
+
+后果分两层：
+
+1. **test 指标偏乐观。** 模型只要记住「这块骨头我见过」，就能在它的其它点上猜对。
+   实测一个**完全不看信号、只用标本编号**的分类器，在点级 split 上可以拿到
+   点 acc **0.6567** / AUC **0.7074**（多数类地板只有 0.537）——这就是必须跨过的门槛。
+2. **val 同样被污染。** 早停与选参用的 val 也与 train 共享标本，所以
+   「按 val 选 best epoch」这件事本身也在奖励记忆。
+
+两条应对，互不冲突：
+
+- **重建数据集**：`python raw_data/relabel_by_thickness.py --group-by-specimen`，
+  按标本整体分配（`stratified_group_split` 会检查任意两个 split 之间标本重叠为 0，
+  否则直接报错）。实测 95 块骨头分到 57 / 15 / 24，重叠 0。
+- **不改数据集也能得到严格口径**：`run_loso_evaluation.py`（§11.7）把 268 个点合池后
+  按标本重新分折。**数据集按需求冻结，因此当前所有结论一律以 §11.7 为准**；
+  §10 / §11 里基于新划分训练得到的绝对值，只能当作「换阈值之间谁更好」的相对比较。
 
 ## 3. 帧预处理方式
 
@@ -638,6 +714,13 @@ AUC 随阈值单调上升（0.807 → 0.877），说明**物理上确实越偏�
 > S1 的副产品是把之前无法回答的问题变成了可回答的：**任何新特征/新模型的效果，
 > 现在都必须在这张配对表上显示出不含 0 的区间才算数**。下面三条策略都按这个标准判定。
 
+> **复现性说明（2026-09-22 补）**：上表来自 `bin/_s1_thresholds/`。因为该协议按
+> `depth_value` 分位数**重新**折分、完全不读已存 split，所以 `bin/_ab13_keep` 的
+> `data_dir` 是 `cls2_thr1.3` 还是 `cls2_thr1.3_keepsplit` 都不影响结果。
+> 把 `_ab13_keep` 改成与 `bin/_ab13_ratio` / `bin/_ab13_atten` 相同的数据集后重跑，
+> `comparison_report.txt` 与 `comparison_results.json` 与归档件 **SHA256 完全相同**
+> （见 §2.3 与 `experiments/STALENESS.md`）。
+
 ### 11.2 S3a — 尺度不变与谱描述特征族
 
 `--feature-set` 在 `compact` 基础上可再叠加三个族（可单独启用以便归因）：
@@ -816,6 +899,219 @@ S1 之前，S3b 那个 +1.3 pt 会被当成成果；S1 之后，它在换成另�
 与 §10 的「瓶颈在特征、不在容量」一致——**当前 16 列的线性信号已被用尽**，
 继续在原地加同类特征不会有收益。
 
+### 11.7 严格留一标本测评（`run_loso_evaluation.py`）
+
+§11.1 的配对协议解决的是「换阈值/换特征集之间**不可比**」，它**故意不读已存 split**
+（按 `depth_value` 分位折分），所以对「划分本身是否泄漏」这个问题它没有答案——
+§2.4 说明了泄漏确实存在（train ∩ test 共享 43 块骨头）。本节的脚本独立回答那个问题：
+把 268 个点**合池**，按**标本**重新分折。
+
+#### 协议：它删掉的是哪三个泄漏
+
+| 泄漏 | 做法 |
+|---|---|
+| 同一块骨头出现在两侧 | **留一标本**（95 折）：每折用 94 块骨头训练，只给第 95 块的所有点打分。分组键是 `point_id` 的前缀（标本号），**不是 `sample_id`**——后者每个样本唯一，按它分组会静默退化成点级划分 |
+| 标准化用了全体统计量 | 每折的 `StandardScaler` **只在训练折的骨头上** fit（见下面「诚实记录」） |
+| 阈值是硬编码或全池拟合的 | 每折在**训练折内部**再按标本分成 `--inner-folds`（默认 5）个嵌套组，用内层 out-of-fold 分数扫阈值，再套到外层折上 |
+
+标签**不使用** `y.npy`，而是用 `--threshold-mm` 从 `depth_value` 现算
+（`label = depth_value >= thr`）。好处有三：一份池子同时回答 1.0 mm 与 1.3 mm、
+阈值成为显式参数、并且顺手自检了已存 `y.npy` 用的是哪种边界规则
+（实测：`ge 1.0` 与 `gt 0.99` 都能复现，说明没有样本恰好落在 1.0 上）。
+
+指标同时报**点级**（每个点由没见过它那块骨头的模型打分）与**标本级**
+（一块骨头的所有点分数取平均成一次判定）。**主指标是 AUC**，因为它不需要阈值；
+准确率同时给 @0.5、@折内阈值、@折内最优阈值三列，避免「哪个 0.5」的歧义。
+
+#### 四条围栏（必须一起看）
+
+| 线 | 性质 | 点 acc@折内阈值 | 点 AUC | 标本 acc | 标本 AUC |
+|---|---|---:|---:|---:|---:|
+| 多数类 | 什么都不学 | 0.545 | 0.500 | 0.568 | 0.500 |
+| 标本指纹 | **只记忆、不看信号** | 0.545 | 0.500 | 0.568 | 0.500 |
+| 本方法（`bands` 6 列） | | **0.705** | **0.776** | **0.705** | **0.798** |
+| 标本 oracle | 连标签噪声一起记住（作弊上界） | 0.854 | 0.945 | 1.000 | 1.000 |
+
+（表为 1.0 mm；1.3 mm 下地板是 0.619 / 0.611。）
+
+- **标本指纹塌回多数类地板**，这是整节最要紧的一行：在标本隔离下「记住这块骨头」
+  **没有可记的东西**，所以它的成绩必然等于多数类。而同一个对照在**已存的点级 split**
+  上值 **0.6567**——两个数字之差就是 §2.4 说的乐观偏差有多大。
+  脚本会自检这两行是否重合，重合才说明记忆通道确实被切断了（不重合会打 `[!]`）。
+- **oracle 两行是作弊上界**，不是结果。它给每块骨头喂训练集学到的先验，
+  所以标本级恒为 1.000（构造使然）；点级 0.854 才是信息：**就算把每块骨头的倾向
+  直接告诉分类器，也只能到 85.4%**，余下的是同一块骨头内部标签不一致造成的
+  ——这是标签噪声地板，任何方法都不该超过它。
+- 两个**实测出来的口径陷阱**（都在代码注释里记着，因为它们长得像真效应）：
+  - 标本指纹的兜底若用**每折训练先验**而不是全池先验，它的标本 AUC 会变成 **0.070**
+    ——读起来像「指纹比随机还差」，实际是「指纹什么都不知道」；
+  - 标本级取平均时必须 `np.round(scores, 9)`，否则浮点求和会偏离 1 ulp，
+    足以打破 ROC 的并列规则，把常数预测器的标本 AUC 从正确的 0.500 弄成 **0.615**。
+
+#### 实测（`bin/_loso_metrics/`，95 折，`--probe logistic`，`--l2 1`）
+
+| 特征 | 口径 | 点 AUC | 点 acc@折内阈值 | 标本 auc | 标本 acc | 折内阈值均值 |
+|---|---|---:|---:|---:|---:|---:|
+| `--feature-source bands`（6 列） | 1.0 mm | 0.776 | 0.705 | 0.798 | 0.705 | 0.506 |
+| `--feature-source bands`（6 列） | 1.3 mm | **0.836** | 0.769 | 0.888 | 0.842 | 0.407 |
+| `max1` + `dyn_envelope`（14 列） | 1.0 mm | **0.794** | 0.720 | 0.846 | 0.779 | 0.546 |
+| `max1` + `dyn_envelope`（14 列） | 1.3 mm | 0.780 | 0.743 | 0.843 | 0.789 | 0.471 |
+| `max1` + `full`（14 列） | 1.0 mm | 0.776 | 0.731 | 0.793 | 0.716 | 0.544 |
+| `max1` + `full`（14 列） | 1.3 mm | 0.819 | 0.806 | 0.859 | 0.811 | 0.467 |
+
+读法：
+
+- **可分性成立**：六行全部显著高于地板（AUC 0.500 / 标本 acc 0.568–0.611），
+  最好的点级 AUC 0.836。这是当前目标（§1）唯一需要证明的事。
+- **纯包络幅度就能做到**。`bands` 只有 6 列、不含任何 EMD、几秒钟跑完，在 1.3 mm 上
+  反而是第一名（0.836）。这符合物理预期：骨厚信息主要体现在**后表面回波的有无与强弱**上（§6），
+  而那正是包络幅度。EMD 没有新增量——与 §11.2–§11.4 的结论一致。
+- **不要读「谁是第一」**。1.0 mm 的第一名是 `dyn_envelope`，1.3 mm 是 `bands`，
+  两个口径下排序会翻转（差 0.002–0.06，与折间波动同量级）。可以定的结论是
+  「包络幅度带已经装下了主要信息，特征侧没有便宜的收益」。
+- **acc 不能跨口径比**（1.3 mm 的类别更不均衡，地板本身从 0.545 升到 0.619）；
+  **AUC 可以**，且 1.3 mm 在三个特征集上都更高，与 §11.1 结论二一致。
+- 折级分布也不好看但诚实：95 折里 40 折全对、4 折只有 1 个点，折准确率标准差 0.309。
+  这正是为什么主指标取 AUC 而不是「平均折准确率」。
+
+#### 与 §11.1 的关系（不要互相换算）
+
+| 口径 | 折的划分依据 | 标准化 | 阈值 | 回答的问题 |
+|---|---|---|---|---|
+| §11.1 配对 5×5 | `depth_value` 分位 | 折内 | 硬编码 / 每方案固定 | 「A 特征是否比 B 好」（配对差值） |
+| §11.7 LOSO | **标本** | 折内 | **折内嵌套拟合** | 「绝对可分性有多少」 |
+
+§11.1 的折里同样混着同一块骨头的点，所以它的**绝对值**偏乐观；
+但它用同一折集做配对比较，**「谁比谁好」的结论仍然有效**。
+两套口径服务两个问题，**要引用绝对数字只引用本节**。
+
+#### 诚实记录：折内标准化在这套探针上测不出差别
+
+代码注释里原先写着「用全池统计量标准化会把点 AUC 抬高 0.02–0.03」。
+这条在本脚本上**是错的**，实测（把 `_standardise` 换成全池统计量、其余完全不动）：
+
+| 惩罚 | 折内标准化 | 全池标准化 | ΔAUC | 概率最大差 |
+|---|---:|---:|---:|---:|
+| `--l2 1` | 0.7760 | 0.7760 | +0.0000 | 2.0e-05 |
+| `--l2 400` | 0.7780 | 0.7781 | +0.0001 | 2.1e-03 |
+
+原因是 `penalty = l2 / 训练行数`，255 行下 `l2=1` 给每个系数只加 0.004，
+而曲率量级是 255——即**基本无惩罚**，而无惩罚的逻辑回归在重标度下只是重参数化
+（系数确实变了，见概率差，但决策函数没变）。
+**规则本身仍然必须遵守**（它禁止的是「用被打分的点自己算出来的均值去标准化它」，这是定义上的错误），
+只是不能拿它当「会抬高 0.02–0.03」的实证结论来引用。文档与注释已按上表改正。
+
+#### 另一个必须写进文档的坑：宽设计下的二次探针
+
+`--probe quadratic` 把 14 列展开成 119 列，而最小的折只训练 261 行。
+此时 `--l2` 被摊到 119 个系数上，**欠惩罚**，结果会**朝下**失败：
+
+| 设计 | `--l2` | 点 AUC | 点 acc@折内阈值 |
+|---|---:|---:|---:|
+| 线性 14 列 | 1 | **0.776** | 0.731 |
+| 二次 119 列 | 1 | 0.711 | 0.616 |
+| 二次 119 列 | 400 | 0.757 | 0.672 |
+
+不写这一段，上表会被读成「非线性没有用」；它真正说的是**惩罚不对**。
+脚本在 `wide` 为真时打印 `[!]`，并把同一句解释写进 `metrics.json` 的
+`probe_diagnostics.note`——打印的告警和存档的告警必须是同一句，否则被单独引用的
+永远是那个更好看的数字。
+
+#### 用法
+
+```powershell
+# 6 列包络幅度，不依赖已存特征，几秒钟
+python run_loso_evaluation.py --feature-source bands --threshold-mm 1.0
+
+# EMD 特征 + 动态包络区域
+python run_loso_evaluation.py `
+  --feature-source emd --forms max1 --region-set dyn_envelope --threshold-mm 1.3
+
+# 二次探针（会打 wide 告警，需扫 --l2）
+python run_loso_evaluation.py `
+  --forms max1 --region-set full --probe quadratic --l2 400 --run-tag quad_l2_400
+
+# 只解析不计算
+python run_loso_evaluation.py --forms max1 --region-set full --dry-run
+```
+
+- 它把 `run_emd_experiments.build_parser()` 作为 `parents`（`conflict_handler="resolve"`），
+  所以两个脚本**不可能在特征/区域默认值上漂移**；`--forms` 只接受单一值，
+  `--region-set` 不接受 `all`（一次只评一套特征向量）。
+- 不提供 MLP 探针：epoch / 学习率 / dropout 都得在折内选，那又是可以调出好看结果的地方。
+- 输出目录（默认 `evaluation/`，本节用 `bin/_loso_metrics/`）：`config.json`、
+  `metrics.json`（含 `protocol` / `pool` / `metrics` / `fences` / `probe_diagnostics`）、
+  `folds.json`（每块骨头的阈值与分数）、`point_scores.csv`（每点一行，可自行重算指标）。
+  拒绝覆盖 `protocol.name` 不同的已有目录，需显式 `--allow-config-mismatch`。
+
+### 11.8 阈值口径与围栏对照的落地（批次 B / C）
+
+§11.1 指出「0.5 是记账约定、不是建模选择」，§2.4 指出「没有对照线的 test 准确率不可归因」。
+这两件事原来只存在于文档里，现在落到了代码——各修一处。
+
+#### 阈值口径：`--threshold-source {val,train,fixed}`
+
+原脚本把决策阈值硬编码成 0.5，于是「94.3%」里混着一个未声明的建模选择。
+现在三种候选阈值一次算清，被选中的那个用于 `decision_threshold.metrics`，
+**其余两个也一并存进 `sensitivity`**，所以单次运行就能看到口径选错要付多少代价：
+
+- `fixed` = 0.5，即不拟合；
+- `train` = 在**训练集**分数上扫（`threshold_scan`）；
+- `val` = 在**验证集**分数上扫，**默认值**（不在训练集上，也不是被打分的集合）。
+
+> 原有的 `metrics.metrics[split]` **仍然按 0.5 计算、一个字节都没动**，
+> 目的是让已存档的实验目录与训练曲线继续可比。阈值口径只影响
+> `decision_threshold` 这一块，不会让历史 `summary.json` 失去意义。
+
+实测（`--forms max1 --region-set dyn_envelope --channel-mode 1 --output-dir bin/_thr_src`，
+单次运行即得三行；第二行只把 `--seed` 换成 7）：
+
+| 运行 | `fixed` (t=0.50) | `train` | `val`（默认） | 极差 |
+|---|---:|---:|---:|---:|
+| `seed 42` | 0.657 | **0.716** (t=0.42) | 0.701 (t=0.53) | 5.9 pt |
+| `seed 7` | **0.731** | 0.687 (t=0.42) | 0.716 (t=0.32) | 4.4 pt |
+
+产物分别在 `bin/_thr_src/`（seed 42）与 `bin/_thr_src_s7/`（seed 7）。
+
+读法（两句，都不能省）：
+
+- **口径排名两次都翻转**：`seed 42` 里 `train` 最好，`seed 7` 里 `train` 最差
+  （0.716 ↔ 0.687）。所以不能下「哪个口径更好」的结论。
+- 更要紧的是**同一口径下只换 seed，准确率从 0.657 变成 0.731（7.4 pt）**，
+  比口径极差还大。也就是说**任何单次运行的准确率差异在 7 pt 以内都不可解读**
+  ——这正是 §11.1 那个配对协议存在的理由（必须同一折集做配对差值），
+  也是为什么本节只能写「口径是比特征更大的杠杆」，而不是「口径 A 优于口径 B」。
+
+#### 围栏对照：`controls` 与 `[fence]` 行
+
+`seed 42` 那一次的控制台输出：
+
+```text
+[fence] 标本重叠最大 43 块  详情 {'train|val': 27, 'train|test': 43, 'val|test': 13}
+[fence] 多数类: acc=0.537 auc=0.500
+[fence] 标本指纹(无信号): acc=0.657 auc=0.707
+[fence] 标本oracle(作弊上界): acc=0.910 auc=0.984
+[fence] 本模型: acc=0.657 auc=0.790
+[fence] 阈值口径 val t=0.525: test acc=0.701 auc=0.790
+```
+
+这六行放在一起，恰好演示了为什么 §11.7 必须存在：
+
+- **本模型 acc 0.657 正好等于标本指纹的 0.657**，而 AUC 是 0.790 对 0.707。
+  也就是说，在点级 split 上，**准确率这一列完全无法区分「学到了信号」与「记住了骨头」**；
+  唯一能分开它们的是 AUC，以及 §11.7 的标本隔离。
+- 同一份 JSON 里 `controls` 直接摆在 `metrics` 旁边（代码注释写明了理由：
+  「一个无法与多数类和标本指纹对照的 test 数字是不可归因的」），
+  并且带上了 `specimen_overlap` / `specimen_overlap_max`
+  ——§2.4 那个泄漏的**直接度量**，省得只引用好看的数。
+- **注意这些围栏算在点级 split 上**，所以指纹偏高 0.657 是**特征不是 bug**：
+  它就是泄漏本身的量。把这套对照搬到 LOSO 下（§11.7），指纹会塌回 0.545 / 0.500。
+
+`controls` 的键：`note`、`specimen_counts`、`specimen_total`、`specimen_overlap`、
+`specimen_overlap_max`、`train_prior`，以及 `train` / `val` / `test` 三个 split 下各含
+`majority_class` / `specimen_fingerprint` / `specimen_oracle` 三组完整指标。
+多分类下仍写 `controls`（三条对照对 k 类同样成立），`decision_threshold` 则为 `null`。
+
 ## 12. GUI 功能
 
 `gui_app.py` 提供 Tkinter 图形化实验查看和训练工具：
@@ -917,6 +1213,31 @@ bin/_baseline_full/
   baseline_report.txt   # 可直接阅读的对照表
   baseline_results.json # 含每个 fold 的指标与选中列
 ```
+
+严格留一标本测评输出（`run_loso_evaluation.py --output-dir bin/_loso_metrics`，见 §11.7）：
+
+```text
+bin/_loso_metrics/
+  loso_bands_thr1mm_logistic/     # 目录名自动编码 特征源 + 阈值 + 探针
+    config.json                   # 含 protocol / group_key，用于拒绝跨协议覆盖
+    metrics.json                  # config / protocol / pool / metrics / fences / probe_diagnostics
+    folds.json                    # 每块骨头的折内阈值、阈值来源、迭代次数与逐点概率
+    point_scores.csv              # 每点一行（标本、厚度、标签、概率、折内阈值、阈值来源）
+  quad_l2_1/                      # --run-tag 指定的目录名
+```
+
+> `metrics.json` 的几块各有分工，**引用时必须一起引**：`protocol` 说明三处隔离方式，
+> `pool` 记录合池行数/标本数与标签规则，`metrics.points` 与 `metrics.specimens`
+> 是点级与标本级指标，`fences` 是四条围栏线，`probe_diagnostics` 记录设计宽度
+> 以及宽设计的告警。拒绝覆盖 `protocol.name` 不同的已有目录，需 `--allow-config-mismatch`。
+
+`run_emd_experiments.py` 的 `metrics.json` 另外写入两块可追溯信息：
+
+- **`controls`**：`majority_class` / `specimen_fingerprint` / `specimen_oracle` 三条对照线
+  （与主指标在同一份划分上算出），外加 `specimen_overlap` / `specimen_overlap_max`
+  ——即 §2.4 那个泄漏的直接度量，和 `test` 指标写在一起，避免只引用好看的数；
+- **`decision_threshold`**：`value` / `source_flag` / `metrics` / `sensitivity`，
+  即 `--threshold-source {val,train,fixed}` 三种口径各自的阈值与准确率（§11.8）。
 
 > `bin/_*` 都被 `.gitignore` 的 `_*/` 匹配，属于**本地产物**，不入库；
 > 需要时用 §10.2 的命令重新生成即可。
@@ -1032,6 +1353,45 @@ python run_baseline_models.py `
 只用已有实验目录的特征（`experiments/.../features_{split}.npy`），
 **不重跑** EMD、也不写回任何训练结果。
 
+跑严格留一标本测评（用法与结果见 §11.7）：
+
+```powershell
+# 6 列包络幅度，不依赖 EMD 特征，几秒钟
+python run_loso_evaluation.py `
+  --feature-source bands `
+  --threshold-mm 1.0 `
+  --output-dir bin/_loso_metrics
+
+# EMD 特征 + 动态包络区域，1.3 mm 口径
+python run_loso_evaluation.py `
+  --feature-source emd `
+  --forms max1 `
+  --region-set dyn_envelope `
+  --threshold-mm 1.3 `
+  --output-dir bin/_loso_metrics
+
+# 二次探针（会打宽设计告警，需要扫 --l2）
+python run_loso_evaluation.py `
+  --forms max1 --region-set full `
+  --probe quadratic --l2 400 `
+  --run-tag quad_l2_400 `
+  --output-dir bin/_loso_metrics
+
+# 只解析参数、打印合池与折构成，不训练
+python run_loso_evaluation.py --forms max1 --region-set full --dry-run
+```
+
+它**不使用** `--data-dir` 的 `X.npy` 划分，而是把三个 split 合池后按标本重分折；
+`--forms` 只接受单一值（传 `all` 会被拒绝，理由见 §11.7）。
+
+切换决策阈值口径（默认 `val`，三行结果一次算清，见 §11.8）：
+
+```powershell
+python run_emd_experiments.py `
+  --forms max1 --region-set dyn_envelope --channel-mode 1 `
+  --threshold-source train
+```
+
 ## 16. 当前验证情况
 
 已完成：
@@ -1068,6 +1428,26 @@ python run_baseline_models.py `
 - 浅层基线工具链自检（§10）：对一个**纯噪声**特征集，in-sample 准确率 0.6087 而 CV 只有 0.4856，
   证明 CV 确实扣掉了乐观偏差；3 个信号列 + 3 个噪声列的合成集上 CV accuracy 0.8714 / AUC 0.9378；
   常量列的 AUC 严格等于 0.5，`ColumnSelector` 不泄露 test 集；
+- **严格 LOSO 协议的工具链自检**（`run_loso_evaluation.py`，结果见 §11.7）：
+  - 95 折全部被打分（`skipped_folds = 0`）；某折的训练折只含单一类别时该折记为
+    `skipped` 并附带原因，不静默丢点；
+  - 常数预测器的**标本级** AUC 严格等于 0.500（取值前 `np.round(scores, 9)`；
+    修好之前是 0.615——浮点求和的 1 ulp 偏差足以打破 ROC 并列规则）；
+  - 标本指纹对照在 LOSO 下与多数类**完全重合**（0.545 / 0.500），而在已存的点级 split 上
+    是 0.657 / 0.707，两个数字之差即 §2.4 那个泄漏的量；脚本会自检这一重合，不重合就告警；
+  - 折内标准化的影响被**实测**为 0.0000（`--l2 1`）与 +0.0001（`--l2 400`），
+    因此文档与代码注释不再声称它会抬高点 AUC 0.02–0.03；
+  - 二次探针在 119 列 / 261 行下的欠惩罚会打 `[!]`，且打印的告警与写进
+    `probe_diagnostics.note` 的告警是同一句；
+  - `--dry-run` 只打印合池规模与折构成，不训练、不写文件；
+- **标本级划分**（`relabel_by_thickness.py --group-by-specimen`，§2.4）：95 块骨头
+  → 57 / 15 / 24，零重叠（有任何重叠即 `RuntimeError`）；`--keep-split` 路径逐位不变；
+  2 类 / 3 类阈值方案自洽；`--dry-run` 复现 `y.npy` 并打印阈值是**包含下界**；
+- **阈值口径与围栏对照**（§11.8）：`--threshold-source` 的三种候选阈值与
+  `controls` 三条对照线随每次训练写入 `metrics.json`；二分类下
+  `decision_threshold` 是对象、多分类下为 `null`；历史 `metrics.metrics[split]`
+  仍按 0.5 计算，因此已存实验目录保持可比；同一配置换 seed（42 → 7）复测确认
+  口径排名会翻转、且单次准确率差异在 7 pt 以内不可解读；
 - 两个可视化脚本在 `dyn_envelope` 上的端到端重跑（`visualize_emd_components.py`、
   `visualize_preprocessing.py`）：均正常出图；新的 branch 标题由配置和检测结果**推导**
   （`Branch 1: main | 170 pt = 0.95 mm | 0.00185 mm/pt`，
@@ -1130,6 +1510,7 @@ python compare_label_schemes.py      # S1：配对评价协议（需要 --experi
 | 核心流水线 | `emd_pipeline.py`、`run_emd_experiments.py`、`dyn_cli.py` |
 | 浅层基线（change #3，见 §10） | `shallow_models.py`、`feature_selection.py`、`baseline_evaluation.py`、`run_baseline_models.py` |
 | 配对评价协议（S1，见 §11.1） | `compare_label_schemes.py` |
+| 严格留一标本测评（见 §11.7） | `run_loso_evaluation.py` |
 | GUI | `gui_app.py` |
 | 可视化（GUI 调用 + 文档记录） | `visualize_preprocessing.py`、`visualize_emd_components.py`、`visualize_training_curves.py`、`visualize_confusion_matrix.py`、`visualize_error_by_thickness.py` |
 | 自检回归 | `verify_dyn_envelope.py`、`verify_mlp_gradients.py`、`verify_channel_aggregation.py`、`verify_channel_contrast.py`、`verify_branch_ratio.py`、`verify_emd_features.py`、`verify_scalers.py` |
@@ -1159,6 +1540,9 @@ python compare_label_schemes.py      # S1：配对评价协议（需要 --experi
   `scheme@scaler[cols]` 交叉，后者只按 scheme 分组；结论与 §11.1 一致，保留用于比对）
 - `bin/_s3b_replay/`（S3b 验证时手工重放旧实验产物用的目录 + `_compare.py` 逐位比对脚本）
 - `bin/_stack_dim/`（§11.5 全选项叠加的维度核对）
+- `bin/_loso_metrics/`（§11.7 的 6 次严格 LOSO 测评产物，含 `folds.json` / `point_scores.csv`）、
+  `bin/_thr_src/`、`bin/_thr_src_s7/`（§11.8 阈值口径与围栏对照的两次单次运行，
+  两者只差 `--seed` 42 / 7，用于证明口径排名会翻转）
 - `bin/_ab_run.ps1`（驱动 A/B 扫描的 PowerShell 脚本；**是文件不是目录**，仍被 git 跟踪）
 - `bin/_gui_dataset/`、`bin/_kclass_check/`、`bin/_relabel_check/`（2026-09-22 多数据集选择器与
   k 分类重构的无头冒烟/校验脚本，外加按厚度重标注的校验数据集 `_relabel_check/cls3/`；
