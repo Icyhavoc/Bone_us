@@ -10,12 +10,10 @@ the pool from the existing splits -- the upstream dataset
 every sample from the thresholds given on the command line, and writes a fresh
 dataset directory that ``emd_pipeline.load_split`` can read unchanged.
 
-Thresholds are **inclusive lower bounds** (``numpy.digitize`` semantics):
+Thresholds are **exclusive lower bounds** (``numpy.digitize`` semantics):
 with ``--thresholds 1.0`` a sample is class 1 iff ``depth >= 1.0``, which is
-exactly the rule the stored ``y.npy`` was built with -- verified by reproducing
-``y.npy`` bit for bit with ``>=`` (the ``>`` convention disagrees on the samples
-whose depth sits exactly on the threshold).  Two thresholds give three classes,
-and more thresholds generalise to more classes.
+exactly the rule the stored ``y.npy`` was built with.  Two thresholds give
+three classes, and more thresholds generalise to more classes.
 
 Nothing is written unless ``--output-dir`` is given; ``--dry-run`` (the
 default when no output directory is passed) prints the class balance instead.
@@ -224,47 +222,6 @@ def parse_thresholds(text: str) -> LabelScheme:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
-# ``keep_source_split`` only relabels; the sample-to-split assignment is the
-# source dataset's.  It therefore has to be distinguishable from a stratified
-# re-split of the very same thresholds, hence the suffix below.
-KEEP_SPLIT_METHOD = "keep_source_split"
-KEEP_SPLIT_TAG_SUFFIX = "_keepsplit"
-# ``stratified_group_split`` keeps the thresholds but assigns whole specimens.
-# Same reasoning: identical thresholds, different membership, so a distinct tag.
-GROUP_SPLIT_METHOD = "stratified_group_split"
-GROUP_SPLIT_TAG_SUFFIX = "_group"
-GROUP_KEY_METHOD = "specimen"
-
-# The specimen a sample belongs to is the first underscore-separated field of
-# ``point_id`` (e.g. ``N20_P2_01`` -> ``N20``).  ``sample_id`` is NOT suitable:
-# it is a per-sample unique key, so grouping on it would reproduce the
-# point-level split exactly and silently defeat the whole point of the flag.
-SPECIMEN_FIELD_INDEX = 0
-
-
-def dataset_tag(scheme: LabelScheme, method: str) -> str:
-    """Tag that every downstream artefact name is derived from.
-
-    The tag is written into ``label_scheme.json`` and, from there, propagated as
-    a suffix: ``experiments/<name>__<tag>``, ``visualizations/<kind>/<tag>/`` and
-    the ``__<tag>`` figure-name suffix.  ``--keep-split`` and the stratified
-    re-split must therefore not share a tag.  They describe identical thresholds
-    and identical samples, but they put 158 of the 268 samples into a different
-    split, so an identical tag makes ``run_emd_experiments.py`` write both into
-    the same directory (``mkdir(exist_ok=True)``, no overwrite guard) and
-    silently keep only the second one.
-
-    ``--group-by-specimen`` needs its own suffix for exactly the same reason:
-    it is the only method that guarantees the val/test specimens are unseen.
-    """
-
-    if method == KEEP_SPLIT_METHOD:
-        return f"{scheme.tag}{KEEP_SPLIT_TAG_SUFFIX}"
-    if method == GROUP_SPLIT_METHOD:
-        return f"{scheme.tag}{GROUP_SPLIT_TAG_SUFFIX}"
-    return scheme.tag
-
-
 # --------------------------------------------------------------------------
 # Stratified re-split
 # --------------------------------------------------------------------------
@@ -349,155 +306,6 @@ def keep_split_assignment(pool: SamplePool) -> dict[str, np.ndarray]:
 
 
 # --------------------------------------------------------------------------
-# Specimen-grouped re-split
-# --------------------------------------------------------------------------
-
-
-def specimen_ids(pool: SamplePool) -> np.ndarray:
-    """Specimen (bone) id of every pool sample, read from ``point_id``.
-
-    ``point_id`` looks like ``N20_P2_01``: ``N20`` is the bone, ``P2`` the
-    probe position and ``01`` the repeat.  Only the first field identifies the
-    specimen, which is the unit that must not straddle a split -- the same
-    bone re-probed at another position shares its coupling, its gel layer and
-    its gain, so a point-level split lets the model memorise the bone instead
-    of measuring the thickness.
-
-    ``sample_id`` would be useless here because it is unique per sample; using
-    it would produce one group per sample and silently collapse this back into
-    a point-level split.  Both degenerate cases are therefore rejected rather
-    than accepted quietly.
-    """
-
-    keys: list[str] = []
-    for index, record in enumerate(pool.records):
-        text = str(record.get("point_id") or "").strip()
-        if not text:
-            raise ValueError(
-                f"pool row {index} has no 'point_id'; cannot derive a specimen id"
-            )
-        field = text.split("_")[SPECIMEN_FIELD_INDEX].strip()
-        if not field:
-            raise ValueError(f"pool row {index}: point_id {text!r} has an empty specimen field")
-        keys.append(field)
-    groups = np.asarray(keys, dtype=object)
-    unique = np.unique(groups)
-    if unique.size < 2:
-        raise ValueError(f"only one specimen id ({unique.tolist()}) in the pool; nothing to group")
-    if unique.size == groups.size:
-        raise ValueError(
-            f"every sample has its own specimen id ({unique.size} groups for "
-            f"{groups.size} samples); the grouped split would be identical to a "
-            "point-level split"
-        )
-    return groups
-
-
-def specimen_labels(
-    labels: np.ndarray, groups: np.ndarray, num_classes: int | None = None
-) -> dict[str, int]:
-    """Majority label of each specimen, used only to stratify the group split.
-
-    The rule is "most frequent label; ties go to the higher class".  With two
-    classes this is exactly ``mean >= 0.5 -> 1``, the convention the analysis
-    uses when it collapses point labels to the specimen level, so the split and
-    the metrics agree on which bones count as positive.
-
-    ``num_classes`` only sizes the histogram; it is derived from ``labels`` when
-    omitted.  Note that the result must NOT be hardcoded to ``{0, 1}``: a
-    three-class scheme has specimens whose majority label is 2.
-    """
-
-    labels = np.asarray(labels, dtype=np.int64).ravel()
-    groups = np.asarray(groups, dtype=object).ravel()
-    if labels.size != groups.size:
-        raise ValueError("labels and groups must have the same length")
-    width = int(num_classes) if num_classes is not None else int(labels.max()) + 1
-    out: dict[str, int] = {}
-    for group in np.unique(groups):
-        counts = np.bincount(labels[groups == group], minlength=width)
-        # Highest label among the tied maxima, which is what gives the
-        # documented tie-break for the two-class case.
-        out[str(group)] = int(np.flatnonzero(counts == counts.max()).max())
-    return out
-
-
-def stratified_group_split(
-    labels: np.ndarray,
-    groups: np.ndarray,
-    ratios: Sequence[float],
-    seed: int,
-    num_classes: int,
-    min_per_split: int = 1,
-    allow_small_classes: bool = False,
-) -> dict[str, np.ndarray]:
-    """Assign **whole specimens** to splits, stratified on the specimen label.
-
-    This is the only split here that makes val/test honest: a specimen lands in
-    exactly one split, so the model cannot recognise a bone it has already
-    seen.  The reference numbers on this dataset are 0.537 for the majority
-    class and 0.657 for a predictor that reads the specimen identity and no
-    signal at all -- a point-level split cannot beat the second number, because
-    the training specimens reappear in test.
-
-    Stratification is on the specimen's majority label, so the *specimen*
-    counts follow the requested ratios.  Because specimens differ in how many
-    points they contribute, the point-level ratios are only approximately
-    reproduced; both are reported downstream.
-    """
-
-    labels = np.asarray(labels, dtype=np.int64).ravel()
-    groups = np.asarray(groups, dtype=object).ravel()
-    if labels.size != groups.size:
-        raise ValueError("labels and groups must have the same length")
-    group_label = specimen_labels(labels, groups, num_classes)
-    known = np.asarray(sorted(group_label), dtype=object)
-    rng = np.random.default_rng(seed)
-    assignment = np.full(labels.size, "", dtype="<U5")
-    report: list[dict[str, Any]] = []
-    for label in range(int(num_classes)):
-        members = np.asarray(
-            [group for group in known if group_label[str(group)] == label], dtype=object
-        )
-        if members.size == 0:
-            continue
-        counts = allocate_counts(int(members.size), ratios)
-        smallest = min(counts[1:])
-        if smallest < min_per_split and not allow_small_classes:
-            raise ValueError(
-                f"class {label} has only {members.size} specimens; the grouped split would give "
-                f"{tuple(counts)} (val/test need >= {min_per_split} specimens each). Lower the "
-                "thresholds range, use fewer classes, or pass --allow-small-classes to write it "
-                "anyway."
-            )
-        shuffled = rng.permutation(members.size)
-        cursor = 0
-        for split_name, count in zip(SPLITS, counts):
-            for group in members[shuffled[cursor : cursor + count]]:
-                assignment[groups == group] = split_name
-            cursor += count
-        report.append(
-            {"label": int(label), "specimen_count": int(members.size), "counts": counts}
-        )
-    if (assignment == "").any():
-        raise RuntimeError("internal error: some pool rows were not assigned to a split")
-    # Specimen isolation is this function's entire contract.  It holds by
-    # construction; the check is here so that a future edit cannot break it
-    # without the run failing loudly.
-    for index, first in enumerate(SPLITS):
-        for second in SPLITS[index + 1 :]:
-            shared = set(np.unique(groups[assignment == first])) & set(
-                np.unique(groups[assignment == second])
-            )
-            if shared:
-                raise RuntimeError(
-                    f"{len(shared)} specimens appear in both {first} and {second}: {sorted(shared)[:5]}"
-                )
-    return {split: np.flatnonzero(assignment == split) for split in SPLITS}
-
-
-
-# --------------------------------------------------------------------------
 # Writing the relabelled dataset
 # --------------------------------------------------------------------------
 
@@ -526,14 +334,11 @@ def _check_output_dir(output_dir: Path, source_dir: Path, overwrite: bool) -> Pa
 
 
 def _summarise_assignment(
-    labels: np.ndarray,
-    assignment: dict[str, np.ndarray],
-    ratios: Sequence[float],
-    groups: np.ndarray | None = None,
+    labels: np.ndarray, assignment: dict[str, np.ndarray], ratios: Sequence[float]
 ) -> dict[str, Any]:
     counts = {split: int(assignment[split].size) for split in SPLITS}
     total = sum(counts.values())
-    summary: dict[str, Any] = {
+    return {
         "sample_counts": counts,
         "actual_ratios": {split: counts[split] / total for split in SPLITS},
         "requested_ratios": {split: float(ratio) for split, ratio in zip(SPLITS, ratios)},
@@ -545,62 +350,6 @@ def _summarise_assignment(
             for split in SPLITS
         },
     }
-    if groups is None:
-        return summary
-    # Specimen view.  ``overlap`` is the number that matters: with a point-level
-    # split it runs into the tens, and every one of those bones is a leak.
-    group_sets = {split: set(np.unique(groups[assignment[split]])) for split in SPLITS}
-    counts_groups = {split: len(group_sets[split]) for split in SPLITS}
-    total_groups = sum(counts_groups.values())
-    summary["group_key"] = GROUP_KEY_METHOD
-    summary["group_counts"] = counts_groups
-    summary["group_actual_ratios"] = {
-        split: counts_groups[split] / total_groups for split in SPLITS
-    }
-    summary["group_total"] = total_groups
-    summary["group_overlap"] = {
-        f"{first}|{second}": len(group_sets[first] & group_sets[second])
-        for index, first in enumerate(SPLITS)
-        for second in SPLITS[index + 1 :]
-    }
-    summary["group_overlap_max"] = max(summary["group_overlap"].values(), default=0)
-    summary["mixed_label_groups"] = int(
-        sum(
-            1
-            for group in np.unique(groups)
-            if np.unique(labels[groups == group]).size > 1
-        )
-    )
-    # Specimen-level class counts, using the same majority rule (ties to the
-    # higher class) that the grouped split stratifies on and that the analysis
-    # uses when it collapses point labels to the specimen level.
-    labels_by_group = specimen_labels(labels, groups)
-    summary["group_class_distribution"] = {
-        split: {
-            str(int(label)): int(
-                sum(1 for group in group_sets[split] if labels_by_group[str(group)] == label)
-            )
-            for label in np.unique(labels)
-        }
-        for split in SPLITS
-    }
-    return summary
-
-
-
-def _try_specimen_ids(pool: SamplePool) -> tuple[np.ndarray | None, str | None]:
-    """Specimen ids, or ``(None, reason)`` when they cannot be derived.
-
-    The grouped split is the only consumer that *needs* them, so a dataset
-    without a usable ``point_id`` should still be writable by the other two
-    methods -- but the metadata then has to say why the overlap was not
-    measured, instead of quietly omitting the field.
-    """
-
-    try:
-        return specimen_ids(pool), None
-    except ValueError as exc:
-        return None, str(exc)
 
 
 def write_dataset(
@@ -617,12 +366,8 @@ def write_dataset(
     """Write ``train/val/test`` in the layout ``emd_pipeline.load_split`` reads."""
 
     report = describe_pool(pool, scheme)
-    # Measured for every method, not just the grouped one: the specimen overlap
-    # of a point-level split is the leak that makes its test numbers
-    # uninterpretable, and it belongs in the artefact rather than in a comment.
-    groups, group_error = _try_specimen_ids(pool)
-    summary = _summarise_assignment(labels, assignment, ratios, groups)
-    tag = dataset_tag(scheme, method)
+    tag = scheme.tag + ("_keepsplit" if method == "keep_source_split" else "")
+    summary = _summarise_assignment(labels, assignment, ratios)
     rows: list[dict[str, Any]] = []
 
     for split in SPLITS:
@@ -663,39 +408,14 @@ def write_dataset(
         **{split: np.asarray(assignment[split], dtype=np.int64) for split in SPLITS},
     )
 
-    grouped = method == GROUP_SPLIT_METHOD
-    if grouped:
-        grouping_note = (
-            f"；已按骨头编号（point_id 第一段，{summary.get('group_total')} 块）整体分组，"
-            "val/test 标本与 train 零重叠，指标即为未见标本上的指标。"
-        )
-    elif summary.get("group_overlap_max") is not None:
-        grouping_note = (
-            "；未按骨头编号分组。"
-            f"标本重叠：train|test={summary['group_overlap'].get('train|test')}、"
-            f"train|val={summary['group_overlap'].get('train|val')}、"
-            f"val|test={summary['group_overlap'].get('val|test')}"
-            "（这些标本的耦合/增益特征在划分间共享，会使 val/test 指标偏乐观）。"
-        )
-    else:
-        grouping_note = f"；未按骨头编号分组（无法统计重叠：{group_error}）。"
-
     metadata = {
         "method": method,
-        "tag": tag,
-        "group_by_bone": bool(grouped),
-        "group_key": GROUP_KEY_METHOD,
-        "group_error": group_error,
+        "group_by_bone": False,
         "description": (
             f"按骨头厚度阈值 {list(scheme.thresholds)} mm 重新定义标签后"
-            + (
-                "沿用原 train/val/test 归属"
-                if method == KEEP_SPLIT_METHOD
-                else "按标本整体分层划分"
-                if grouped
-                else "按新标签分层随机划分"
-            )
-            + grouping_note
+            + ("沿用原 train/val/test 归属" if method == "keep_source_split"
+               else "按新标签分层随机划分")
+            + "；未按骨头编号分组。"
         ),
         "thresholds_mm": list(scheme.thresholds),
         "threshold_rule": "class = digitize(depth_value, thresholds); thresholds are inclusive lower bounds",
@@ -733,9 +453,7 @@ def write_dataset(
     )
     _write_manifest(output_dir / "manifest.csv", rows)
     (output_dir / "README.txt").write_text(
-        _readme_text(
-            scheme, report, summary, output_dir, source_dir, seed, ratios, method, tag
-        ),
+        _readme_text(scheme, report, summary, output_dir, source_dir, seed, ratios, method),
         encoding="utf-8",
     )
     return {"metadata": metadata, "rows": rows}
@@ -761,24 +479,6 @@ def _write_manifest(path: Path, rows: list[dict[str, Any]]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _method_text(method: str) -> str:
-    """Human-readable name of a split method, for README/metadata."""
-
-    return {
-        KEEP_SPLIT_METHOD: "沿用原 train/val/test 归属，仅重贴标签",
-        GROUP_SPLIT_METHOD: "按标本（骨头）整体分层划分，同一块骨头的全部采样点只进一个集合",
-    }.get(method, "按新标签分层随机划分")
-
-
-def _method_flag(method: str) -> str:
-    """The CLI flag that reproduces ``method``, as a string ready to append."""
-
-    return {
-        KEEP_SPLIT_METHOD: " --keep-split",
-        GROUP_SPLIT_METHOD: " --group-by-specimen",
-    }.get(method, "")
-
-
 def _readme_text(
     scheme: LabelScheme,
     report: dict[str, Any],
@@ -788,7 +488,6 @@ def _readme_text(
     seed: int,
     ratios: Sequence[float],
     method: str,
-    tag: str,
 ) -> str:
     thresholds = ", ".join(_format_number(value) for value in scheme.thresholds)
     lines = [
@@ -798,12 +497,6 @@ def _readme_text(
         f"标签规则：depth_value 是骨头厚度（源表 '总厚度' 列，单位 mm，与 896 点采集深度轴无关）。",
         f"阈值取下界（包含）：label = digitize(depth_value, [{thresholds}])。",
         "",
-        f"数据集标签 tag：{tag}",
-        f"  下游目录名/文件名都会追加这个后缀（experiments/<名字>__{tag}、",
-        f"  visualizations/<类型>/{tag}/），所以换数据集不会覆盖另一份结果。",
-        f"  注意 --keep-split 的 tag 带 {KEEP_SPLIT_TAG_SUFFIX} 后缀：它和分层重划用同一组阈值，",
-        "  但 268 个样本里有 158 个落在不同的 split，必须分开存放。",
-        "",
     ]
     for entry in report["per_class"]:
         lines.append(
@@ -812,8 +505,8 @@ def _readme_text(
         )
     lines += [
         "",
-        f"划分方法：{_method_text(method)}",
-        f"是否按骨头分组：{'是' if method == GROUP_SPLIT_METHOD else '否'}",
+        f"划分方法：{'沿用原 train/val/test 归属，仅重贴标签' if method == 'keep_source_split' else '按新标签分层随机划分'}",
+        "是否按骨头分组：否",
         f"随机种子：{seed}",
         "目标比例：train={:.2f}%, val={:.2f}%, test={:.2f}%".format(*[r * 100 for r in ratios]),
         "",
@@ -823,29 +516,6 @@ def _readme_text(
         per_class = summary["class_distribution"][split]
         detail = " / ".join(f"label {key}: {value}" for key, value in sorted(per_class.items()))
         lines.append(f"- {split}: {summary['sample_counts'][split]}（{detail}）")
-    if summary.get("group_counts") is not None:
-        lines += ["", "实际标本数（point_id 第一段）："]
-        for split in SPLITS:
-            lines.append(f"- {split}: {summary['group_counts'][split]}")
-        overlap = summary.get("group_overlap", {})
-        worst = summary.get("group_overlap_max")
-        lines += [
-            f"- 各类标本重叠：train|test={overlap.get('train|test')}、"
-            f"train|val={overlap.get('train|val')}、val|test={overlap.get('val|test')}",
-        ]
-        if worst:
-            lines.append(
-                f"- [!] 有 {worst} 块骨头同时出现在两个集合里：这些骨头的耦合/增益特征会被"
-                "模型记住，val/test 指标因此偏乐观，不能当作未见标本上的性能。"
-            )
-        else:
-            lines.append("- [ok] 三集合的骨块零重叠：val/test 均为未见标本。")
-        mixed = summary.get("mixed_label_groups")
-        if mixed:
-            lines.append(
-                f"- 说明：{mixed} 块骨头本身含多种厚度标签（同一根骨不同测点跨阈值），"
-                "标本级指标按多数标签折叠。"
-            )
     lines += [
         "",
         "每个子目录均包含 X.npy、y.npy、indices.npy 和 samples.json。",
@@ -860,7 +530,7 @@ def _readme_text(
         f"python raw_data/relabel_by_thickness.py --thresholds {thresholds} "
         f"--output-dir {output_dir} --seed {seed} "
         f"--ratios {' '.join(f'{r:g}' for r in ratios)}"
-        + _method_flag(method),
+        + ("" if method != "keep_source_split" else " --keep-split"),
         "",
         "训练（示例）：",
         f"python run_emd_experiments.py --data-dir {output_dir} --forms top3_mean \\",
@@ -915,8 +585,7 @@ def describe_pool(pool: SamplePool, scheme: LabelScheme) -> dict[str, Any]:
 
 def format_report(report: dict[str, Any]) -> str:
     lines = [
-        f"阈值 (inclusive lower bound, depth >= thr): "
-        f"{', '.join(_format_number(v) for v in report['thresholds'])}"
+        f"阈值 (exclusive lower bound): {', '.join(_format_number(v) for v in report['thresholds'])}"
         f"  ->  {report['num_classes']} 类",
         f"样本总数: {report['total_samples']}  厚度范围: "
         f"{report['depth_range'][0]:.3f} - {report['depth_range'][1]:.3f} mm",
@@ -968,13 +637,6 @@ def build_parser() -> argparse.ArgumentParser:
             "  python raw_data/relabel_by_thickness.py --thresholds 1.0,2.0 --dry-run\n"
             "  python raw_data/relabel_by_thickness.py --thresholds 1.3 "
             "--output-dir raw_data_relabeled/1.3\n"
-            "  python raw_data/relabel_by_thickness.py --thresholds 1.3 "
-            "--group-by-specimen --output-dir raw_data_relabeled/1.3_group\n"
-            "\n"
-            "划分方式（三选一）:\n"
-            "  默认                按标签分层随机划分（点级，val/test 会混入训练标本）\n"
-            "  --group-by-specimen  按骨头整体划分（val/test 为未见标本，推荐用于报指标）\n"
-            "  --keep-split         沿用上游划分，仅重贴标签（用于与历史结果对比）\n"
         ),
     )
     parser.add_argument(
@@ -1010,25 +672,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=list(DEFAULT_RATIOS),
         help="train/val/test 目标比例，默认 0.6 0.15 0.25",
     )
-    split_group = parser.add_mutually_exclusive_group()
-    split_group.add_argument(
+    parser.add_argument(
         "--keep-split",
         action="store_true",
-        help=(
-            "不重新划分，沿用现有 train/val/test 归属，只按新阈值重贴标签。"
-            f"此时 label_scheme.json 的 tag 会追加 '{KEEP_SPLIT_TAG_SUFFIX}'，"
-            "避免与同阈值的分层重划共用实验目录"
-        ),
-    )
-    split_group.add_argument(
-        "--group-by-specimen",
-        action="store_true",
-        help=(
-            "按标本（骨头）整体划分：同一块骨头的全部采样点只进一个集合。"
-            "这是唯一能让 val/test 成为'未见标本'的划分方式，"
-            "因为同一根骨的不同测点共享耦合、凝胶层与增益，点级划分会让模型记住骨头而不是量厚度。"
-            f"此时 label_scheme.json 的 tag 会追加 '{GROUP_SPLIT_TAG_SUFFIX}'。"
-        ),
+        help="不重新划分，沿用现有 train/val/test 归属，只按新阈值重贴标签",
     )
     parser.add_argument(
         "--min-per-split",
@@ -1092,29 +739,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("\n（未给出 --output-dir：仅预览统计，未写出任何文件）")
         return 0
 
-    if args.keep_split:
-        assignment = keep_split_assignment(pool)
-        method = KEEP_SPLIT_METHOD
-    elif args.group_by_specimen:
-        assignment = stratified_group_split(
-            labels,
-            specimen_ids(pool),
-            args.ratios,
-            args.seed,
-            scheme.num_classes,
-            min_per_split=args.min_per_split,
-            allow_small_classes=args.allow_small_classes,
-        )
-        method = GROUP_SPLIT_METHOD
-    else:
-        assignment = stratified_split(
+    assignment = (
+        keep_split_assignment(pool)
+        if args.keep_split
+        else stratified_split(
             labels,
             args.ratios,
             args.seed,
             min_per_split=args.min_per_split,
             allow_small_classes=args.allow_small_classes,
         )
-        method = "stratified_random_split"
+    )
+    method = "keep_source_split" if args.keep_split else "stratified_random_split"
     result = write_dataset(
         pool,
         scheme,
@@ -1130,22 +766,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     summary = result["metadata"]
     print("")
     print(f"已写出：{args.output_dir.resolve()}")
-    print(f"  数据集 tag：{summary['tag']}")
     for split in SPLITS:
-        extra = ""
-        if summary.get("group_counts") is not None:
-            extra = f"  标本 {summary['group_counts'][split]}"
         print(
             f"  {split}: {summary['sample_counts'][split]}  "
-            f"{summary['class_distribution'][split]}{extra}"
+            f"{summary['class_distribution'][split]}"
         )
-    if summary.get("group_counts") is not None:
-        worst = summary["group_overlap_max"]
-        if worst:
-            print(f"  [!] 标本重叠最大 {worst} 块（train|test={summary['group_overlap']['train|test']}）"
-                  " -> 该划分下 test 指标含标本记忆成分")
-        else:
-            print("  [ok] 三集合标本零重叠 -> val/test 为未见标本")
     print("  （阈值规则：label = digitize(depth_value, thresholds)，阈值为下界）")
     return 0
 

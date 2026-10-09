@@ -390,6 +390,8 @@ def main() -> None:
             continue
         # A 3-class run must never be drawn into (or overwrite) the historical
         # binary image of the same form/region/channel combination.
+        if config.get("feature_layout") != "core":
+            continue
         if config_label_scheme_tag(config) != dataset_tag:
             continue
         form = str(config.get("form", ""))
@@ -409,6 +411,7 @@ def main() -> None:
             f"channels_{_safe_name(channel)}__split_{args.split}"
         )
         label_tag = payload["label_tag"]
+        file_name = f"{file_name}__core"
         if label_tag:
             file_name = f"{file_name}__{_safe_name(label_tag)}"
         file_name = f"{file_name}.png"
@@ -431,7 +434,7 @@ def main() -> None:
         )
         generated += 1
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "selection_manifest.json").write_text(
+    (output_dir / "selection_manifest_core.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )
     print(f"Confusion matrix visualizations written to {output_dir} ({generated} files)")

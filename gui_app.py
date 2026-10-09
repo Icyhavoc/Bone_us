@@ -57,7 +57,7 @@ REGION_LABELS = {
     "all": "全部区域组合",
     "full": "0-5 mm",
     "bone": "1-3 mm",
-    "bone_plus_post": "1-3 mm + 3-5 mm",
+    "bone_plus_post": "0.2-1.5 mm + 1.5-5 mm",
     "dyn_envelope": "Dynamic Envelope",
     "custom": "自定义区域",
 }
@@ -174,59 +174,6 @@ def _metric(metrics: dict[str, Any], key: str) -> str:
     return str(value)
 
 
-def _best_history_info(
-    history: list[dict[str, Any]], min_delta: float = 1e-4
-) -> tuple[int | None, int | None]:
-    """Return best epoch and last epoch, matching the training checkpoint rule."""
-
-    if not history:
-        return None, None
-    best_record = None
-    best_auc = float("-inf")
-    best_loss = float("inf")
-    for record in history:
-        auc_value = record.get("val_auc")
-        auc = float("-inf") if auc_value is None else float(auc_value)
-        loss = float(record.get("val_loss", float("inf")))
-        improved = auc > best_auc + min_delta
-        if not improved and auc == best_auc and loss < best_loss - min_delta:
-            improved = True
-        if improved:
-            best_record = record
-            best_auc = auc
-            best_loss = loss
-    best_epoch = None if best_record is None else int(best_record.get("epoch", 0))
-    return best_epoch, int(history[-1].get("epoch", 0))
-
-
-def _row_num_classes(config: Any, metrics: Any) -> int:
-    """Class count of a saved run, defaulting to the historical binary pair.
-
-    Newer ``config.json``/``metrics.json`` files record ``num_classes``
-    directly; older binary runs only carry the ``tn``/``fp``/``fn``/``tp``
-    quadruple, which is why the fallback is 2 rather than an error.
-    """
-
-    if isinstance(config, dict) and config.get("num_classes") is not None:
-        try:
-            return max(2, int(config["num_classes"]))
-        except (TypeError, ValueError):
-            pass
-    if isinstance(metrics, dict):
-        if metrics.get("num_classes") is not None:
-            try:
-                return max(2, int(metrics["num_classes"]))
-            except (TypeError, ValueError):
-                pass
-        for block in metrics.values():
-            if not isinstance(block, dict):
-                continue
-            matrix = block.get("confusion_matrix")
-            if isinstance(matrix, (list, tuple)) and len(matrix) >= 2:
-                return len(matrix)
-    return 2
-
-
 class ExperimentCatalog:
     """Read summary/metric files and find matching generated image files.
 
@@ -245,7 +192,6 @@ class ExperimentCatalog:
         self.experiments_dir = experiments_dir
         self.visualizations_dir = visualizations_dir
         self.dataset = dataset
-        self.summary: dict[str, Any] = {}
         self.rows: list[dict[str, Any]] = []
 
     def set_dataset(self, dataset: DatasetProfile | None) -> None:
@@ -268,26 +214,26 @@ class ExperimentCatalog:
         return root if tag is None else root / tag
 
     def reload(self) -> None:
-        self.summary = _read_json(self.experiments_dir / "summary.json", {})
-        summary_results = self.summary.get("results", {})
         rows: list[dict[str, Any]] = []
-        if self.experiments_dir.exists():
-            directories = sorted(p for p in self.experiments_dir.iterdir() if p.is_dir())
-        else:
-            directories = []
+        directories = (
+            sorted(path for path in self.experiments_dir.iterdir() if path.is_dir())
+            if self.experiments_dir.exists()
+            else []
+        )
         for directory in directories:
             config = _read_json(directory / "config.json", {})
-            metrics_file = _read_json(directory / "metrics.json", {})
-            history = _read_json(directory / "history.json", [])
-            summary_item = summary_results.get(directory.name, {})
-            summary_metrics = summary_item.get("metrics", {})
-            metrics = summary_metrics or metrics_file.get("metrics", {})
-            if not metrics:
+            if not isinstance(config, dict) or config.get("feature_layout") != "core":
                 continue
-            mlp_config = config.get("mlp", {})
-            min_delta = float(mlp_config.get("min_delta", 1e-4)) if isinstance(mlp_config, dict) else 1e-4
-            fallback_best_epoch, fallback_trained_epochs = _best_history_info(history, min_delta)
-            label_scheme = config.get("label_scheme") if isinstance(config, dict) else None
+            report = _read_json(directory / "metrics.json", {})
+            if not isinstance(report, dict):
+                continue
+            metrics = report.get("metrics")
+            if not isinstance(metrics, dict) or not metrics:
+                continue
+            history = _read_json(directory / "history.json", [])
+            if not isinstance(history, list):
+                history = []
+            label_scheme = config.get("label_scheme")
             rows.append(
                 {
                     "name": directory.name,
@@ -295,40 +241,18 @@ class ExperimentCatalog:
                     "label_tag": label_scheme_tag(
                         label_scheme if isinstance(label_scheme, dict) else None
                     ),
-                    "num_classes": _row_num_classes(config, metrics),
-                    "form": config.get("form", self._parse_name(directory.name, "form")),
-                    "region": config.get(
-                        "region_name", self._parse_name(directory.name, "region")
-                    ),
-                    "channel": str(
-                        config.get("channel_mode", self._parse_name(directory.name, "channel"))
-                    ),
-                    "feature_dim": metrics_file.get(
-                        "feature_dim", summary_item.get("feature_dim", "-")
-                    ),
-                    "best_epoch": metrics_file.get(
-                        "best_epoch", summary_item.get("best_epoch", fallback_best_epoch)
-                    ),
-                    "trained_epochs": metrics_file.get(
-                        "trained_epochs", summary_item.get("trained_epochs", fallback_trained_epochs)
-                    ),
+                    "num_classes": int(config["num_classes"]),
+                    "form": str(config["form"]),
+                    "region": str(config["region_name"]),
+                    "channel": str(config["channel_mode"]),
+                    "feature_dim": report["feature_dim"],
+                    "best_epoch": report["best_epoch"],
+                    "trained_epochs": report["trained_epochs"],
                     "history": history,
                     "metrics": metrics,
                 }
             )
         self.rows = rows
-
-    @staticmethod
-    def _parse_name(name: str, part: str) -> str:
-        if part == "form":
-            match = re.search(r"^form_(.*?)__regions_", name)
-            return match.group(1) if match else ""
-        if part == "region":
-            match = re.search(r"__regions_(.*?)__channels_", name)
-            return match.group(1) if match else ""
-        # The name may carry a trailing aggregation suffix (``__pooled``).
-        match = re.search(r"__channels_(\d+)", name)
-        return match.group(1) if match else ""
 
     def filtered_rows(self, form: str, region: str, channel: str) -> list[dict[str, Any]]:
         rows = self.rows
@@ -432,7 +356,7 @@ class ExperimentCatalog:
         tag = self._dataset_tag
         suffix = "" if tag is None else f"__{tag}"
         pattern = (
-            f"form_{form_part}__regions_{region_part}__channels_{channel_part}{suffix}.png"
+            f"form_{form_part}__regions_{region_part}__channels_{channel_part}__core{suffix}.png"
         )
         return sorted(root.glob(pattern))
 
@@ -449,7 +373,7 @@ class ExperimentCatalog:
         suffix = "" if tag is None else f"__{tag}"
         pattern = (
             f"form_{form_part}__regions_{region_part}__channels_{channel_part}"
-            f"__split_{split}{suffix}.png"
+            f"__split_{split}__core{suffix}.png"
         )
         return sorted(root.glob(pattern))
 
@@ -459,7 +383,7 @@ class ExperimentCatalog:
         root = self._kind_root("confusion_matrices")
         pattern = re.compile(
             rf"^form_(?P<form>.+?)__regions_(?P<region>.+?)"
-            rf"__channels_(?P<channel>[123])__split_{re.escape(split)}(?:__.+)?\.png$"
+            rf"__channels_(?P<channel>[123])__split_{re.escape(split)}__core(?:__.+)?\.png$"
         )
         options: dict[str, Path] = {}
         if not root.exists():
@@ -475,41 +399,6 @@ class ExperimentCatalog:
             options[key] = path
         return options
 
-    def error_by_thickness_files(self, form: str, region: str, channel: str) -> list[Path]:
-        root = self._kind_root("error_by_thickness")
-        if not root.exists():
-            return []
-        form_part = "*" if form == "all" else form
-        region_part = "*" if region == "all" else region
-        channel_part = "*" if channel == "all" else channel
-        tag = self._dataset_tag
-        suffix = "" if tag is None else f"__{tag}"
-        pattern = (
-            f"form_{form_part}__regions_{region_part}__channels_{channel_part}{suffix}.png"
-        )
-        return sorted(root.glob(pattern))
-
-    def error_by_thickness_options(self) -> dict[str, Path]:
-        """Return all generated thickness-vs-error charts for the target selector."""
-
-        root = self._kind_root("error_by_thickness")
-        pattern = re.compile(
-            r"^form_(?P<form>.+?)__regions_(?P<region>.+?)"
-            r"__channels_(?P<channel>[123])(?:__.+)?\.png$"
-        )
-        options: dict[str, Path] = {}
-        if not root.exists():
-            return options
-        for path in sorted(root.glob("*.png")):
-            match = pattern.match(path.name)
-            if match is None:
-                continue
-            key = (
-                f"form={match.group('form')} | region={match.group('region')} | "
-                f"channel={match.group('channel')}"
-            )
-            options[key] = path
-        return options
 
 
 class ScrollableImagePanel(ttk.Frame):
@@ -991,13 +880,11 @@ class EMDViewerApp(tk.Tk):
         self.preprocessing_tab = ttk.Frame(notebook)
         self.training_curve_tab = ttk.Frame(notebook)
         self.confusion_matrix_tab = ttk.Frame(notebook)
-        self.error_by_thickness_tab = ttk.Frame(notebook)
         self.emd_tab = ttk.Frame(notebook)
         notebook.add(self.summary_tab, text="Summary")
         notebook.add(self.preprocessing_tab, text="预处理可视化")
         notebook.add(self.training_curve_tab, text="Training Curve")
         notebook.add(self.confusion_matrix_tab, text="Confusion Matrix")
-        notebook.add(self.error_by_thickness_tab, text="错分厚度分布")
         notebook.add(self.emd_tab, text="EMD 分解")
 
         self.summary_hint = ttk.Label(self.summary_tab, text="", style="Hint.TLabel")
@@ -1110,33 +997,6 @@ class EMDViewerApp(tk.Tk):
         self.confusion_option_map: dict[str, Path] = {}
         self._current_confusion_paths: list[Path] = []
 
-        thickness_selection = ttk.Frame(self.error_by_thickness_tab, padding=(8, 8, 8, 4))
-        thickness_selection.pack(fill="x")
-        ttk.Label(thickness_selection, text="选择右侧错分厚度分布组合：").pack(side="left")
-        self.thickness_choice_var = tk.StringVar(value="")
-        self.thickness_choice = ttk.Combobox(
-            thickness_selection,
-            textvariable=self.thickness_choice_var,
-            state="readonly",
-            width=50,
-        )
-        self.thickness_choice.pack(side="left", fill="x", expand=True, padx=(8, 0))
-        self.thickness_choice.bind(
-            "<<ComboboxSelected>>", lambda _event: self._refresh_error_by_thickness_selection()
-        )
-        self.thickness_split = ttk.PanedWindow(self.error_by_thickness_tab, orient="horizontal")
-        self.thickness_split.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        current_thickness_frame = ttk.LabelFrame(self.thickness_split, text="当前组合")
-        target_thickness_frame = ttk.LabelFrame(self.thickness_split, text="目标组合")
-        self.thickness_split.add(current_thickness_frame)
-        self.thickness_split.add(target_thickness_frame)
-        self.current_thickness_images = ScrollableImagePanel(current_thickness_frame)
-        self.current_thickness_images.pack(fill="both", expand=True)
-        self.target_thickness_images = ScrollableImagePanel(target_thickness_frame)
-        self.target_thickness_images.pack(fill="both", expand=True)
-        self.thickness_option_map: dict[str, Path] = {}
-        self._current_thickness_paths: list[Path] = []
-
         self.emd_images = ScrollableImagePanel(self.emd_tab)
         self.emd_images.pack(fill="both", expand=True)
 
@@ -1229,23 +1089,6 @@ class EMDViewerApp(tk.Tk):
         selected_path = self.confusion_option_map.get(self.confusion_choice_var.get())
         self.target_confusion_images.show_images([selected_path] if selected_path else [])
 
-    def _refresh_error_by_thickness_layout(self, form: str, region: str, channel: str) -> int:
-        current_paths = self.catalog.error_by_thickness_files(form, region, channel)
-        self._current_thickness_paths = current_paths
-        current_count = self.current_thickness_images.show_images(current_paths)
-        self.thickness_option_map = self.catalog.error_by_thickness_options()
-        options = sorted(self.thickness_option_map)
-        self.thickness_choice.configure(values=options)
-        if self.thickness_choice_var.get() not in self.thickness_option_map:
-            self.thickness_choice_var.set(options[0] if options else "")
-        selected_path = self.thickness_option_map.get(self.thickness_choice_var.get())
-        self.target_thickness_images.show_images([selected_path] if selected_path else [])
-        return current_count
-
-    def _refresh_error_by_thickness_selection(self) -> None:
-        selected_path = self.thickness_option_map.get(self.thickness_choice_var.get())
-        self.target_thickness_images.show_images([selected_path] if selected_path else [])
-
     def refresh(self) -> None:
         self.catalog.reload()
         form = self.form_var.get()
@@ -1258,15 +1101,13 @@ class EMDViewerApp(tk.Tk):
             f"label={index}/{count}" for index, count in enumerate(pre_counts)
         )
         confusion_count = self._refresh_confusion_matrix_layout(form, region, channel)
-        thickness_count = self._refresh_error_by_thickness_layout(form, region, channel)
         if form == "all":
             self.emd_images.clear("请选择一种具体预处理方式后查看 EMD 分量图。")
             curve_paths = self.catalog.training_curve_files(form, region, channel)
             curve_count = self.training_curve_images.show_images(curve_paths)
             self.status_var.set(
                 f"数据集：{self.dataset_var.get()}｜已加载 {len(rows)} 组实验摘要；"
-                f"预处理图 {pre_summary}，训练曲线 {curve_count} 张，"
-                f"错分厚度分布 {thickness_count} 张。"
+                f"预处理图 {pre_summary}，训练曲线 {curve_count} 张。"
             )
             self.summary_hint.configure(
                 text="当前显示所选数据集下所有可用实验的 summary；右侧可通过选择栏查看具体预处理组合。"
@@ -1281,8 +1122,7 @@ class EMDViewerApp(tk.Tk):
         emd_count = self.emd_images.show_images(emd_paths)
         self.status_var.set(
             f"数据集：{self.dataset_var.get()}｜当前筛选 {len(rows)} 组实验；"
-            f"预处理图 {pre_summary}，训练曲线 {curve_count} 张、EMD 图 {emd_count} 张，"
-            f"错分厚度分布 {thickness_count} 张。"
+            f"预处理图 {pre_summary}，训练曲线 {curve_count} 张、EMD 图 {emd_count} 张。"
         )
         self.summary_hint.configure(
             text="左侧显示当前筛选条件下的各类别样本；右侧可通过选择栏查看任意已生成组合。"
@@ -1420,22 +1260,6 @@ class EMDViewerApp(tk.Tk):
                         channel,
                         "--split",
                         "test",
-                    ],
-                    [
-                        sys.executable,
-                        str(APP_DIR / "visualize_error_by_thickness.py"),
-                        "--experiments-dir",
-                        str(EXPERIMENTS_DIR),
-                        "--data-dir",
-                        str(data_dir),
-                        "--output-dir",
-                        str(_scoped("error_by_thickness")),
-                        "--forms",
-                        form,
-                        "--region-set",
-                        region,
-                        "--channel-mode",
-                        channel,
                     ],
                 ]
             )

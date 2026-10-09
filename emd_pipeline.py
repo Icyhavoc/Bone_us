@@ -15,22 +15,13 @@ The command-line entry point is in ``run_emd_experiments.py``.
 
 from __future__ import annotations
 
-import copy
 import json
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
-
-
-# NumPy 2.0 renamed ``trapz`` to ``trapezoid``; support both so the pipeline runs
-# unchanged on NumPy 1.x and 2.x.  Nothing in the module calls it at the moment
-# (``_roc_auc`` now uses ranks instead of a staircase integral); it is kept for
-# any future curve integration so the NumPy-2 rename does not have to be
-# rediscovered.
-_trapezoid = getattr(np, "trapezoid", None) or getattr(np, "trapz")
 
 
 FORM_ALIASES = {
@@ -200,13 +191,10 @@ class DynamicEnvelopeConfig:
             raise ValueError("dynamic envelope locator_top_k must be positive")
 
 
-#: The eight statistics the pipeline has always computed, in their original order.
-#: The order is load-bearing: ``feature_dimension_names`` publishes it, every
-#: stored ``features_*.npy`` was written with it, and ``compact`` / ``lean`` are
-#: derived by *removing* entries.  An insertion anywhere but the end would
-#: silently renumber every existing column, so new statistics are only ever
-#: appended -- see :data:`_COMPONENT_FEATURE_NAMES`.
-_CORE_COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
+#: Statistics computed for every IMF (and for the residue).  ``_component_features``
+#: is the only producer, but the set is named here so ``EMDConfig.validate`` and
+#: the reporting helpers can talk about the columns without recomputing them.
+_COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
     "mean",
     "std",
     "rms",
@@ -216,251 +204,6 @@ _CORE_COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
     "zero_crossing_rate",
     "spectral_centroid",
 )
-
-#: Scale-invariant shape statistics, appended after the core block.
-#:
-#: All three are ratios of central moments or of envelope to rms, so multiplying
-#: a component by any positive gain leaves them unchanged.  That is the point:
-#: the amplitude columns are dominated by coupling, probe pressure and ADC gain
-#: rather than by thickness (measured: the 11 amplitude columns taken alone score
-#: AUC 0.806, *worse* than the single ``zero_crossing_rate`` column at 0.833),
-#: whereas an impulsive, spiky component looks the same at any gain.
-_SHAPE_COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
-    "kurtosis",
-    "skewness",
-    "crest_factor",
-)
-
-#: Spectral descriptors, appended after the shape block.
-#:
-#: ``spectral_slope`` is the one with a direct physical reading.  Bone attenuates
-#: high frequencies faster than low ones, so the slope of the log power spectrum
-#: *is* an attenuation estimate, and attenuation is the mechanism the thickness
-#: label is proxying for.  Until now the only frequency information in the whole
-#: vector was a single ``spectral_centroid`` per component.
-_SPECTRAL_COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
-    "spectral_bandwidth",
-    "spectral_rolloff",
-    "spectral_flatness",
-    "spectral_entropy",
-    "spectral_slope",
-)
-
-#: Envelope descriptors, appended after the spectral block.
-#:
-#: ``envelope_decay`` is the same attenuation idea measured in the spatial domain:
-#: a least-squares fit of ``log(envelope)`` against depth in millimetres.  A gain
-#: change shifts that log by a constant and leaves the slope alone, so it carries
-#: attenuation without carrying amplitude.
-_ENVELOPE_COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
-    "envelope_decay",
-    "envelope_half_width",
-)
-
-#: Every statistic ``_component_features`` can produce, in emission order.
-#:
-#: Statistics computed for every IMF (and for the residue).  ``_component_features``
-#: is the only producer, but the set is named here so ``EMDConfig.validate`` and
-#: the reporting helpers can talk about the columns without recomputing them.
-_COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
-    _CORE_COMPONENT_FEATURE_NAMES
-    + _SHAPE_COMPONENT_FEATURE_NAMES
-    + _SPECTRAL_COMPONENT_FEATURE_NAMES
-    + _ENVELOPE_COMPONENT_FEATURE_NAMES
-)
-
-#: Fraction of total spectral power below which the roll-off frequency is read.
-SPECTRAL_ROLLOFF_FRACTION = 0.85
-
-#: Dynamic range, in dB, of the band used for the log-spectrum attenuation fit.
-#: Bins below this floor are noise and have a flat log spectrum, so including
-#: them would bias the slope towards zero and make the feature depend on how much
-#: empty bandwidth the window happens to have.
-SPECTRAL_SLOPE_DYNAMIC_RANGE_DB = 20.0
-
-#: Fraction of the envelope peak that bounds the decay fit and the half-width.
-ENVELOPE_FLOOR_FRACTION = 0.1
-
-#: Reflection padding applied before the Hilbert transform when the envelope is
-#: used as a *feature*.
-#:
-#: The transform is circular: the sample before the first is treated as the last,
-#: so a component that is large at one edge and small at the other -- that is,
-#: every decaying burst, which is the shape these two features exist to measure --
-#: folds a step into the convolution and the far edge comes back near the peak
-#: instead of near zero.  Measured on a synthetic ``exp(-x) * cos(2*pi*5x)`` over
-#: 3.6 mm: the right-edge envelope reads 0.78 of the peak with no padding and
-#: 0.03 with it, against a true 0.028.  That error is not cosmetic, it turns
-#: ``envelope_half_width`` into "the whole window" for every real component.
-#:
-#: :func:`_hilbert_envelope` itself is deliberately left unpadded: the locator
-#: reproduces the reference implementation sample for sample.
-ENVELOPE_REFLECTION_PAD = 64
-
-#: Cross-channel contrast kinds accepted by :attr:`EMDConfig.channel_contrast`.
-#:
-#: The two physical channels look at the same site from different incidence
-#: angles, so their *difference* is a new observable rather than a copy of one
-#: channel.  Every contrast is elementwise over the first two channel groups,
-#: which are column-aligned by construction (same branches, same statistics,
-#: same locator block, only the channel differs), so column ``j`` of the
-#: contrast is statistic ``j`` seen by channel 1 minus channel 2.
-#:
-#: ``difference`` is the raw signed gap.  It is the least informative of the
-#: three because it is a linear function of columns the classifier already has,
-#: but it is the only one that preserves the physical units.
-#:
-#: ``normalized`` is ``(a - b) / (|a| + |b|)`` -- a bounded, symmetric relative
-#: contrast in ``[-1, 1]`` that is invariant to a *common* gain applied to both
-#: channels, which is what cancels probe pressure and coupling gel.  It is
-#: defined for zeros (unlike a plain ratio) and is sign-preserving.
-#:
-#: ``log_ratio`` is ``signed_log(a) - signed_log(b)``, i.e. ``log(a / b)``
-#: wherever the two share a sign.  This is the multiplicative counterpart of
-#: ``difference``: attenuation seen by one path relative to the other is exactly
-#: a log-ratio, so a gain difference becomes an additive offset instead of a
-#: rescaling, and the raw magnitude of an amplitude statistic stops dominating
-#: the comparison.
-CHANNEL_CONTRAST_KINDS: tuple[str, ...] = ("none", "difference", "normalized", "log_ratio")
-
-#: Floor on ``|value|`` inside the signed logarithm used by both the
-#: cross-channel contrast and the cross-branch ratio, so an exactly zero
-#: statistic -- which several of the extended statistics return deliberately --
-#: stays finite instead of becoming ``-inf``.
-CHANNEL_CONTRAST_EPSILON = 1e-30
-
-#: Column definitions for :attr:`EMDConfig.branch_ratio`, as
-#: ``(numerator statistic, denominator statistic, form)`` triples.
-#:
-#: This is strategy S3b: every statistic so far is measured **within one window**,
-#: so the extraction cannot see how a quantity *changes with depth*.  Branch 0 is
-#: the shallower window (the envelope main branch) and branch 1 the deeper one
-#: (the tail branch), so their ratio is the attenuation itself -- the textbook
-#: bone descriptor, and the one thing S3a's in-window fits only approximate.
-#:
-#: The four paired statistics are chosen because they are the four independent
-#: ways an attenuating medium changes a burst, all of which are already available
-#: in every feature preset:
-#:
-#: * ``std`` -- broadband level decay.
-#: * ``peak_abs`` -- peak decay, i.e. the same decay at the strongest component.
-#: * ``zero_crossing_rate`` -- pulse *broadening*: a low-pass medium removes the
-#:   fast oscillations, so the crossing rate falls with depth.  Scale-free
-#:   already, so its ratio measures shape change alone.
-#: * ``spectral_centroid`` -- spectral *downshift*, the frequency-domain statement
-#:   of the same effect.
-#:
-#: ``energy`` and ``rms`` are deliberately absent.  ``energy = mean(x**2)`` and
-#: ``rms = sqrt(mean(x**2))``, so ``log(energy_a / energy_b)`` is exactly
-#: ``2 * log(rms_a / rms_b)`` and ``rms`` and ``std`` coincide for the
-#: near-zero-mean components EMD produces.  Adding them would widen every group
-#: without adding a dimension of information -- which matters, because the whole
-#: dataset is 161 training samples.
-BRANCH_RATIO_STATISTICS: tuple[str, ...] = (
-    "std",
-    "peak_abs",
-    "zero_crossing_rate",
-    "spectral_centroid",
-)
-
-BRANCH_RATIO_PRESETS: dict[str, tuple[tuple[str, str, str], ...]] = {
-    "none": (),
-    # The 比值特征 of the S3 proposal, in the plain multiplicative form.
-    "ratio": tuple(
-        (statistic, statistic, "ratio") for statistic in BRANCH_RATIO_STATISTICS
-    ),
-    # The same contrasts additively, i.e. attenuation in nepers: a gain applied
-    # to both windows becomes an offset instead of a rescaling, and the largest
-    # amplitude statistic stops dominating the comparison.
-    "attenuation": tuple(
-        (statistic, statistic, "log_ratio") for statistic in BRANCH_RATIO_STATISTICS
-    ),
-}
-
-#: Name of the extra column that divides the level log-ratio by the *actual*
-#: separation of the two window centres, giving an attenuation coefficient in
-#: 1/mm.
-#:
-#: The normalisation is not cosmetic under ``dyn_envelope``: the main window
-#: starts at a per-sample dynamic index, so the distance between the two window
-#: centres changes from sample to sample.  Without dividing by it,
-#: ``log_ratio:std/std`` conflates attenuation with how far apart the detector
-#: happened to place the windows.
-BRANCH_ATTENUATION_FEATURE = "attenuation_per_mm"
-
-
-#: Ready-made ``EMDConfig.feature_names`` sets.
-#:
-#: ``mean`` is deliberately absent from every preset except ``legacy``.  EMD
-#: sifting drives each IMF's mean towards zero by construction, so on this data
-#: the column holds little but float32 round-off (measured ``std = 3.6e-5`` for
-#: branch 1, against a ``peak_abs`` of ``8.4e-2``).  That is small enough to look
-#: harmless once standardised, but it is still a dead input to the first dense
-#: layer, and dropping it was worth real accuracy: on
-#: ``form_top3_mean__regions_dyn_envelope__channels_1`` (161 training samples,
-#: 5-fold CV repeated over 8 seeds) removing just ``mean`` moved accuracy
-#: ``0.686 -> 0.700`` and AUC ``0.788 -> 0.799``.
-#:
-#: ``rms`` and ``energy`` are *not* duplicates after pooling, even though
-#: ``energy == rms ** 2`` holds per IMF: pooling averages ``sqrt(mean(x^2))`` and
-#: ``mean(x^2)`` separately, so the two final columns end up 0.95 (branch 1) /
-#: 0.91 (branch 2) correlated rather than identical.  Dropping ``energy`` too was
-#: neutral on accuracy and slightly worse on AUC (``0.796`` vs ``0.799``), so
-#: ``lean`` is available but ``compact`` is the default.
-EMD_FEATURE_PRESETS: dict[str, tuple[str, ...]] = {
-    "legacy": _COMPONENT_FEATURE_NAMES,
-    "compact": tuple(name for name in _CORE_COMPONENT_FEATURE_NAMES if name != "mean"),
-    "lean": tuple(
-        name for name in _CORE_COMPONENT_FEATURE_NAMES if name not in {"mean", "energy"}
-    ),
-}
-
-#: Ablation presets for the statistics added after the core block.  Each one is
-#: the ``compact`` baseline plus exactly one new family, so an A/B against
-#: ``compact`` attributes any change to that family and nothing else.  ``mean``
-#: is dropped in all of them for the same reason ``compact`` drops it: it holds
-#: float32 round-off rather than signal (see the note above).
-_COMPACT_BASE: tuple[str, ...] = EMD_FEATURE_PRESETS["compact"]
-for _preset_name, _extra in (
-    ("shape", _SHAPE_COMPONENT_FEATURE_NAMES),
-    ("spectral_ext", _SPECTRAL_COMPONENT_FEATURE_NAMES),
-    ("envelope", _ENVELOPE_COMPONENT_FEATURE_NAMES),
-    ("shape_spectral", _SHAPE_COMPONENT_FEATURE_NAMES + _SPECTRAL_COMPONENT_FEATURE_NAMES),
-    (
-        "rich",
-        _SHAPE_COMPONENT_FEATURE_NAMES
-        + _SPECTRAL_COMPONENT_FEATURE_NAMES
-        + _ENVELOPE_COMPONENT_FEATURE_NAMES,
-    ),
-):
-    EMD_FEATURE_PRESETS[_preset_name] = _COMPACT_BASE + _extra
-del _preset_name, _extra
-
-#: Ready-made ``EMDConfig.locator_features`` sets.  A locator feature describes
-#: *where* the dynamic envelope put the main window on the depth axis, which the
-#: branch signals themselves cannot express: the window is cut out of the trace
-#: and resampled, so every echo inside it is re-aligned to the window start and
-#: the absolute arrival depth is thrown away.
-#:
-#: ``core`` is the measured default.  On the same 8-seed CV above, adding the
-#: merged crossing (``onset_mm``) moved accuracy ``0.686 -> 0.715`` and AUC
-#: ``0.788 -> 0.800``; adding the envelope peak on top was neutral
-#: (``0.714`` / ``0.798``) but the two are complementary across feature sets, so
-#: both are kept.  A *larger* block is worse, not better: the full six-feature
-#: table scored ``0.696`` / ``0.793``, because the extra entries are near
-#: collinear with ``onset_mm`` and mostly add variance.
-LOCATOR_FEATURE_PRESETS: dict[str, tuple[str, ...]] = {
-    "core": ("onset_mm", "peak_mm"),
-    "full": (
-        "onset_mm",
-        "weak_onset_mm",
-        "peak_mm",
-        "rise_mm",
-        "merge_extension_mm",
-        "peak_amplitude",
-    ),
-    "none": (),
-}
 
 #: Name of the branch whose geometry the locator features describe.
 LOCATOR_BRANCH_NAME = "dynamic_main_window"
@@ -473,90 +216,21 @@ TAIL_BRANCH_NAME = "dynamic_tail_window"
 
 @dataclass(frozen=True)
 class EMDConfig:
-    """EMD and feature-extraction settings."""
+    """Fixed EMD statistics for the classification pipeline."""
 
     max_imfs: int = 5
     max_sift_iterations: int = 30
     sift_sd_threshold: float = 0.2
     include_residue: bool = True
-    # Pooled mode averages component/stream statistics and keeps each branch
-    # close to len(feature_names) dimensions. Branches remain independent and are
-    # concatenated by sample_feature_vector.
-    stream_aggregation: str = "pooled"
-    # ``per_channel`` extracts one feature group per selected channel and
-    # concatenates the groups, so ``--channel-mode 3`` no longer averages its
-    # two channels together.  ``pooled`` reproduces the historical behaviour,
-    # where the channel axis was folded into the stream axis before pooling.
-    # With a single channel the two settings are identical, so modes 1 and 2
-    # produce the same features under either value.
-    channel_aggregation: str = "per_channel"
-    #: Which per-IMF statistics to compute; see :data:`EMD_FEATURE_PRESETS`.
-    feature_names: tuple[str, ...] = EMD_FEATURE_PRESETS["compact"]
-    #: Which depth-locator features to append to the envelope branch; a key of
-    #: :data:`LOCATOR_FEATURE_PRESETS`.  ``"none"`` restores the pre-locator
-    #: layout.  Only the ``dynamic_main_window`` branch carries the block, so
-    #: with ``locator_features="core"`` and ``channel_aggregation="per_channel"``
-    #: the feature dimension is unchanged by the channel mode, and
-    #: ``pooled``/``per_channel`` still agree for a single channel.
-    locator_features: str = "core"
-    #: Cross-channel contrast appended as **one extra feature group** right after
-    #: the channel groups; a value other than ``"none"`` (see
-    #: :data:`CHANNEL_CONTRAST_KINDS`).
-    #:
-    #: This is the only way to use the second physical channel without new data,
-    #: and it is deliberately additive: with ``channel_contrast="none"`` -- the
-    #: default -- :func:`sample_feature_vector` returns exactly what it returned
-    #: before this option existed, bit for bit.  So a ``channel_mode=1``
-    #: experiment cannot be affected by it, and a ``channel_mode=3`` contrast run
-    #: is a separate experiment that can be A/B tested against the single-channel
-    #: baseline.
-    channel_contrast: str = "none"
-    #: Cross-branch contrast appended **inside every channel group**, after that
-    #: group's branch columns and before any contrast group; a key of
-    #: :data:`BRANCH_RATIO_PRESETS`.
-    #:
-    #: Like ``channel_contrast`` this is strictly additive: with the default
-    #: ``"none"`` the returned vector is unchanged bit for bit.  Unlike it, this
-    #: branch needs **two** branches -- the numerator is branch 0, the shallower
-    #: window -- so it is refused for a single-region plan.
-    branch_ratio: str = "none"
+    feature_names: tuple[str, ...] = _COMPONENT_FEATURE_NAMES
 
     def validate(self) -> None:
-        if self.max_imfs <= 0:
-            raise ValueError("max_imfs must be positive")
-        if self.max_sift_iterations <= 0:
-            raise ValueError("max_sift_iterations must be positive")
+        if self.max_imfs <= 0 or self.max_sift_iterations <= 0:
+            raise ValueError("EMD iteration counts must be positive")
         if self.sift_sd_threshold <= 0:
             raise ValueError("sift_sd_threshold must be positive")
-        if self.stream_aggregation not in {"pooled", "flatten", "stats"}:
-            raise ValueError("stream_aggregation must be 'pooled', 'flatten', or 'stats'")
-        if self.channel_aggregation not in {"pooled", "per_channel"}:
-            raise ValueError("channel_aggregation must be 'pooled' or 'per_channel'")
-        if not self.feature_names:
-            raise ValueError("feature_names cannot be empty")
-        unknown = set(self.feature_names) - set(_COMPONENT_FEATURE_NAMES)
-        if unknown:
-            raise ValueError(f"Unknown EMD feature names: {sorted(unknown)}")
-        # A group's columns are attributed to statistics positionally, as
-        # ``feature_names[j % n]``, so a repeated name would make two different
-        # statistics share a column and silently corrupt every derived ratio.
-        if len(set(self.feature_names)) != len(self.feature_names):
-            raise ValueError(f"feature_names must not repeat a statistic: {list(self.feature_names)}")
-        if self.locator_features not in LOCATOR_FEATURE_PRESETS:
-            raise ValueError(
-                "locator_features must be one of "
-                f"{sorted(LOCATOR_FEATURE_PRESETS)}, got {self.locator_features!r}"
-            )
-        if self.channel_contrast not in CHANNEL_CONTRAST_KINDS:
-            raise ValueError(
-                f"channel_contrast must be one of {list(CHANNEL_CONTRAST_KINDS)}, "
-                f"got {self.channel_contrast!r}"
-            )
-        if self.branch_ratio not in BRANCH_RATIO_PRESETS:
-            raise ValueError(
-                f"branch_ratio must be one of {sorted(BRANCH_RATIO_PRESETS)}, "
-                f"got {self.branch_ratio!r}"
-            )
+        if self.feature_names != _COMPONENT_FEATURE_NAMES:
+            raise ValueError("the main pipeline uses the fixed eight EMD statistics")
 
 
 @dataclass(frozen=True)
@@ -750,10 +424,8 @@ def prepare_branch_block(
 ) -> np.ndarray:
     """Cut/resample one depth region, keeping the channel axis.
 
-    Returns ``[streams, channels, target_length]``.  The channel axis survives
-    because ``EMDConfig.channel_aggregation="per_channel"`` decomposes every
-    channel on its own and hands each channel's features to a separate
-    classifier tower.
+    Returns the stream, channel, and target-length axes; each physical
+    channel is decomposed independently before feature concatenation.
     """
 
     if processed.ndim != 3:
@@ -1411,237 +1083,6 @@ def emd_decompose(
     return imfs, residue.astype(np.float32)
 
 
-def _linear_slope(x: np.ndarray, y: np.ndarray) -> float:
-    """Least-squares slope of ``y`` against ``x``.
-
-    Returns ``0.0`` when there is nothing to fit -- fewer than two points, or an
-    ``x`` with no spread -- because a missing slope and a zero slope should both
-    leave a downstream scaler with the neutral value rather than a NaN.
-    """
-
-    x = np.asarray(x, dtype=np.float64).reshape(-1)
-    y = np.asarray(y, dtype=np.float64).reshape(-1)
-    if x.size != y.size or x.size < 2:
-        return 0.0
-    centered = x - float(x.mean())
-    spread = float(np.sum(centered * centered))
-    if spread <= 0.0:
-        return 0.0
-    slope = float(np.sum(centered * (y - float(y.mean()))) / spread)
-    return slope if np.isfinite(slope) else 0.0
-
-
-def _usable_spectral_band(power: np.ndarray) -> np.ndarray:
-    """Bins within :data:`SPECTRAL_SLOPE_DYNAMIC_RANGE_DB` of the spectral peak.
-
-    The band floor is scaled by the peak rather than fixed, so the mask does not
-    depend on the absolute amplitude of the component -- which is what keeps the
-    fitted slope scale-invariant, and therefore a measure of attenuation rather
-    than of gain.
-    """
-
-    power = np.asarray(power, dtype=np.float64).reshape(-1)
-    if power.size == 0:
-        return np.zeros(0, dtype=bool)
-    peak = float(np.max(power))
-    if not np.isfinite(peak) or peak <= 0.0:
-        return np.zeros(power.size, dtype=bool)
-    floor = peak * 10.0 ** (-SPECTRAL_SLOPE_DYNAMIC_RANGE_DB / 10.0)
-    return power >= floor
-
-
-def _padded_hilbert_envelope(signal: np.ndarray) -> np.ndarray:
-    """Hilbert envelope with reflection padding, for *feature* measurement.
-
-    See :data:`ENVELOPE_REFLECTION_PAD` for why the padding is needed and why
-    :func:`_hilbert_envelope` is not changed.  Short components are returned
-    unpadded, because reflecting a handful of samples cannot buy anything and the
-    slice arithmetic would start to overlap itself.
-    """
-
-    signal = np.asarray(signal, dtype=np.float64).reshape(-1)
-    pad = int(min(ENVELOPE_REFLECTION_PAD, max(0, signal.size // 8)))
-    if pad < 8:
-        return np.asarray(_hilbert_envelope(signal), dtype=np.float64)
-    padded = np.concatenate((signal[pad:0:-1], signal, signal[-2 : -(pad + 2) : -1]))
-    envelope = np.asarray(_hilbert_envelope(padded), dtype=np.float64)
-    return envelope[pad : pad + signal.size]
-
-
-def _channel_contrast(first: np.ndarray, second: np.ndarray, kind: str) -> np.ndarray:
-    """Elementwise contrast between two column-aligned channel feature groups.
-
-    See :data:`CHANNEL_CONTRAST_KINDS` for what each ``kind`` measures and why
-    the contrast is meaningful at all.  The two inputs must have the same width,
-    which :func:`sample_feature_vector` guarantees because both groups are built
-    from the same branches with the same statistics and locator preset.
-
-    Every branch is written so that a degenerate statistic is ``0.0`` rather than
-    NaN or a division blow-up, so the contrast has to survive zeros too instead
-    of sending them on to the scaler as ``inf``:
-
-    * ``normalized`` falls back to ``0.0`` only when *both* inputs are zero, i.e.
-      when there is genuinely no information to compare.
-    * ``log_ratio`` uses a signed logarithm ``sign(x) * log(|x| + eps)``, which
-      keeps the direction of a contrast (unlike ``|x|``) and degrades to a large
-      but finite number as one side approaches zero.
-    """
-
-    first = np.asarray(first, dtype=np.float64).reshape(-1)
-    second = np.asarray(second, dtype=np.float64).reshape(-1)
-    if first.shape != second.shape:
-        raise ValueError(
-            f"channel contrast needs two equally wide groups, got {first.shape} and {second.shape}"
-        )
-    if kind == "difference":
-        values = first - second
-    elif kind == "normalized":
-        denominator = np.abs(first) + np.abs(second)
-        nonzero = denominator > 0.0
-        values = np.divide(
-            first - second,
-            np.where(nonzero, denominator, 1.0),
-        )
-        values = np.where(nonzero, values, 0.0)
-    elif kind == "log_ratio":
-        values = _signed_log(first) - _signed_log(second)
-    else:
-        raise ValueError(
-            f"channel_contrast must be one of {list(CHANNEL_CONTRAST_KINDS)}, got {kind!r}"
-        )
-    return np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-
-
-def _signed_log(values: np.ndarray) -> np.ndarray:
-    """``sign(x) * log(|x| + eps)``; the additive form of a log ratio."""
-
-    values = np.asarray(values, dtype=np.float64)
-    epsilon = CHANNEL_CONTRAST_EPSILON * max(1.0, float(np.max(np.abs(values))) or 1.0)
-    return np.sign(values) * np.log(np.abs(values) + epsilon)
-
-
-def _signed_log_value(value: float) -> float:
-    """The scalar branch of :func:`_signed_log`, so both paths share one epsilon.
-
-    The two are the same expression -- both the cross-channel contrast's
-    ``log_ratio`` and the cross-branch ratio go through here rather than
-    re-deriving the floor, because a mismatch between the scalar and array
-    versions would only show up on the rare exactly-zero statistic.
-    """
-
-    return float(_signed_log(np.asarray([value], dtype=np.float64))[0])
-
-
-def _statistic_summary(feature_names: Sequence[str], group: np.ndarray) -> dict[str, float]:
-    """Summarise one feature group as ``statistic name -> value``.
-
-    :func:`emd_feature_vector` lays a group out as ``feature_names`` repeated once
-    per reducer, so column ``j`` always carries ``feature_names[j % n]`` whichever
-    ``stream_aggregation`` is in force.  Under the default ``"pooled"`` there is
-    exactly one column per statistic and the summary *is* that column; ``"stats"``
-    repeats each statistic across four reducers and ``"flatten"`` across streams
-    and components, and the mean of those columns is the documented summary.
-    """
-
-    names = list(feature_names)
-    if not names:
-        raise ValueError("feature_names cannot be empty")
-    columns = np.asarray(group, dtype=np.float64).reshape(-1)
-    if columns.size % len(names):
-        raise ValueError(
-            f"a group of {columns.size} columns is not a whole number of "
-            f"{len(names)}-statistic cycles, so its columns cannot be attributed to statistics"
-        )
-    return {
-        name: float(np.mean(columns[index :: len(names)]))
-        for index, name in enumerate(names)
-    }
-
-
-def _branch_ratio_block(
-    numerator: np.ndarray,
-    denominator: np.ndarray,
-    widths: Sequence[int],
-    pairs: Sequence[tuple[str, str, str]],
-    feature_names: Sequence[str],
-    distance_mm: Sequence[float],
-) -> tuple[np.ndarray, tuple[int, ...], list[str]]:
-    """Contrast two branches window-by-window; see :data:`BRANCH_RATIO_PRESETS`.
-
-    ``numerator`` is the shallower branch and ``denominator`` the deeper one, both
-    in the same ``[group][columns]`` layout and therefore column-aligned by
-    construction.  One column is emitted per pair, plus the separation-normalised
-    attenuation coefficient -- so the returned width is the same for every group
-    and the caller can append it as one more group per channel.
-
-    Returns the concatenated block, its per-group widths, and the column names.
-    """
-
-    widths = [int(width) for width in widths]
-    distances = [float(value) for value in distance_mm]
-    if len(distances) != len(widths):
-        raise ValueError(
-            f"got {len(distances)} window separations for {len(widths)} feature group(s)"
-        )
-    if int(np.sum(widths)) != int(np.size(numerator)) or int(np.sum(widths)) != int(
-        np.size(denominator)
-    ):
-        raise ValueError(
-            f"group widths {widths} do not tile the branches "
-            f"({int(np.size(numerator))} and {int(np.size(denominator))} columns)"
-        )
-
-    needed = {statistic for first, second, _ in pairs for statistic in (first, second)}
-    needed.add("std")
-    missing = sorted(needed - set(feature_names))
-    if missing:
-        raise ValueError(
-            f"branch_ratio needs the statistics {missing}, but the feature set is {list(feature_names)}"
-        )
-    names = [f"{form}:{first}/{second}" for first, second, form in pairs]
-    names.append(f"{BRANCH_ATTENUATION_FEATURE}:std/std")
-
-    column_count = len(pairs) + 1
-    values = np.empty(len(widths) * column_count, dtype=np.float64)
-    numerator_offset = 0
-    denominator_offset = 0
-    for group, width in enumerate(widths):
-        first = _statistic_summary(
-            feature_names, numerator[numerator_offset : numerator_offset + width]
-        )
-        second = _statistic_summary(
-            feature_names, denominator[denominator_offset : denominator_offset + width]
-        )
-        numerator_offset += width
-        denominator_offset += width
-        separation = distances[group]
-        if not separation > 0.0:
-            raise ValueError(
-                f"the two branches are {separation!r} mm apart for feature group {group}, "
-                "so their attenuation cannot be normalised by the separation"
-            )
-        for offset, (numerator_name, denominator_name, form) in enumerate(pairs):
-            upper = first[numerator_name]
-            lower = second[denominator_name]
-            if form == "ratio":
-                # Exactly zero denominators carry no ratio; the column is then
-                # flagged as degenerate by the training-time audit, which is
-                # better than inventing a magnitude for it here.
-                value = upper / lower if lower != 0.0 else 0.0
-            elif form == "log_ratio":
-                value = _signed_log_value(upper) - _signed_log_value(lower)
-            else:
-                raise ValueError(
-                    f"branch_ratio form must be 'ratio' or 'log_ratio', got {form!r}"
-                )
-            values[group * column_count + offset] = value
-        values[group * column_count + len(pairs)] = (
-            _signed_log_value(first["std"]) - _signed_log_value(second["std"])
-        ) / separation
-
-    return values.astype(np.float32), tuple(column_count for _ in widths), names
-
-
 def _component_features(
     signal: np.ndarray,
     feature_names: Sequence[str],
@@ -1650,192 +1091,33 @@ def _component_features(
     """Per-component statistics, in the order given by ``feature_names``.
 
     ``sample_spacing`` is the physical distance between consecutive samples, in
-    millimetres.  When it is given, every frequency-domain statistic is reported
-    on a **cycles/mm** axis and every spatial statistic in **mm**: the branches
-    are resampled from windows of very different physical length (branch 1 covers
-    ~0.95 mm, branch 2 ~3.6 mm), so a centroid on the raw DFT bin axis is not the
-    same physical frequency in both and the two columns are not comparable.
-    ``None`` keeps the historical cycles-per-sample axis.
-
-    Statistics are evaluated **lazily**, so a preset that asks for three columns
-    does not pay for the other fourteen.  That is not a micro-optimisation: the
-    envelope and the rfft are each an FFT of the component, and this function is
-    called once per component per stream per channel per sample.
+    millimetres.  When it is given, ``spectral_centroid`` is reported in
+    **cycles/mm**: the branches are resampled from windows of very different
+    physical length (branch 1 covers ~0.95 mm, branch 2 ~3.6 mm), so a centroid
+    on the raw DFT bin axis is not the same physical frequency in both and the
+    two columns are not comparable.  ``None`` keeps the historical
+    cycles-per-sample axis.
     """
 
     signal = np.asarray(signal, dtype=np.float64).reshape(-1)
-    unknown = set(feature_names) - set(_COMPONENT_FEATURE_NAMES)
+    energy = float(np.mean(signal * signal))
+    power = np.abs(np.fft.rfft(signal)) ** 2
+    frequencies = np.fft.rfftfreq(signal.size, d=1.0 if sample_spacing is None else float(sample_spacing))
+    power_sum = float(np.sum(power)) + 1e-12
+    features: dict[str, float] = {
+        "mean": float(np.mean(signal)),
+        "std": float(np.std(signal)),
+        "rms": float(np.sqrt(energy)),
+        "energy": energy,
+        "abs_mean": float(np.mean(np.abs(signal))),
+        "peak_abs": float(np.max(np.abs(signal))),
+        "zero_crossing_rate": float(_zero_crossings(signal) / max(1, signal.size - 1)),
+        "spectral_centroid": float(np.sum(frequencies * power) / power_sum),
+    }
+    unknown = set(feature_names) - set(features)
     if unknown:
         raise ValueError(f"Unknown EMD feature names: {sorted(unknown)}")
-
-    axis_spacing = 1.0 if sample_spacing is None else float(sample_spacing)
-    sample_count = int(signal.size)
-    centered = signal - float(np.mean(signal)) if sample_count else signal
-    mean_square = float(np.mean(centered * centered)) if sample_count else 0.0
-    root_mean_square = float(np.sqrt(mean_square))
-    # Scale-free zero level for the two log-domain fits.  Tying it to the peak
-    # (rather than using a fixed epsilon) is what makes ``spectral_slope`` and
-    # ``envelope_decay`` invariant to the component's amplitude.
-    amplitude = float(np.max(np.abs(signal))) if sample_count else 0.0
-    epsilon = 1e-12 * max(amplitude, np.finfo(np.float64).tiny)
-
-    cache: dict[str, Any] = {}
-
-    def spectrum() -> tuple[np.ndarray, np.ndarray]:
-        if "spectrum" not in cache:
-            power = np.abs(np.fft.rfft(signal)) ** 2
-            frequencies = np.fft.rfftfreq(sample_count, d=axis_spacing)
-            cache["spectrum"] = (power, frequencies)
-        return cache["spectrum"]
-
-    def envelope() -> np.ndarray:
-        if "envelope" not in cache:
-            cache["envelope"] = _padded_hilbert_envelope(signal)
-        return cache["envelope"]
-
-    def spectral_centroid() -> float:
-        power, frequencies = spectrum()
-        total = float(np.sum(power))
-        if total <= 0.0:
-            return 0.0
-        return float(np.sum(frequencies * power) / total)
-
-    def ratio(numerator: float, denominator: float) -> float:
-        if denominator == 0.0 or not np.isfinite(denominator):
-            return 0.0
-        value = numerator / denominator
-        return float(value) if np.isfinite(value) else 0.0
-
-    def compute(name: str) -> float:
-        if name == "mean":
-            return float(np.mean(signal)) if sample_count else 0.0
-        if name == "std":
-            return float(np.sqrt(mean_square))
-        if name == "rms":
-            return float(np.sqrt(np.mean(signal * signal))) if sample_count else 0.0
-        if name == "energy":
-            return float(np.mean(signal * signal)) if sample_count else 0.0
-        if name == "abs_mean":
-            return float(np.mean(np.abs(signal))) if sample_count else 0.0
-        if name == "peak_abs":
-            return amplitude
-        if name == "zero_crossing_rate":
-            return float(_zero_crossings(signal) / max(1, sample_count - 1))
-        if name == "spectral_centroid":
-            return spectral_centroid()
-        if name == "kurtosis":
-            # Non-excess: 3.0 for a Gaussian, larger for a spiky component.
-            if mean_square <= 0.0:
-                return 0.0
-            fourth = float(np.mean(centered**4))
-            return ratio(fourth, mean_square * mean_square)
-        if name == "skewness":
-            if mean_square <= 0.0:
-                return 0.0
-            third = float(np.mean(centered**3))
-            return ratio(third, mean_square**1.5)
-        if name == "crest_factor":
-            return ratio(amplitude, root_mean_square)
-        if name == "spectral_bandwidth":
-            power, frequencies = spectrum()
-            total = float(np.sum(power))
-            if total <= 0.0:
-                return 0.0
-            centroid = spectral_centroid()
-            variance = float(np.sum(((frequencies - centroid) ** 2) * power) / total)
-            return float(np.sqrt(max(variance, 0.0)))
-        if name == "spectral_rolloff":
-            power, frequencies = spectrum()
-            total = float(np.sum(power))
-            if total <= 0.0 or power.size == 0:
-                return 0.0
-            cumulative = np.cumsum(power)
-            index = int(np.searchsorted(cumulative, SPECTRAL_ROLLOFF_FRACTION * total))
-            return float(frequencies[min(index, frequencies.size - 1)])
-        if name == "spectral_flatness":
-            power, _ = spectrum()
-            if power.size == 0:
-                return 0.0
-            arithmetic = float(np.mean(power))
-            if arithmetic <= 0.0:
-                return 0.0
-            # Geometric mean over arithmetic mean: 1.0 for white noise, near 0
-            # for a tonal component.  Both means scale with the power, so the
-            # ratio does not depend on the component's amplitude.
-            geometric = float(np.exp(np.mean(np.log(power + epsilon * epsilon))))
-            return min(ratio(geometric, arithmetic), 1.0)
-        if name == "spectral_entropy":
-            power, _ = spectrum()
-            total = float(np.sum(power))
-            if total <= 0.0 or power.size < 2:
-                return 0.0
-            probabilities = power / total
-            positive = probabilities > 0.0
-            entropy = -float(np.sum(probabilities[positive] * np.log(probabilities[positive])))
-            return float(entropy / np.log(power.size))
-        if name == "spectral_slope":
-            # Log power against frequency, fitted on the usable band only: the
-            # noise floor above it is flat, and a flat tail drags the slope
-            # towards zero in proportion to how much empty bandwidth the window
-            # has.  DC is excluded because a residual offset is not attenuation.
-            power, frequencies = spectrum()
-            band = _usable_spectral_band(power) & (frequencies > 0.0)
-            if np.count_nonzero(band) < 3:
-                return 0.0
-            return _linear_slope(
-                frequencies[band], np.log(power[band] + epsilon * epsilon)
-            )
-        if name == "envelope_decay":
-            # Slope of log-envelope against depth in mm.  Negative means the
-            # component decays along the trace; the magnitude is an attenuation
-            # rate per millimetre.
-            magnitude = envelope()
-            if magnitude.size < 2:
-                return 0.0
-            peak = float(np.max(magnitude))
-            if peak <= 0.0:
-                return 0.0
-            usable = magnitude >= ENVELOPE_FLOOR_FRACTION * peak
-            if np.count_nonzero(usable) < 2:
-                return 0.0
-            positions = np.arange(magnitude.size, dtype=np.float64) * axis_spacing
-            return _linear_slope(
-                positions[usable], np.log(magnitude[usable] + epsilon * 0.5)
-            )
-        if name == "envelope_half_width":
-            # Span, in mm, over which the envelope stays at or above half its
-            # peak: a geometric width that does not depend on amplitude.
-            magnitude = envelope()
-            if magnitude.size == 0:
-                return 0.0
-            peak = float(np.max(magnitude))
-            if peak <= 0.0:
-                return 0.0
-            above = np.flatnonzero(magnitude >= 0.5 * peak)
-            if above.size == 0:
-                return 0.0
-            return float(above[-1] - above[0]) * axis_spacing
-        raise ValueError(f"Unknown EMD feature name: {name!r}")
-
-    return np.asarray([compute(name) for name in feature_names], dtype=np.float32)
-
-
-def _resolve_sample_spacings(
-    sample_spacing: float | Sequence[float] | None,
-    channel_count: int,
-) -> list[float | None]:
-    """Normalise ``sample_spacing`` to exactly one entry per channel."""
-
-    if sample_spacing is None:
-        return [None] * channel_count
-    if np.ndim(sample_spacing) == 0:
-        return [float(sample_spacing)] * channel_count
-    values = [float(value) for value in sample_spacing]
-    if len(values) != channel_count:
-        raise ValueError(
-            f"sample_spacing has {len(values)} entries for {channel_count} channels"
-        )
-    return values
+    return np.asarray([features[name] for name in feature_names], dtype=np.float32)
 
 
 def emd_feature_vector(
@@ -1843,17 +1125,12 @@ def emd_feature_vector(
     config: EMDConfig,
     sample_spacing: float | None = None,
 ) -> np.ndarray:
-    """Extract a fixed-size feature vector from ``[streams, samples]``.
-
-    ``sample_spacing`` is forwarded to :func:`_component_features` and puts
-    ``spectral_centroid`` on a physical frequency axis.
-    """
+    """Pool statistics over streams, IMFs, and the residue."""
 
     config.validate()
     streams = np.asarray(streams, dtype=np.float32)
-    if streams.ndim != 2:
-        raise ValueError(f"Expected [streams, samples], got {streams.shape}")
-
+    if streams.ndim != 2 or streams.shape[0] == 0:
+        raise ValueError(f"Expected nonempty [streams, samples], got {streams.shape}")
     component_count = config.max_imfs + int(config.include_residue)
     per_stream: list[np.ndarray] = []
     for stream in streams:
@@ -1868,186 +1145,27 @@ def emd_feature_vector(
             components.append(residue)
         while len(components) < component_count:
             components.append(np.zeros_like(stream))
-        component_features = np.concatenate(
-            [
-                _component_features(component, config.feature_names, sample_spacing)
-                for component in components
-            ]
-        )
-        per_stream.append(component_features)
-    matrix = np.stack(per_stream, axis=0)
-    if config.stream_aggregation == "pooled":
-        feature_count = len(config.feature_names)
-        component_matrix = matrix.reshape(matrix.shape[0], component_count, feature_count)
-        return np.mean(component_matrix, axis=(0, 1)).astype(np.float32)
-    if config.stream_aggregation == "flatten":
-        return matrix.reshape(-1).astype(np.float32)
-    # stats mode keeps the feature dimension fixed when the number of streams
-    # changes between Mean+Std, Raw50, and the single-frame forms.
-    return np.concatenate(
-        [np.mean(matrix, axis=0), np.std(matrix, axis=0), np.min(matrix, axis=0), np.max(matrix, axis=0)]
-    ).astype(np.float32)
-
-
-def emd_feature_groups(
-    block: np.ndarray,
-    config: EMDConfig,
-    sample_spacing: float | Sequence[float] | None = None,
-) -> tuple[np.ndarray, tuple[int, ...]]:
-    """Extract one branch's EMD features, keeping channels as separate groups.
-
-    ``block`` is ``[streams, channels, samples]``.  With
-    ``channel_aggregation="per_channel"`` (the default) each channel is
-    decomposed and pooled on its own and the resulting segments are
-    concatenated; ``"pooled"`` reproduces the historical behaviour, where the
-    channel axis was folded into the stream axis before pooling.
-
-    ``sample_spacing`` is either one value per channel or a single value applied
-    to all of them, in millimetres per sample.  Under ``"pooled"`` the channel
-    axis becomes part of the stream axis, so the per-channel spacings are
-    averaged -- that keeps the centroid on a physical axis instead of silently
-    mixing cycles/sample with cycles/mm.
-
-    Returns the concatenated vector plus the width of every group in order, so
-    the caller knows where one channel's features end and the next one's begin.
-    """
-
-    config.validate()
-    block = np.asarray(block, dtype=np.float32)
-    if block.ndim != 3:
-        raise ValueError(f"Expected [streams, channels, samples], got {block.shape}")
-    spacings = _resolve_sample_spacings(sample_spacing, int(block.shape[1]))
-    if config.channel_aggregation == "pooled":
-        # Fold the channel axis into the stream axis, exactly like the flat
-        # ``[streams * channels, samples]`` form used before per-channel
-        # grouping existed.
-        merged = None if spacings[0] is None else float(np.mean(spacings))
-        groups = [emd_feature_vector(block.reshape(-1, block.shape[-1]), config, merged)]
-    else:
-        groups = [
-            emd_feature_vector(block[:, channel, :], config, spacings[channel])
-            for channel in range(block.shape[1])
-        ]
-    widths = tuple(int(group.size) for group in groups)
-    if len(set(widths)) > 1:
-        raise ValueError(f"per-channel feature widths differ: {widths}")
-    return np.concatenate(groups).astype(np.float32), widths
-
-
-def _locator_feature_table(
-    dynamic_info: Mapping[str, Any], mapper: DepthMapper
-) -> dict[str, np.ndarray]:
-    """Every depth-locator descriptor for one dynamic-envelope split.
-
-    Positions are converted to millimetres so that they are comparable across
-    channel modes and independent of ``--signal-length``.
-    """
-
-    mm_per_index = mapper.max_depth_mm / max(1, mapper.signal_length)
-
-    def positions(key: str) -> np.ndarray:
-        return np.asarray(dynamic_info[key], dtype=np.float64) * mm_per_index
-
-    onset = positions("crossing_index")
-    peak = positions("local_peak_index")
-    return {
-        # Start of the leading packet that survived merging: the arrival time of
-        # the first echo the detector decided was real.
-        "onset_mm": onset,
-        # Depth of the envelope maximum inside the main window.
-        "peak_mm": peak,
-        # First crossing of the fixed weak threshold, kept for comparison: it is
-        # the best single locator on its own but adds nothing on top of
-        # ``onset_mm``, which is why it is not in the default preset.
-        "weak_onset_mm": positions("reference_index"),
-        # How long the envelope takes to climb from onset to peak.
-        "rise_mm": peak - onset,
-        # How far merging pulled the onset earlier than the anchor packet.
-        "merge_extension_mm": positions("premerge_crossing_index") - onset,
-        # Smoothed envelope height at the peak, i.e. echo strength.
-        "peak_amplitude": np.asarray(dynamic_info["local_peak_value"], dtype=np.float64),
-    }
-
-
-def locator_feature_matrix(
-    dynamic_info: Mapping[str, Any],
-    mapper: DepthMapper,
-    preset: str,
-) -> np.ndarray:
-    """``[channels, dims]`` depth-locator block for one sample, in preset order."""
-
-    if preset not in LOCATOR_FEATURE_PRESETS:
-        raise ValueError(
-            f"locator preset must be one of {sorted(LOCATOR_FEATURE_PRESETS)}, got {preset!r}"
-        )
-    names = LOCATOR_FEATURE_PRESETS[preset]
-    if not names:
-        raise ValueError("the 'none' locator preset has no features to build")
-    table = _locator_feature_table(dynamic_info, mapper)
-    return np.column_stack([table[name] for name in names]).astype(np.float32)
+        per_stream.append(np.stack([
+            _component_features(component, config.feature_names, sample_spacing)
+            for component in components
+        ]))
+    return np.mean(np.stack(per_stream), axis=(0, 1)).astype(np.float32)
 
 
 def feature_dimension_names(info: Mapping[str, Any], emd_config: EMDConfig) -> list[str]:
-    """Name every column of the vector produced by :func:`sample_feature_vector`.
+    """Name columns in channel-major, then branch-major order."""
 
-    Mirrors the group-major layout (group, then branch, then statistics, then the
-    branch's locator block) so that a column identified numerically -- a
-    degenerate one, or the strongest univariate feature -- can be reported by
-    name instead of by index.  ``group_widths`` in the feature info holds the
-    statistic width published by :func:`emd_feature_groups`, so the locator
-    entries are appended from ``locator_features`` rather than counted out of it.
-
-    A cross-channel contrast group (:attr:`EMDConfig.channel_contrast`) sits after
-    the channel groups and reuses the names of the group it was derived from,
-    prefixed by ``contrast_<kind>:`` so every column stays traceable to the
-    statistic and branch that produced it.
-
-    A derived branch may publish its own column names in ``feature_names``
-    (:attr:`EMDConfig.branch_ratio` does, because its columns are ratios of two
-    branches' statistics rather than statistics of one component); those names
-    replace the positional ``statistic[j % n]`` attribution for that branch.
-    """
-
-    group_count = int(info.get("feature_groups", 0))
-    statistic_names = list(emd_config.feature_names)
-    names_by_group: list[list[str]] = []
+    names: list[str] = []
+    group_count = int(info["feature_groups"])
     for group in range(group_count):
         suffix = f"[ch{group + 1}]" if group_count > 1 else ""
-        names: list[str] = []
-        for branch in info.get("branches", []):
-            widths = [int(width) for width in branch.get("group_widths", [])]
-            statistic_count = widths[group] if group < len(widths) else 0
-            branch_name = str(branch.get("name", "branch"))
-            recorded = branch.get("feature_names")
-            column_names = (
-                list(statistic_names) if recorded is None else [str(name) for name in recorded]
-            )
+        for branch in info["branches"]:
             names.extend(
-                f"{branch_name}{suffix}.{name}" for name in column_names[:statistic_count]
+                f"{branch['name']}{suffix}.{name}" for name in emd_config.feature_names
             )
-            names.extend(
-                f"{branch_name}{suffix}.{name}"
-                for name in (branch.get("locator_features") or [])
-            )
-        names_by_group.append(names)
-
-    contrast = info.get("contrast_group")
-    if contrast:
-        source = int(contrast.get("source_groups", [0])[0])
-        if source >= len(names_by_group):
-            raise ValueError(
-                f"contrast group points at group {source} but only "
-                f"{len(names_by_group)} channel group(s) exist"
-            )
-        prefix = f"contrast_{contrast.get('kind', 'contrast')}:"
-        names_by_group.append([f"{prefix}{name}" for name in names_by_group[source]])
-
-    names = [name for group_names in names_by_group for name in group_names]
-    expected = int(sum(int(width) for width in info.get("feature_group_dims", [])))
-    if expected and len(names) != expected:
-        raise ValueError(
-            f"named {len(names)} columns but feature_group_dims describes {expected}"
-        )
+    expected = sum(int(width) for width in info["feature_group_dims"])
+    if len(names) != expected:
+        raise ValueError(f"named {len(names)} columns but feature vector has {expected}")
     return names
 
 
@@ -2064,7 +1182,7 @@ def sample_feature_vector(
     score_region: RegionSpec = RegionSpec(0.0, 5.0, "selection_full"),
     point_id: str | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Preprocess one sample and concatenate EMD features from all branches."""
+    """Preprocess one sample and keep physical-channel features separate."""
 
     if sample.ndim != 3:
         raise ValueError(f"Expected sample [50, 2, 896], got {sample.shape}")
@@ -2073,14 +1191,10 @@ def sample_feature_vector(
     processed, selected_frames = process_frames(
         selected_channels, form, mapper=mapper, score_region=score_region
     )
-    branch_features: list[np.ndarray] = []
-    branch_info: list[dict[str, Any]] = []
+    specs: list[tuple[str, np.ndarray, list[int], list[int], float | None, float | None]] = []
     dynamic_info: dict[str, Any] | None = None
-    branch_specs: list[dict[str, Any]] = []
     if dynamic_envelope_config is not None:
-        # The locator always comes from the raw selected frames, so the split
-        # does not depend on which frame form is being evaluated.
-        branch_signals_list, dynamic_info = prepare_dynamic_envelope_branches(
+        blocks, dynamic_info = prepare_dynamic_envelope_branches(
             processed,
             locator_frames=selected_channels,
             config=dynamic_envelope_config,
@@ -2089,252 +1203,72 @@ def sample_feature_vector(
             point_id=point_id,
             physical_channels=physical_channels,
         )
-        for branch_index, branch_signals in enumerate(branch_signals_list):
-            dynamic_branch = dynamic_info["branches"][branch_index]
-            branch_specs.append(
-                {
-                    "name": str(dynamic_branch["name"]),
-                    "block": branch_signals,
-                    "start_index": int(dynamic_branch["start_index"]),
-                    "end_index_exclusive": int(dynamic_branch["end_index_exclusive"]),
-                    "start_mm": None,
-                    "end_mm": None,
-                    "start_by_channel": [
-                        int(value) for value in dynamic_branch["start_index_by_channel"]
-                    ],
-                    "end_by_channel": [
-                        int(value)
-                        for value in dynamic_branch["end_index_exclusive_by_channel"]
-                    ],
-                }
-            )
+        for block, branch in zip(blocks, dynamic_info["branches"]):
+            specs.append((
+                str(branch["name"]),
+                block,
+                [int(value) for value in branch["start_index_by_channel"]],
+                [int(value) for value in branch["end_index_exclusive_by_channel"]],
+                None,
+                None,
+            ))
     else:
         for region in regions:
             start, end = mapper.slice_bounds(region)
             block = prepare_branch_block(
-                processed,
-                region,
-                mapper=mapper,
-                target_length=target_length,
-                tukey_alpha=tukey_alpha,
+                processed, region, mapper, target_length, tukey_alpha
             )
-            channel_count = int(block.shape[1])
-            branch_specs.append(
-                {
-                    "name": region.label,
-                    "block": block,
-                    "start_index": start,
-                    "end_index_exclusive": end,
-                    "start_mm": region.start_mm,
-                    "end_mm": region.end_mm,
-                    "start_by_channel": [start] * channel_count,
-                    "end_by_channel": [end] * channel_count,
-                }
-            )
-
-    # Depth-locator block, already split the way the feature groups are: one row
-    # per group, in group order.  ``per_channel`` keeps a row per channel;
-    # ``pooled`` folds the channel axis, exactly like the EMD statistics do.
-    locator_blocks: list[np.ndarray] | None = None
-    if dynamic_info is not None and emd_config.locator_features != "none":
-        locator_matrix = locator_feature_matrix(
-            dynamic_info, mapper, emd_config.locator_features
-        )
-        if emd_config.channel_aggregation == "pooled":
-            locator_blocks = [
-                np.mean(locator_matrix, axis=0, dtype=np.float64).astype(np.float32)
-            ]
-        else:
-            locator_blocks = [row for row in locator_matrix]
-
-    mm_per_index = mapper.max_depth_mm / max(1, mapper.signal_length)
-    branch_widths: list[tuple[int, ...]] = []
-    for spec in branch_specs:
-        block = spec["block"]
-        channel_count = int(block.shape[1])
-        # Physical spacing of the *resampled* branch, so ``spectral_centroid`` is
-        # in cycles/mm.  Branch 1 is resampled from ~0.95 mm and branch 2 from
-        # ~3.6 mm, so a per-sample axis would not be the same frequency in both.
-        spacing = [
-            mm_per_index * float(end_c - start_c) / max(1, target_length)
-            for start_c, end_c in zip(spec["start_by_channel"], spec["end_by_channel"])
+            specs.append((
+                region.label, block, [start] * block.shape[1], [end] * block.shape[1],
+                region.start_mm, region.end_mm,
+            ))
+    if not specs:
+        raise ValueError("at least one branch is required")
+    per_channel: list[list[np.ndarray]] = [[] for _ in physical_channels]
+    branch_info: list[dict[str, Any]] = []
+    mm_per_index = mapper.max_depth_mm / mapper.signal_length
+    for name, block, starts, ends, start_mm, end_mm in specs:
+        spacings = [
+            mm_per_index * (end - start) / target_length
+            for start, end in zip(starts, ends)
         ]
-        assert len(spacing) == channel_count
-        features, widths = emd_feature_groups(block, emd_config, sample_spacing=spacing)
-        branch_features.append(features)
-        branch_widths.append(widths)
-        branch_info.append(
-            {
-                "name": spec["name"],
-                "start_mm": spec["start_mm"],
-                "end_mm": spec["end_mm"],
-                "start_index": spec["start_index"],
-                "end_index_exclusive": spec["end_index_exclusive"],
-                "input_streams": int(np.prod(block.shape[:2])),
-                "feature_length": int(features.size),
-                "feature_groups": len(widths),
-                "group_widths": [int(width) for width in widths],
-                # Empty for every branch except the envelope main window.
-                "locator_features": [],
-                "sample_spacing_mm_by_channel": [float(value) for value in spacing],
-            }
-        )
-
-    # Cross-branch ratio, S3b.  Appended as a *branch* so the existing
-    # group-major assembly below picks it up for free: one contrast column block
-    # per channel group, sitting right after that channel's own branch columns.
-    # It is added last, so it never receives the depth-locator block -- the
-    # locator describes where the windows are, not what they contain, and is
-    # already present in branch 0.
-    if emd_config.branch_ratio != "none":
-        if len(branch_specs) < 2:
-            raise ValueError(
-                f"branch_ratio={emd_config.branch_ratio!r} contrasts two windows, but this "
-                f"region plan produced only {len(branch_specs)} branch(es) "
-                f"({[str(spec['name']) for spec in branch_specs]})"
-            )
-        numerator_spec, denominator_spec = branch_specs[0], branch_specs[1]
-        separations = [
-            abs(
-                0.5 * (first_start + first_end) - 0.5 * (second_start + second_end)
-            )
-            * mm_per_index
-            for first_start, first_end, second_start, second_end in zip(
-                numerator_spec["start_by_channel"],
-                numerator_spec["end_by_channel"],
-                denominator_spec["start_by_channel"],
-                denominator_spec["end_by_channel"],
-            )
+        channel_features = [
+            emd_feature_vector(block[:, channel, :], emd_config, spacings[channel])
+            for channel in range(block.shape[1])
         ]
-        if emd_config.channel_aggregation == "pooled":
-            # One group holds every channel, so the single attenuation column has
-            # to use one separation; the mean keeps it on the physical axis
-            # instead of silently pairing an averaged numerator with one channel's
-            # distance.
-            separations = [float(np.mean(separations))]
-        if len(separations) != len(branch_widths[0]):
-            raise ValueError(
-                f"computed {len(separations)} window separation(s) for "
-                f"{len(branch_widths[0])} feature group(s)"
-            )
-        ratio_features, ratio_widths, ratio_names = _branch_ratio_block(
-            branch_features[0],
-            branch_features[1],
-            branch_widths[0],
-            BRANCH_RATIO_PRESETS[emd_config.branch_ratio],
-            emd_config.feature_names,
-            separations,
-        )
-        branch_features.append(ratio_features)
-        branch_widths.append(ratio_widths)
-        assert len(ratio_widths) == len(branch_widths[0])
-        branch_info.append(
-            {
-                "name": f"branch_ratio[{emd_config.branch_ratio}]",
-                "start_mm": None,
-                "end_mm": None,
-                "start_index": None,
-                "end_index_exclusive": None,
-                "input_streams": 0,
-                "feature_length": int(ratio_features.size),
-                "feature_groups": len(ratio_widths),
-                "group_widths": [int(width) for width in ratio_widths],
-                "locator_features": [],
-                "sample_spacing_mm_by_channel": [float(value) for value in separations],
-                "numerator_branch": str(numerator_spec["name"]),
-                "denominator_branch": str(denominator_spec["name"]),
-                # A derived branch publishes its own column names, because its
-                # columns are not component statistics.
-                "feature_names": ratio_names,
-            }
-        )
-
-    # Features are laid out group-major: everything a channel contributes is
-    # contiguous across branches, so the classifier can slice one group per
-    # tower.  With ``channel_aggregation="pooled"`` there is a single group and
-    # the layout collapses to the historical branch-major concatenation.
-    group_count = len(branch_widths[0])
-    for widths in branch_widths:
-        if len(widths) != group_count:
-            raise ValueError(
-                "every branch must yield the same number of feature groups; got "
-                f"{[len(w) for w in branch_widths]}"
-            )
-    if locator_blocks is not None:
-        if len(locator_blocks) != group_count:
-            raise ValueError(
-                f"locator block has {len(locator_blocks)} rows but there are "
-                f"{group_count} feature groups"
-            )
-        # Every branch list starts with the envelope main window, which is the
-        # branch the locator describes; the tail window has no locator of its own.
-        branch_info[0]["locator_features"] = list(
-            LOCATOR_FEATURE_PRESETS[emd_config.locator_features]
-        )
-    per_group: list[list[np.ndarray]] = [[] for _ in range(group_count)]
-    for branch_index, (features, widths) in enumerate(zip(branch_features, branch_widths)):
-        offset = 0
-        for group, width in enumerate(widths):
-            chunk = features[offset : offset + width]
-            offset += width
-            if locator_blocks is not None and branch_index == 0:
-                chunk = np.concatenate([chunk, locator_blocks[group]])
-            per_group[group].append(chunk)
-    locator_width = 0 if locator_blocks is None else int(locator_blocks[0].size)
-    group_dims = tuple(
-        int(sum(widths[group] for widths in branch_widths)) + locator_width
-        for group in range(group_count)
-    )
-    # Each channel group is complete on its own, so it is safe to concatenate
-    # them here rather than at the very end: the cross-channel contrast below
-    # needs complete groups to be elementwise comparable.  With
-    # ``channel_contrast="none"`` the final concatenation is unchanged.
-    group_vectors = [np.concatenate(parts) for parts in per_group]
-    contrast_info: dict[str, Any] | None = None
-    if emd_config.channel_contrast != "none":
-        if group_count < 2:
-            raise ValueError(
-                f"channel_contrast={emd_config.channel_contrast!r} contrasts two channels, "
-                f"but channel_mode={channel_mode} with channel_aggregation="
-                f"{emd_config.channel_aggregation!r} produced {group_count} feature group(s)"
-            )
-        contrast = _channel_contrast(
-            group_vectors[0], group_vectors[1], emd_config.channel_contrast
-        )
-        group_vectors.append(contrast)
-        group_dims = group_dims + (int(contrast.size),)
-        contrast_info = {
-            "kind": emd_config.channel_contrast,
-            "source_groups": [0, 1],
-            "source_channels": [int(value) for value in physical_channels[:2]],
-            "width": int(contrast.size),
-        }
-    info = {
+        widths = tuple(int(features.size) for features in channel_features)
+        for channel, features in enumerate(channel_features):
+            per_channel[channel].append(features)
+        branch_info.append({
+            "name": name,
+            "start_mm": start_mm,
+            "end_mm": end_mm,
+            "start_index": starts[0],
+            "end_index_exclusive": ends[0],
+            "start_index_by_channel": starts,
+            "end_index_exclusive_by_channel": ends,
+            "input_streams": int(np.prod(block.shape[:2])),
+            "feature_length": int(sum(widths)),
+            "feature_groups": len(widths),
+            "group_widths": list(widths),
+            "sample_spacing_mm_by_channel": spacings,
+        })
+    groups = [np.concatenate(parts) for parts in per_channel]
+    info: dict[str, Any] = {
         "form": canonical_form(form),
         "channel_mode": channel_mode,
-        "channel_aggregation": emd_config.channel_aggregation,
         "selected_frames": None if selected_frames is None else selected_frames.tolist(),
-        "region_mode": "dyn_envelope" if dynamic_envelope_config is not None else "fixed",
+        "region_mode": "dyn_envelope" if dynamic_info is not None else "fixed",
         "branches": branch_info,
-        "feature_groups": group_count,
-        "feature_group_dims": list(group_dims),
+        "feature_groups": len(groups),
+        "feature_group_dims": [int(group.size) for group in groups],
         "component_features": list(emd_config.feature_names),
-        "locator_features": list(LOCATOR_FEATURE_PRESETS[emd_config.locator_features]),
     }
-    if contrast_info is not None:
-        info["contrast_group"] = contrast_info
     if dynamic_info is not None:
         info["dynamic_envelope"] = dynamic_info
-    return np.concatenate(group_vectors).astype(np.float32), info
+    return np.concatenate(groups).astype(np.float32), info
 
 
-# The source ADC stores raw codes, and both 127 and 128 mean "zero": they
-# normalize to +-0.5 / 127.5, i.e. the same physical level split across the two
-# sides of the 127.5 midpoint.  Keeping that +-0.0039 jitter injects spurious
-# quantization noise, which is enough to move the ``dyn_envelope`` threshold
-# crossing by tens of samples (measured: 267 instead of 324 on ``N35_P2_01``).
-# ``bin/after_split_data/`` was produced from the collapsed traces, so the loader
-# reproduces the collapse to keep ``--data-dir raw_data`` bit-exact.
 ADC_DC_MAGNITUDE = 0.5 / 127.5
 ADC_DC_ATOL = 1e-6
 
@@ -2374,7 +1308,7 @@ def load_split(data_dir: Path | str, split: str) -> tuple[np.ndarray, np.ndarray
     samples_path = split_dir / "samples.json"
     if not x_path.exists() or not y_path.exists():
         raise FileNotFoundError(f"Missing X.npy/y.npy under {split_dir}")
-    x = replace_adc_dc_level(np.load(x_path).astype(np.float32))
+    x = replace_adc_dc_level(np.load(x_path))
     y = np.load(y_path).astype(np.int64)
     if x.ndim != 4 or x.shape[1:] != (50, 2, 896):
         raise ValueError(f"Expected {split} X shape [N,50,2,896], got {x.shape}")
@@ -2544,8 +1478,8 @@ def build_feature_matrix(
             point_id=point_id,
         )
         vectors.append(vector)
-        # Fixed-region runs retain the historical compact preview (first
-        # sample only). Dynamic envelope runs need every sample's detected
+        # Fixed-region runs need only the first sample's layout. Dynamic
+        # envelope runs need every sample's detected
         # boundary because the split is sample-dependent.
         if index == 0 or dynamic_envelope_config is not None:
             infos.append(info)
@@ -2788,126 +1722,22 @@ def classification_metrics(
     }
 
 
-def threshold_scan(
-    y_true: np.ndarray, probabilities: np.ndarray, num_steps: int = 201
-) -> dict[str, Any]:
-    """Accuracy-maximising decision threshold for a binary model.
-
-    The stated goal on this dataset is that the classes separate **at some
-    threshold**, which makes the threshold a fitted quantity.  Hardcoding it at
-    0.5 therefore answers a question nobody asked: with an imbalanced split the
-    0.5 rule trades sensitivity for specificity at a ratio that no one chose, and
-    the published accuracy then depends on that accident.
-
-    The sweep is over the observed score support, extended to cover 0 and 1 so
-    the constant-predictor cases are reachable.  Ties are broken towards 0.5, so
-    the chosen threshold stays as close to the unbiased default as the data
-    allows instead of drifting to an arbitrary edge of a plateau.
-
-    Scan the split you are allowed to fit on -- the train split, or a fold's
-    training specimens.  Selecting the threshold on the split whose accuracy is
-    then reported is the quiet way a threshold becomes a test-set hyperparameter.
-    """
-
-    y_true = np.asarray(y_true, dtype=np.int64).ravel()
-    probabilities = np.asarray(probabilities, dtype=np.float64)
-    if probabilities.ndim != 2 or probabilities.shape[1] < 2:
-        raise ValueError("threshold_scan expects binary probabilities of shape [n, 2]")
-    scores = probabilities[:, 1]
-    if y_true.size == 0:
-        raise ValueError("threshold_scan needs at least one labelled row")
-    lower = min(0.0, float(scores.min()))
-    upper = max(1.0, float(scores.max()))
-    grid = np.linspace(lower, upper, max(2, int(num_steps)))
-    positives = y_true == 1
-    best_threshold = 0.5
-    best_accuracy = -1.0
-    best_distance = float("inf")
-    for candidate in grid:
-        accuracy = float(np.mean((scores >= candidate) == positives))
-        distance = abs(float(candidate) - 0.5)
-        if accuracy > best_accuracy + 1e-12 or (
-            abs(accuracy - best_accuracy) <= 1e-12 and distance < best_distance
-        ):
-            best_threshold = float(candidate)
-            best_accuracy = accuracy
-            best_distance = distance
-    return {
-        "threshold": best_threshold,
-        "accuracy": best_accuracy,
-        "candidates": int(grid.size),
-        "seed_threshold": 0.5,
-        "seed_accuracy": float(np.mean((scores >= 0.5) == positives)),
-    }
-
-
 class NumpyMLPClassifier:
-    """A compact ReLU MLP classifier with Adam optimization.
+    """A compact ReLU MLP classifier with Adam optimization."""
 
-    When ``group_dims`` holds more than one entry the network becomes a
-    two-phase model: one small **tower** per feature group (i.e. per ultrasound
-    channel under ``channel_aggregation="per_channel"``) maps that group to
-    ``hidden_dims[0]`` units, the towers are concatenated, and a shared **head**
-    (``hidden_dims[1:]`` followed by the ``config.num_classes``-way output)
-    fuses them.  With a single group the towers collapse into the first dense
-    layer, so the network is exactly the historical ``in -> 64 -> 32 -> 2`` MLP
-    whenever ``num_classes=2``.
-    """
-
-    def __init__(
-        self,
-        input_dim: int,
-        config: MLPConfig,
-        group_dims: Sequence[int] | None = None,
-    ) -> None:
+    def __init__(self, input_dim: int, config: MLPConfig) -> None:
         config.validate()
         self.config = config
-        self.input_dim = int(input_dim)
-        if group_dims is None:
-            group_dims = (self.input_dim,)
-        group_dims = tuple(int(width) for width in group_dims)
-        if any(width <= 0 for width in group_dims):
-            raise ValueError("group_dims must contain positive widths")
-        if sum(group_dims) != self.input_dim:
-            raise ValueError(
-                f"group_dims sum to {sum(group_dims)} but input_dim is {self.input_dim}"
-            )
-        self.group_dims = group_dims
-        self.tower_count = len(group_dims)
-        # ``_group_slices`` indexes the input vector (one slice per feature
-        # group, widths = group_dims); ``_tower_slices`` indexes the fused
-        # activation, where every tower contributes exactly ``tower_width``.
-        bounds = np.cumsum((0, *group_dims))
-        self._group_slices = [
-            slice(int(bounds[index]), int(bounds[index + 1]))
-            for index in range(self.tower_count)
-        ]
         self.rng = np.random.default_rng(config.seed)
-        # hidden_dims[0] is the per-group tower width; the remaining hidden
-        # dims and the output form the shared head, whose input is the
-        # concatenation of every tower.
-        tower_width = int(config.hidden_dims[0])
-        self._tower_slices = [
-            slice(index * tower_width, (index + 1) * tower_width)
-            for index in range(self.tower_count)
-        ]
-        # The output width is the number of classes, so a k-class problem needs
-        # a k-way softmax head instead of the historical 2-way one.
-        self.num_classes = int(config.num_classes)
-        head_dims = [*config.hidden_dims[1:], self.num_classes]
-        dimensions = [(width, tower_width) for width in group_dims]
-        fan_in = tower_width * self.tower_count
-        for fan_out in head_dims:
-            dimensions.append((fan_in, fan_out))
-            fan_in = fan_out
-        self.head_layer_count = len(head_dims)
+        dimensions = [input_dim, *config.hidden_dims, config.num_classes]
         self.weights: list[np.ndarray] = []
         self.biases: list[np.ndarray] = []
-        for fan_in, fan_out in dimensions:
+        for fan_in, fan_out in zip(dimensions[:-1], dimensions[1:]):
             scale = math.sqrt(2.0 / fan_in)
             self.weights.append((self.rng.standard_normal((fan_in, fan_out)) * scale).astype(np.float32))
             self.biases.append(np.zeros(fan_out, dtype=np.float32))
         self.best_weights = self._copy_parameters()
+        self.best_epoch: int | None = None
 
     def _copy_parameters(self) -> tuple[list[np.ndarray], list[np.ndarray]]:
         return ([w.copy() for w in self.weights], [b.copy() for b in self.biases])
@@ -2916,53 +1746,15 @@ class NumpyMLPClassifier:
         self.weights = [w.copy() for w in state[0]]
         self.biases = [b.copy() for b in state[1]]
 
-    def parameter_layout(self) -> dict[str, Any]:
-        """Describe the two-phase topology, for ``config.json``/``metrics.json``."""
-
-        head_layers = [
-            {"fan_in": int(self.weights[index].shape[0]), "fan_out": int(self.weights[index].shape[1])}
-            for index in range(self.tower_count, len(self.weights))
-        ]
-        return {
-            "tower_count": self.tower_count,
-            "tower_dims": [int(width) for width in self.group_dims],
-            "tower_outputs": int(self.config.hidden_dims[0]),
-            "head_layers": head_layers,
-        }
-
     def _forward(self, x: np.ndarray, training: bool) -> tuple[np.ndarray, list[tuple[np.ndarray, np.ndarray, np.ndarray | None]]]:
-        x = np.asarray(x, dtype=np.float32)
-        if x.ndim != 2 or x.shape[1] != self.input_dim:
-            raise ValueError(f"Expected [batch, {self.input_dim}] input, got {x.shape}")
+        activation = x.astype(np.float32)
         cache: list[tuple[np.ndarray, np.ndarray, np.ndarray | None]] = []
-        tower_outputs: list[np.ndarray] = []
-        # Phase 1: every group gets its own tower.  A single group skips the
-        # concatenation entirely, which keeps the historical layer topology.
-        for tower in range(self.tower_count):
-            previous = x[:, self._group_slices[tower]]
-            weight, bias = self.weights[tower], self.biases[tower]
-            z = previous @ weight + bias
-            hidden = np.maximum(z, 0.0)
-            mask = None
-            if training and self.config.dropout > 0:
-                mask = (self.rng.random(hidden.shape) >= self.config.dropout).astype(np.float32)
-                hidden = hidden * mask / (1.0 - self.config.dropout)
-            cache.append((previous, z, mask))
-            tower_outputs.append(hidden)
-        activation = (
-            tower_outputs[0]
-            if self.tower_count == 1
-            else np.concatenate(tower_outputs, axis=1)
-        )
-        # Phase 2: the shared head fuses the concatenated tower outputs.
-        for layer in range(self.head_layer_count):
-            index = self.tower_count + layer
-            weight, bias = self.weights[index], self.biases[index]
+        for layer, (weight, bias) in enumerate(zip(self.weights, self.biases)):
             previous = activation
             z = previous @ weight + bias
-            if layer == self.head_layer_count - 1:
-                cache.append((previous, z, None))
+            if layer == len(self.weights) - 1:
                 activation = z
+                cache.append((previous, z, None))
                 continue
             activation = np.maximum(z, 0.0)
             mask = None
@@ -2971,55 +1763,6 @@ class NumpyMLPClassifier:
                 activation = activation * mask / (1.0 - self.config.dropout)
             cache.append((previous, z, mask))
         return activation, cache
-
-    def _backward(
-        self,
-        cache: list[tuple[np.ndarray, np.ndarray, np.ndarray | None]],
-        delta: np.ndarray,
-    ) -> tuple[list[np.ndarray], list[np.ndarray]]:
-        """Backpropagate the softmax-cross-entropy gradient through both phases.
-
-        ``delta`` is the gradient with respect to the output logits (already
-        divided by the batch size).  Returns the weight and bias gradients in
-        the same order as :attr:`weights`, with the L2 penalty folded into the
-        weight gradients.
-        """
-
-        delta = np.asarray(delta, dtype=np.float32)
-        grad_w: list[np.ndarray] = [np.zeros_like(w) for w in self.weights]
-        grad_b: list[np.ndarray] = [np.zeros_like(b) for b in self.biases]
-        # Shared head first, from the output back through the fusion layer.
-        # Unlike a plain MLP the fusion layer is not the bottom of the stack,
-        # so its own nonlinearity is applied below, per tower, rather than to
-        # ``cache[index - 1]``.
-        for layer in range(self.head_layer_count - 1, -1, -1):
-            index = self.tower_count + layer
-            previous, _, _ = cache[index]
-            grad_w[index] = previous.T @ delta + self.config.weight_decay * self.weights[index]
-            grad_b[index] = np.sum(delta, axis=0)
-            delta = delta @ self.weights[index].T
-            if layer == 0:
-                continue
-            # The derivative belongs to the previous hidden layer, not to the
-            # layer whose weights were just differentiated.
-            previous_z = cache[index - 1][1]
-            previous_mask = cache[index - 1][2]
-            delta = delta * (previous_z > 0.0)
-            if previous_mask is not None:
-                delta = delta * previous_mask / (1.0 - self.config.dropout)
-        # ``delta`` now holds the gradient of the fused activation; each tower
-        # owns the slice it contributed to it.
-        for tower in range(self.tower_count):
-            previous, z, mask = cache[tower]
-            group_delta = delta[:, self._tower_slices[tower]]
-            group_delta = group_delta * (z > 0.0)
-            if mask is not None:
-                group_delta = group_delta * mask / (1.0 - self.config.dropout)
-            grad_w[tower] = (
-                previous.T @ group_delta + self.config.weight_decay * self.weights[tower]
-            )
-            grad_b[tower] = np.sum(group_delta, axis=0)
-        return grad_w, grad_b
 
     def predict_proba(self, x: np.ndarray) -> np.ndarray:
         logits, _ = self._forward(np.asarray(x, dtype=np.float32), training=False)
@@ -3051,15 +1794,6 @@ class NumpyMLPClassifier:
             raise ValueError("Train and validation features must be 2-D with the same width")
         if x_test is not None and (x_test.ndim != 2 or x_test.shape[1] != x_train.shape[1]):
             raise ValueError("Test features must be 2-D with the same width as train features")
-        for name, targets in (("train", y_train), ("val", y_val), ("test", y_test)):
-            if targets is None:
-                continue
-            if targets.size and (int(targets.min()) < 0 or int(targets.max()) >= self.num_classes):
-                raise ValueError(
-                    f"{name} labels run from {int(targets.min())} to {int(targets.max())} but this "
-                    f"model was built for num_classes={self.num_classes}; set MLPConfig.num_classes "
-                    "to the number of classes in the dataset"
-                )
         m_weights = [np.zeros_like(w) for w in self.weights]
         v_weights = [np.zeros_like(w) for w in self.weights]
         m_biases = [np.zeros_like(b) for b in self.biases]
@@ -3068,6 +1802,7 @@ class NumpyMLPClassifier:
         best_auc = -np.inf
         best_loss = np.inf
         stale_epochs = 0
+        self.best_epoch = None
         step = 0
         batch_size = min(self.config.batch_size, x_train.shape[0])
 
@@ -3085,7 +1820,22 @@ class NumpyMLPClassifier:
                 delta = probabilities
                 delta[np.arange(yb.size), yb] -= 1.0
                 delta /= yb.size
-                grad_w, grad_b = self._backward(cache, delta)
+                grad_w: list[np.ndarray] = [np.zeros_like(w) for w in self.weights]
+                grad_b: list[np.ndarray] = [np.zeros_like(b) for b in self.biases]
+                for layer in range(len(self.weights) - 1, -1, -1):
+                    previous, z, mask = cache[layer]
+                    grad_w[layer] = previous.T @ delta + self.config.weight_decay * self.weights[layer]
+                    grad_b[layer] = np.sum(delta, axis=0)
+                    if layer > 0:
+                        delta = delta @ self.weights[layer].T
+                        # The derivative belongs to the previous hidden
+                        # layer, not to the layer whose weights were just
+                        # differentiated.
+                        previous_z = cache[layer - 1][1]
+                        previous_mask = cache[layer - 1][2]
+                        delta = delta * (previous_z > 0.0)
+                        if previous_mask is not None:
+                            delta = delta * previous_mask / (1.0 - self.config.dropout)
                 step += 1
                 beta1, beta2 = 0.9, 0.999
                 for layer in range(len(self.weights)):
@@ -3102,10 +1852,8 @@ class NumpyMLPClassifier:
 
             train_probabilities = self.predict_proba(x_train)
             val_probabilities = self.predict_proba(x_val)
-            train_metrics = classification_metrics(
-                y_train, train_probabilities, self.num_classes
-            )
-            val_metrics = classification_metrics(y_val, val_probabilities, self.num_classes)
+            train_metrics = classification_metrics(y_train, train_probabilities, self.config.num_classes)
+            val_metrics = classification_metrics(y_val, val_probabilities, self.config.num_classes)
             val_loss = -float(np.mean(np.log(np.maximum(val_probabilities[np.arange(y_val.size), y_val], 1e-12))))
             test_loss = None
             if x_test is not None and y_test is not None:
@@ -3131,6 +1879,7 @@ class NumpyMLPClassifier:
                 best_auc = score
                 best_loss = val_loss
                 self.best_weights = self._copy_parameters()
+                self.best_epoch = epoch
                 stale_epochs = 0
             else:
                 stale_epochs += 1
@@ -3145,10 +1894,6 @@ class NumpyMLPClassifier:
             arrays[f"weight_{index}"] = weight
         for index, bias in enumerate(self.biases):
             arrays[f"bias_{index}"] = bias
-        # Parameter order is ``tower_0 .. tower_{T-1}, head_0 .. head_{H-1}``,
-        # so the topology has to travel with the weights.
-        arrays["group_dims"] = np.asarray(self.group_dims, dtype=np.int64)
-        arrays["tower_count"] = np.asarray(self.tower_count, dtype=np.int64)
         np.savez(path, **arrays)
 
 

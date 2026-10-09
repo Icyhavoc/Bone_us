@@ -1,5 +1,7 @@
 # `bin/` —— 项目归档区
 
+> 本文件记录归档形成时的历史状态。下方提到的根目录脚本、恢复命令和 README 章节号可能已经过期；现行主流程以根目录 README.md、PROJECT_SUMMARY.md 和项目 skill 为准。归档内容保持原样供追溯。
+
 创建时间：2026-09-21
 最近整理：2026-09-22（移入 `_ab*`、`_baseline_*`、`_dimcheck`、`_vis3f`、`_gui_dataset`、`_kclass_check`、`_relabel_check`）；
         2026-09-22 晚（S1/S3a/S3b/S4 落地后追加 `_s1_check`、`_scheme_ab`、`_s1_thresholds`、`_s3a_rich`、
