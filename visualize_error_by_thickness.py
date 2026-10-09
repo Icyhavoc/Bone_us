@@ -11,11 +11,15 @@ point and is **not** the 896-point 0-5 mm acquisition axis used to slice the
 EMD branches.  It is also the quantity the binary label is thresholded on
 (``label = thickness >= 1.0 mm``).
 
-Each experiment yields one image holding all three splits at once:
+By default each experiment yields one image covering the held-out ``test``
+split only (``--splits test``):
 
 * wide light bar  -> how many samples of that thickness bin exist,
-* narrow dark bar -> how many of them the model misclassified, stacked by
-  split with ``test`` at the bottom, then ``val``, then ``train`` on top.
+* narrow dark bar -> how many of them the model misclassified.
+
+``--splits`` still accepts ``val``, ``train`` or any combination; when more than
+one split is requested the error bars are stacked inside each bin with ``test``
+at the bottom, then ``val``, then ``train`` on top.
 
 Everything is read back from the arrays the training run already saved
 (``probabilities_{split}.npy``, ``labels_{split}.npy``, ``samples_{split}.json``),
@@ -43,7 +47,8 @@ from emd_pipeline import (
 
 
 SPLIT_LABELS = {"train": "Train", "val": "Validation", "test": "Test"}
-# Stacking order inside one bin, drawn from the baseline upwards.
+# Stacking order inside one bin, drawn from the baseline upwards.  Only relevant
+# when ``--splits`` selects more than one split; the default renders ``test``.
 STACK_ORDER = ("test", "val", "train")
 SPLIT_COLORS = {"test": "#2f6f9f", "val": "#3d8b62", "train": "#c45a32"}
 TOTAL_FILL = "#dfe5ea"
@@ -249,7 +254,11 @@ def render_error_by_thickness(
 
     legend_font = _font(13)
     legend = [("该厚度区间总样本数", TOTAL_FILL, TOTAL_OUTLINE)]
-    legend += [(f"{SPLIT_LABELS[split]} 错分", SPLIT_COLORS[split], None) for split in STACK_ORDER]
+    legend += [
+        (f"{SPLIT_LABELS[split]} 错分", SPLIT_COLORS[split], None)
+        for split in STACK_ORDER
+        if split in ordered
+    ]
     swatch, inner_gap, between_gap = 20, 7, 24
     legend_width = sum(swatch + inner_gap + draw.textlength(text, font=legend_font) for text, _f, _o in legend)
     legend_width += between_gap * (len(legend) - 1)
@@ -392,10 +401,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3], default=None)
     parser.add_argument(
         "--splits",
-        default="test,val,train",
+        default="test",
         help=(
-            "comma-separated split subsets to include; the stacking order inside "
-            "every bin is always test -> val -> train from the bottom up"
+            "comma-separated split subsets to include (default: test only); "
+            "when several are given the stacking order inside every bin is "
+            "always test -> val -> train from the bottom up"
         ),
     )
     parser.add_argument("--threshold", type=float, default=0.5, help="positive-class decision threshold")

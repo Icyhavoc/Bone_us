@@ -637,7 +637,7 @@ python gui_app.py
 - `visualize_emd_components.py`：对 EMD 得到的 IMF 和 Residue 进行可视化，每个类别随机选择 1 个样本。
 - `visualize_training_curves.py`：读取 `history.json`，绘制 validation loss 和 test loss 随 epoch 的变化；test loss 不参与 early stopping。
 - `visualize_confusion_matrix.py`：读取 `metrics.json`，绘制 test 集混淆矩阵。
-- `visualize_error_by_thickness.py`：读取 `samples_{split}.json` 与 `probabilities_{split}.npy`/`labels_{split}.npy`，按骨头厚度分桶统计 train/val/test 的错分样本个数并绘制堆叠柱状图；默认桶宽 0.05 mm、判定阈值 0.5，
+- `visualize_error_by_thickness.py`：读取 `samples_{split}.json` 与 `probabilities_{split}.npy`/`labels_{split}.npy`，按骨头厚度分桶统计错分样本个数并绘制柱状图；**默认只画 test 集**（`--splits` 可指定 `test`/`val`/`train` 的任意组合，多个时按 test→val→train 堆叠）；默认桶宽 0.05 mm、判定阈值 0.5，
   参考线优先读该实验的 `label_scheme`（多分类会逐阈画线），可用 `--label-thresholds` 覆盖。
 
 两个脚本默认都使用：
