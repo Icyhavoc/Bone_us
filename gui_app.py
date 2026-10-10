@@ -42,6 +42,7 @@ EXPERIMENTS_DIR = APP_DIR / "experiments"
 VISUALIZATIONS_DIR = APP_DIR / "visualizations"
 RAW_DATA_DIR = APP_DIR / "raw_data"
 RELABELED_DATA_DIR = APP_DIR / "raw_data_relabeled"
+GUI_DEFAULT_DATASET_TAG = "cls2_thr1.3"
 # ``raw_data`` predates ``label_scheme.json``; its stored rule is
 # ``label = int(depth_value >= 1.0)``, re-verified against the stored labels.
 DEFAULT_BINARY_THRESHOLDS: tuple[float, ...] = (1.0,)
@@ -93,7 +94,9 @@ class DatasetProfile:
         kind = CLASS_NUMBER_WORDS.get(self.num_classes, f"{self.num_classes} 分类")
         thresholds = " / ".join(str(float(value)) for value in self.thresholds)
         if self.is_default:
-            return f"默认 · {kind} · depth >= {thresholds} mm"
+            return f"原始 · {kind} · depth >= {thresholds} mm"
+        if self.tag == GUI_DEFAULT_DATASET_TAG:
+            return f"默认 · {kind} · 阈值 {thresholds} mm · {self.data_dir.name}"
         return f"{kind} · 阈值 {thresholds} mm · {self.data_dir.name}"
 
     @property
@@ -117,11 +120,11 @@ class DatasetProfile:
 
 
 def discover_datasets() -> list[DatasetProfile]:
-    """Every dataset the GUI can train and browse, historical default first.
+    """Every dataset the GUI can train and browse, historical raw data first.
 
     Candidates are ``raw_data`` plus each sub-directory of
     ``raw_data_relabeled/`` that carries a ``label_scheme.json``.  Directory
-    order is stable so the default dataset stays selected across reloads.
+    order is stable across reloads.
     """
 
     candidates: list[Path] = [RAW_DATA_DIR]
@@ -776,10 +779,14 @@ class EMDViewerApp(tk.Tk):
         self.minsize(1100, 700)
         self.datasets = discover_datasets()
         self.dataset_map = {profile.display: profile for profile in self.datasets}
+        self.initial_dataset = next(
+            (profile for profile in self.datasets if profile.tag == GUI_DEFAULT_DATASET_TAG),
+            self.datasets[0] if self.datasets else None,
+        )
         self.catalog = ExperimentCatalog(
             EXPERIMENTS_DIR,
             VISUALIZATIONS_DIR,
-            self.datasets[0] if self.datasets else None,
+            self.initial_dataset,
         )
         self.training_active = False
         self.training_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -805,7 +812,7 @@ class EMDViewerApp(tk.Tk):
             header,
             text=(
                 "选择数据集决定使用哪套厚度阈值划分；再选预处理方式/区域/通道查看指标、"
-                "预处理信号和 EMD 分量。"
+                "预处理信号和 EMD 分量。通道 all 会依次训练 1、2、3。"
             ),
             style="Hint.TLabel",
         ).pack(anchor="w", pady=(3, 0))
@@ -813,7 +820,7 @@ class EMDViewerApp(tk.Tk):
         controls = ttk.Frame(self, padding=(16, 4, 16, 10))
         controls.pack(fill="x")
         self.dataset_var = tk.StringVar(
-            value=self.datasets[0].display if self.datasets else ""
+            value=self.initial_dataset.display if self.initial_dataset else ""
         )
         self.form_var = tk.StringVar(value="all")
         self.region_var = tk.StringVar(value="all")
@@ -1125,7 +1132,7 @@ class EMDViewerApp(tk.Tk):
         self._update_train_button()
 
     def _update_train_button(self) -> None:
-        if self.training_active or self.channel_var.get() == "all":
+        if self.training_active:
             self.train_button.configure(state="disabled")
         else:
             self.train_button.configure(state="normal")
@@ -1148,12 +1155,16 @@ class EMDViewerApp(tk.Tk):
             combo.configure(state=state)
         self._update_train_button()
 
-    def _build_training_commands(self) -> list[list[str]]:
+    def _build_training_commands(self, channel: str | None = None) -> list[list[str]]:
         form = self.form_var.get()
         region = self.region_var.get()
-        channel = self.channel_var.get()
+        channel = self.channel_var.get() if channel is None else channel
         if channel == "all":
-            raise ValueError("训练时请选择具体通道 1、2 或 3。")
+            return [
+                command
+                for selected_channel in ("1", "2", "3")
+                for command in self._build_training_commands(selected_channel)
+            ]
         profile = self.catalog.dataset
         data_dir = RAW_DATA_DIR if profile is None else profile.data_dir
         num_classes = 2 if profile is None else profile.num_classes

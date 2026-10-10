@@ -28,6 +28,8 @@ python raw_data/relabel_by_thickness.py --thresholds 0.8,1.2 --output-dir raw_da
 
 第一条只预览分布。一个阈值给二分类，两个阈值给三分类；阈值属于其右侧类别，例如 0.8 mm 属于第 1 类。默认按新标签分层重新划分 train/val/test；`--keep-split` 只重贴标签并保留原归属，其数据集 tag 追加 `_keepsplit`。输出包含 `label_scheme.json`、分组统计和样本清单。请为不同阈值或划分使用独立数据目录；源 `raw_data` 不会被覆盖。
 
+当前保留的 1.3 mm 二分类数据集为 `raw_data_relabeled/cls2_thr1.3`（按新标签分层重划分）。GUI 启动时默认选择它；原始 `raw_data` 的 1.0 mm 标签及 CLI 默认数据目录仍保持不变。先前生成的 `cls2_thr1.3_keepsplit` 与它标签和样本池相同，但有 158/268 条样本的 split 归属不同；该副本已删除，`--keep-split` 接口仍可在需要时重新生成该划分。
+
 ## 信号、特征与模型
 
 帧方式：`mean_std`、`raw50`、`max1`、`top3_mean`。后两种先用完整双通道 50 帧定位各自的动态主体窗（默认 170 点），即使最终使用固定分区也按主体窗选帧。单通道按本通道主体窗内的最大绝对幅值排序；双通道先取通道 1 主体窗峰值最高的 10 帧，再按两通道相似度排序，`max1` 取相似度最高的 1 帧，`top3_mean` 取最高 3 帧并逐通道平均。相似度为同一绝对位置窗口内、允许 ±5 点位移的最大绝对去均值相关系数，乘以两通道 RMS 的 `min/max` 能量比。通道 1 峰值只用于筛选候选和同分排序，不决定最终首帧。
@@ -64,5 +66,6 @@ python gui_app.py
 | `verify_dyn_envelope.py` | 动态分区校验 |
 
 GUI 可自动运行以上四类可视化。历史实验、原始数据和 `bin/` 归档保留在原处；旧探索脚本不属于现行入口。
+GUI 的通道选择为 `all` 时，训练按钮依次运行通道模式 1、2、3；每个模式仍独立保存实验与图像。
 
 项目目标与实现约束见工作区的 `../.codex/skills/bmu-emd-project/SKILL.md`，当前代码范围及历史产物说明见 `PROJECT_SUMMARY.md`。

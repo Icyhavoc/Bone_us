@@ -134,6 +134,8 @@ D:\Miniconda3\python.exe run_emd_experiments.py --forms all --region-set all --c
 
 ## 数据集 tag 冲突与覆盖保护（2026-09-22 补）
 
+2026-10-10：`cls2_thr1.3_keepsplit` 数据目录已删除；以下数值为旧前处理的历史记录，可用 `--keep-split` 重新生成该数据集。两种划分的 test 样本不同，准确率差异不能单独解释为模型优劣。
+
 `label_scheme.json` 的 `tag` 只由**类别数**与**阈值**决定，不反映划分方式，因此
 `raw_data_relabeled/cls2_thr1.3`（`stratified_random_split`，seed 42）与
 `raw_data_relabeled/cls2_thr1.3_keepsplit`（`keep_source_split`，沿用 `raw_data` 划分）

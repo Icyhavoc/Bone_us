@@ -2,13 +2,14 @@
 
 ## 目标
 
-用 BMU 超声 A 扫信号构建骨厚度分类主流程：ADC 零电平归一化、帧处理、深度分区、EMD 统计特征、训练集标准化和 NumPy MLP。厚度分类阈值可变；默认 1.0 mm 二分类，训练、指标、图像和 GUI 保留 k 分类接口。
+用 BMU 超声 A 扫信号构建骨厚度分类主流程：ADC 零电平归一化、帧处理、深度分区、EMD 统计特征、训练集标准化和 NumPy MLP。厚度分类阈值可变；原始 `raw_data` 与 CLI 默认目录采用 1.0 mm 二分类，GUI 初始选择 `raw_data_relabeled/cls2_thr1.3`。训练、指标、图像和 GUI 保留 k 分类接口。
 
 ## 数据约定
 
 - 单样本 `[50,2,896]`，分别是帧、物理通道、采集深度点。896 点默认对应 0–5 mm。
 - 默认 `raw_data` 有 train/val/test。厚度取样本元数据的 `depth_value`，它与采集深度轴不同。
 - `raw_data/relabel_by_thickness.py` 按一个或多个阈值生成独立数据集。默认按新标签分层重划分；`--keep-split` 保留原 split 并使用不同 tag。
+- 当前保留 `cls2_thr1.3` 作为 1.3 mm 二分类数据集；同标签但沿用原 split 的 `cls2_thr1.3_keepsplit` 副本已删除。两者标签相同、样本池相同，但 train/val/test 归属不同；保留重建接口以便以后做划分对照。
 - `load_split` 在读取时将 ADC 127/128 对应的 `±0.5/127.5` 统一归零；存储的数组不变。
 - 现有划分粒度是点，同一标本可能跨 split。已有指标只说明该划分上的表现。
 
