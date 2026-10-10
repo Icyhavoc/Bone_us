@@ -29,6 +29,7 @@ from typing import Any, Iterable, Sequence
 from PIL import Image, ImageTk
 
 from emd_pipeline import (
+    PREPROCESSING_TAG,
     class_display_names,
     label_scheme_tag,
     label_thresholds,
@@ -222,7 +223,7 @@ class ExperimentCatalog:
         )
         for directory in directories:
             config = _read_json(directory / "config.json", {})
-            if not isinstance(config, dict) or config.get("feature_layout") != "core":
+            if not isinstance(config, dict) or config.get("feature_layout") != PREPROCESSING_TAG:
                 continue
             report = _read_json(directory / "metrics.json", {})
             if not isinstance(report, dict):
@@ -277,7 +278,7 @@ class ExperimentCatalog:
         class_filter: str = "all",
         class_tokens: Sequence[str] | None = None,
     ) -> list[Path]:
-        """Find new channel-aware files, with fallback to legacy filenames.
+        """Find images produced by the current preprocessing version.
 
         ``class_filter`` selects one class token; ``"all"`` expands to every
         token of the current dataset, so a 3-class dataset collects
@@ -299,15 +300,11 @@ class ExperimentCatalog:
             for region_name in regions:
                 if region_name == "*":
                     channel_part = "*" if channel == "all" else channel
-                    new_pattern = f"form_{form}__regions_*__channels_{channel_part}__class_{class_name}*.png"
-                    legacy_pattern = f"form_{form}__regions_*__class_{class_name}*.png"
+                    pattern = f"form_{form}__regions_*__channels_{channel_part}__class_{class_name}*__{PREPROCESSING_TAG}.png"
                 else:
                     channel_part = "*" if channel == "all" else channel
-                    new_pattern = f"form_{form}__regions_{region_name}__channels_{channel_part}__class_{class_name}*.png"
-                    legacy_pattern = f"form_{form}__regions_{region_name}__class_{class_name}*.png"
-                new_matches = sorted(root.glob(new_pattern))
-                legacy_matches = sorted(root.glob(legacy_pattern))
-                found.extend(new_matches or legacy_matches)
+                    pattern = f"form_{form}__regions_{region_name}__channels_{channel_part}__class_{class_name}*__{PREPROCESSING_TAG}.png"
+                found.extend(sorted(root.glob(pattern)))
         return sorted(set(found))
 
     def preprocessing_options(
@@ -318,8 +315,8 @@ class ExperimentCatalog:
         root = self._kind_root("preprocessing")
         pattern = re.compile(
             r"^form_(?P<form>.+?)__regions_(?P<region>.+?)"
-            r"(?:__channels_(?P<channel>[123]))?"
-            r"__class_(?P<class>imminent|safe|label\d+)(?:__.+)?\.png$"
+            r"__channels_(?P<channel>[123])"
+            rf"__class_(?P<class>imminent|safe|label\d+)__{re.escape(PREPROCESSING_TAG)}\.png$"
         )
         options: dict[str, dict[str, Path]] = {}
         if not root.exists():
@@ -337,13 +334,11 @@ class ExperimentCatalog:
                 continue
             if channel_filter != "all" and file_channel not in (None, channel_filter):
                 continue
-            display_channel = file_channel or (channel_filter if channel_filter != "all" else "legacy")
+            display_channel = file_channel
             key = f"form={form} | region={region} | channel={display_channel}"
             class_name = match.group("class")
             pair = options.setdefault(key, {})
-            # Prefer channel-aware files over legacy files when both exist.
-            if class_name not in pair or file_channel is not None:
-                pair[class_name] = path
+            pair[class_name] = path
         return options
 
     def training_curve_files(self, form: str, region: str, channel: str) -> list[Path]:
@@ -356,7 +351,7 @@ class ExperimentCatalog:
         tag = self._dataset_tag
         suffix = "" if tag is None else f"__{tag}"
         pattern = (
-            f"form_{form_part}__regions_{region_part}__channels_{channel_part}__core{suffix}.png"
+            f"form_{form_part}__regions_{region_part}__channels_{channel_part}__core__{PREPROCESSING_TAG}{suffix}.png"
         )
         return sorted(root.glob(pattern))
 
@@ -373,7 +368,7 @@ class ExperimentCatalog:
         suffix = "" if tag is None else f"__{tag}"
         pattern = (
             f"form_{form_part}__regions_{region_part}__channels_{channel_part}"
-            f"__split_{split}__core{suffix}.png"
+            f"__split_{split}__core__{PREPROCESSING_TAG}{suffix}.png"
         )
         return sorted(root.glob(pattern))
 
@@ -383,7 +378,7 @@ class ExperimentCatalog:
         root = self._kind_root("confusion_matrices")
         pattern = re.compile(
             rf"^form_(?P<form>.+?)__regions_(?P<region>.+?)"
-            rf"__channels_(?P<channel>[123])__split_{re.escape(split)}__core(?:__.+)?\.png$"
+            rf"__channels_(?P<channel>[123])__split_{re.escape(split)}__core__{re.escape(PREPROCESSING_TAG)}(?:__.+)?\.png$"
         )
         options: dict[str, Path] = {}
         if not root.exists():

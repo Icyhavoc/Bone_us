@@ -26,6 +26,8 @@ from emd_pipeline import (
     EMDConfig,
     FORM_ORDER,
     MLPConfig,
+    PREPROCESSING_TAG,
+    PREPROCESSING_VERSION,
     RegionSpec,
     StandardScaler,
     ADC_DC_MAGNITUDE,
@@ -85,7 +87,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-depth-mm", type=float, default=5.0)
     parser.add_argument("--signal-length", type=int, default=896)
     parser.add_argument("--rounding", choices=["round", "floor", "ceil"], default="round")
-    parser.add_argument("--selection-region-json", default="[[0,5]]")
     parser.add_argument("--max-imfs", type=int, default=5)
     parser.add_argument("--max-sift-iterations", type=int, default=30)
     parser.add_argument("--sift-sd-threshold", type=float, default=0.2)
@@ -133,7 +134,7 @@ def _experiment_name(
 ) -> str:
     """Keep simplified runs distinct from prior experimental feature layouts."""
 
-    name = f"form_{form}__regions_{region_name}__channels_{channel_mode}__core"
+    name = f"form_{form}__regions_{region_name}__channels_{channel_mode}__core__{PREPROCESSING_TAG}"
     return name if not label_tag else f"{name}__{label_tag}"
 
 
@@ -206,7 +207,6 @@ def run_one(
         signal_length=args.signal_length,
         rounding=args.rounding,
     )
-    selection_region = parse_regions(args.selection_region_json)[0]
     emd_config = EMDConfig(
         max_imfs=args.max_imfs,
         max_sift_iterations=args.max_sift_iterations,
@@ -232,7 +232,7 @@ def run_one(
     )
     label_scheme = _read_label_scheme(data_dir)
     experiment_config = {
-        "feature_layout": "core",
+        "feature_layout": PREPROCESSING_TAG,
         "form": form,
         "region_name": region_name,
         "regions": regions,
@@ -241,7 +241,7 @@ def run_one(
         "tukey_alpha": args.tukey_alpha,
         "dynamic_envelope": dynamic_envelope_config,
         "depth_mapper": mapper,
-        "selection_region": selection_region,
+        "preprocessing_version": PREPROCESSING_VERSION,
         "emd": emd_config,
         "mlp": mlp_config,
         "data_dir": data_dir,
@@ -283,7 +283,6 @@ def run_one(
             tukey_alpha=args.tukey_alpha,
             dynamic_envelope_config=dynamic_envelope_config,
             emd_config=emd_config,
-            score_region=selection_region,
             sample_ids=[str(record.get("sample_id", "")) for record in samples],
         )
         feature_data[split] = features

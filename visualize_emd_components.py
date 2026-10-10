@@ -19,6 +19,7 @@ import numpy as np
 
 from emd_pipeline import (
     FORM_ORDER,
+    PREPROCESSING_TAG,
     DepthMapper,
     EMDConfig,
     RegionSpec,
@@ -29,9 +30,8 @@ from emd_pipeline import (
     parse_regions,
     prepare_branch_signals,
     prepare_dynamic_envelope_branches,
-    process_frames,
+    prepare_frame_input,
     read_label_scheme,
-    select_channels,
 )
 from dyn_cli import add_dyn_arguments, dyn_config_from_args
 from run_emd_experiments import DYNAMIC_REGION_NAME, REGION_CHOICES, REGION_PRESETS
@@ -218,6 +218,7 @@ def _make_component_sheet(
                 depth_axis,
                 component_limits[column][component_index],
                 title,
+                "Relative depth / mm" if region_name == DYNAMIC_REGION_NAME else "Depth / mm",
             )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(output_path)
@@ -299,13 +300,11 @@ def main() -> None:
             selected_titles: dict[int, list[str]] = {}
             for label, indices in selected.items():
                 index = int(indices[0])
-                selected_channels = select_channels(x[index], args.channel_mode)
                 physical_channels = channel_physical_indices(args.channel_mode)
-                processed, selected_frames = process_frames(
-                    selected_channels,
-                    form,
-                    mapper=mapper,
-                    score_region=RegionSpec(0.0, mapper.max_depth_mm, "selection_full"),
+                processed, selected_frames, span = prepare_frame_input(
+                    x[index], form, args.channel_mode,
+                    str(records[index].get("sample_id", "")),
+                    dynamic_envelope_config if region_name == DYNAMIC_REGION_NAME else None,
                 )
                 branch_components: list[np.ndarray] = []
                 branch_ranges: list[tuple[float, float]] = []
@@ -313,7 +312,7 @@ def main() -> None:
                 if region_name == DYNAMIC_REGION_NAME:
                     dynamic_branches, dynamic_info = prepare_dynamic_envelope_branches(
                         processed,
-                        locator_frames=selected_channels,
+                        span=span,
                         config=dynamic_envelope_config,
                         target_length=args.target_length,
                         tukey_alpha=args.tukey_alpha,
@@ -322,19 +321,15 @@ def main() -> None:
                     )
                     branch_items = zip(dynamic_branches, dynamic_info["branches"])
                     for branch_index, (branch_flat, branch_info) in enumerate(branch_items):
-                        branch_start = int(branch_info["start_index"])
-                        branch_end = int(branch_info["end_index_exclusive"])
+                        branch_length = int(branch_info["input_length"])
                         branch_ranges.append(
-                            (
-                                mapper.index_to_depth(branch_start),
-                                mapper.index_to_depth(branch_end),
-                            )
+                            (0.0, branch_length * mm_per_index)
                         )
                         branch_titles.append(
                             dynamic_branch_title(
                                 branch_index,
                                 str(branch_info["name"]),
-                                branch_end - branch_start,
+                                branch_length,
                                 mm_per_index,
                                 args.target_length,
                             )
@@ -388,7 +383,7 @@ def main() -> None:
                 file_name = (
                     f"form_{form}__regions_{_safe_name(region_name)}__"
                     f"channels_{args.channel_mode}__class_{class_name}__"
-                    f"sample_{_safe_name(str(records[index].get('sample_id', index)))}.png"
+                    f"sample_{_safe_name(str(records[index].get('sample_id', index)))}__{PREPROCESSING_TAG}.png"
                 )
                 _make_component_sheet(
                     form,
@@ -409,7 +404,7 @@ def main() -> None:
                     output_dir / file_name,
                 )
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "selection_manifest.json").write_text(
+    (output_dir / f"selection_manifest_{PREPROCESSING_TAG}.json").write_text(
         json.dumps(json_ready(manifest), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )

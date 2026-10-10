@@ -1,6 +1,6 @@
 """EMD feature extraction and NumPy MLP classification pipeline.
 
-The pipeline is intentionally dependency-light.  It supports:
+The pipeline uses NumPy and SciPy for signal preprocessing. It supports:
 
 * four frame-processing forms: mean/std, raw 50 frames, max-1 frame,
   and top-3-frame mean;
@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+from scipy.interpolate import CubicSpline
 
 
 FORM_ALIASES = {
@@ -39,6 +40,8 @@ FORM_ALIASES = {
     "top_3_mean": "top3_mean",
 }
 FORM_ORDER = ("mean_std", "raw50", "max1", "top3_mean")
+PREPROCESSING_TAG = "headsim_cubic"
+PREPROCESSING_VERSION = "head_similarity_cubic_tail600_v1"
 
 
 def canonical_form(name: str) -> str:
@@ -126,15 +129,9 @@ class DepthMapper:
 class DynamicEnvelopeConfig:
     """Settings for the sample-wise envelope-defined two-branch split.
 
-    The defaults reproduce ``bin/reference_code/pipeline.py``
-    (:func:`segment`) exactly, including its index constants.  The detector is
-    applied **per channel**: every channel gets its own reference crossing,
-    local peak, merged leading packet and therefore its own main/tail
-    boundary.  Branches are never re-padded and may overlap.
-
-    ``main_length`` and ``tail_start`` are index constants of the reference
-    rule ``start = max(t - lead_back, noise_start); end = start + main_length``
-    and ``tail = [tail_start, signal_length)``.
+    The main-window detector is ported from ``bin/reference_code/pipeline.py``
+    and applied per channel. The tail follows ``ViT_reference``: it starts at
+    each channel's main end, takes 600 samples, and is zero-padded on the right.
     """
 
     # Detector constants (identical to the reference implementation).
@@ -155,7 +152,7 @@ class DynamicEnvelopeConfig:
     # lets the main window start one sample into the noise head.
     main_start_min: int = 70
     main_length: int = 170
-    tail_start: int = 251
+    tail_length: int = 600
     signal_length: int = 896
     # Per-channel locator signal: mean of the K frames with the largest
     # absolute amplitude, matching ``compute_hilbert_topk_amplitude_mean``.
@@ -181,12 +178,12 @@ class DynamicEnvelopeConfig:
             raise ValueError("dynamic envelope min_run_width must be positive")
         if not 0.0 <= self.min_run_area_ratio <= 1.0:
             raise ValueError("dynamic envelope min_run_area_ratio must be in [0, 1]")
-        if self.main_length <= 0:
-            raise ValueError("dynamic envelope main_length must be positive")
+        if self.main_length < 4:
+            raise ValueError("dynamic envelope main_length must contain at least four samples")
         if self.main_start_min < 0:
             raise ValueError("dynamic envelope main_start_min cannot be negative")
-        if not 0 <= self.tail_start < self.signal_length:
-            raise ValueError("dynamic envelope tail_start must be inside the signal")
+        if self.tail_length < 4:
+            raise ValueError("dynamic envelope tail_length must contain at least four samples")
         if self.locator_top_k <= 0:
             raise ValueError("dynamic envelope locator_top_k must be positive")
 
@@ -208,7 +205,7 @@ _COMPONENT_FEATURE_NAMES: tuple[str, ...] = (
 #: Name of the branch whose geometry the locator features describe.
 LOCATOR_BRANCH_NAME = "dynamic_main_window"
 
-#: Name of the fixed tail branch.  Both names are part of the feature layout:
+#: Name of the tail branch. Both names are part of the feature layout:
 #: ``feature_dimension_names`` prefixes every column with them, so anything that
 #: labels a branch must read them here rather than repeat the literals.
 TAIL_BRANCH_NAME = "dynamic_tail_window"
@@ -327,16 +324,11 @@ def select_channels(frames: np.ndarray, channel_mode: int) -> np.ndarray:
     return frames[:, start:stop, :]
 
 
-def _rms_scores(frames: np.ndarray, start: int, end: int) -> np.ndarray:
-    segment = frames[..., start:end]
-    return np.sqrt(np.mean(np.square(segment, dtype=np.float64), axis=(1, 2)))
-
-
 def process_frames(
     frames: np.ndarray,
     form: str,
-    mapper: DepthMapper,
-    score_region: RegionSpec = RegionSpec(0.0, 5.0, "selection_full"),
+    head_starts: Sequence[int] | None = None,
+    head_ends: Sequence[int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """Apply one of the four frame forms.
 
@@ -349,42 +341,70 @@ def process_frames(
     form = canonical_form(form)
     if frames.ndim != 3:
         raise ValueError(f"Expected [frames, channels, samples], got {frames.shape}")
-    start, end = mapper.slice_bounds(score_region)
-
+    if frames.shape[1] not in (1, 2):
+        raise ValueError("Frame ranking supports one or two physical channels")
     if form == "mean_std":
         mean = np.mean(frames, axis=0, dtype=np.float32)
         std = np.std(frames, axis=0, dtype=np.float32)
         return np.stack([mean, std], axis=0), None
     if form == "raw50":
         return np.asarray(frames, dtype=np.float32), None
-
-    scores = _rms_scores(frames, start, end)
+    if head_starts is None or head_ends is None or len(head_starts) != frames.shape[1] or len(head_ends) != frames.shape[1]:
+        raise ValueError("max1/top3_mean require one dynamic main interval per selected channel")
+    start, end = int(head_starts[0]), int(head_ends[0])
+    first = frames[:, 0, start:end]
+    first_peaks = np.max(np.abs(first), axis=1)
+    frame_order = np.arange(frames.shape[0])
+    candidates = np.lexsort((frame_order, -first_peaks))
+    if frames.shape[1] == 2:
+        candidates = candidates[:10]
+        second = frames[:, 1, start:end]
+        scores = np.empty(len(candidates), dtype=np.float64)
+        for position, frame in enumerate(candidates):
+            left = first[frame].astype(np.float64)
+            right = second[frame].astype(np.float64)
+            left_rms = float(np.sqrt(np.mean(left * left)))
+            right_rms = float(np.sqrt(np.mean(right * right)))
+            larger_rms = max(left_rms, right_rms)
+            energy = min(left_rms, right_rms) / larger_rms if larger_rms else 0.0
+            shape = 0.0
+            for lag in range(-5, 6):
+                if lag < 0:
+                    a, b = left[:lag], right[-lag:]
+                elif lag > 0:
+                    a, b = left[lag:], right[:-lag]
+                else:
+                    a, b = left, right
+                a = a - a.mean()
+                b = b - b.mean()
+                norm = float(np.linalg.norm(a) * np.linalg.norm(b))
+                if norm:
+                    shape = max(shape, abs(float(np.dot(a, b) / norm)))
+            scores[position] = shape * energy
+        candidates = candidates[np.lexsort((candidates, -first_peaks[candidates], -scores))]
     if form == "max1":
-        selected = int(np.argmax(scores))
+        selected = int(candidates[0])
         return frames[selected : selected + 1].astype(np.float32), np.array([selected])
     if form == "top3_mean":
-        count = min(3, frames.shape[0])
-        selected = np.argsort(scores)[-count:][::-1]
+        selected = candidates[:3]
         averaged = np.mean(frames[selected], axis=0, dtype=np.float32)
         return averaged[None, ...], selected.astype(np.int64)
     raise AssertionError(f"Unhandled frame form: {form}")
 
 
 def resample_signals(signals: np.ndarray, target_length: int) -> np.ndarray:
-    """Linearly resample a batch of 1-D signals using NumPy only."""
+    """Resample each signal with a cubic spline on endpoint-aligned coordinates."""
 
     signals = np.asarray(signals, dtype=np.float32)
     if signals.ndim != 2:
         raise ValueError(f"Expected [num_signals, length], got {signals.shape}")
-    if signals.shape[1] <= 0 or target_length <= 0:
-        raise ValueError("Signal and target lengths must be positive")
+    if signals.shape[1] < 4 or target_length <= 0:
+        raise ValueError("Cubic spline needs at least four source samples and a positive target length")
     if signals.shape[1] == target_length:
         return signals.copy()
-    positions = np.linspace(0.0, signals.shape[1] - 1.0, target_length)
-    left = np.floor(positions).astype(np.int64)
-    right = np.minimum(left + 1, signals.shape[1] - 1)
-    weight = (positions - left).astype(np.float32)
-    return signals[:, left] * (1.0 - weight)[None, :] + signals[:, right] * weight[None, :]
+    source = np.arange(signals.shape[1], dtype=np.float64)
+    target = np.linspace(0.0, source[-1], target_length)
+    return CubicSpline(source, signals, axis=-1, extrapolate=False)(target).astype(np.float32)
 
 
 def tukey_window(length: int, alpha: float = 0.3) -> np.ndarray:
@@ -672,8 +692,8 @@ def locate_dynamic_span(
     * boundary: ``start = max(t - lead_back, main_start_min)`` and
       ``end = start + main_length``, never silently shifted to fit.
 
-    The tail is the fixed ``[tail_start, signal_length)`` slice, so it may
-    overlap the main window or leave a gap.
+    The tail starts at the main end for each channel and has a fixed padded
+    length of ``tail_length``.
 
     ``physical_channels`` maps each column of ``smoothed`` back to its physical
     channel index and defaults to the identity mapping.  The manual-correction
@@ -832,12 +852,15 @@ def locate_dynamic_span(
             f"dynamic envelope: main window exceeds the {sample_count}-sample "
             f"signal, refusing to shift it -- {detail}{hint}"
         )
-    tail_end = sample_count
+    tail_starts = ends.copy()
+    tail_valid_ends = np.minimum(ends + config.tail_length, sample_count)
+    tail_padding = config.tail_length - (tail_valid_ends - tail_starts)
     return {
         "starts": starts,
         "ends": ends,
-        "tail_start": int(config.tail_start),
-        "tail_end": int(tail_end),
+        "tail_starts": tail_starts,
+        "tail_valid_ends": tail_valid_ends,
+        "tail_padding": tail_padding,
         "physical_channels": [int(c) for c in physical_channels],
         "crossing_index": automatic,
         "automatic_crossing_index": automatic_before_manual,
@@ -855,17 +878,50 @@ def locate_dynamic_span(
         "reference_rule": rules,
         "relative_fallback": float(relative_fallback),
         "main_start_clamped": automatic - config.lead_back < config.main_start_min,
-        "gap_length": np.maximum((config.tail_start - ends), 0).astype(np.int64),
-        "overlap_length": np.maximum(
-            np.minimum(ends, tail_end) - np.maximum(starts, config.tail_start), 0
-        ).astype(np.int64),
         "audits": audits,
     }
 
 
+def detect_dynamic_span(
+    frames: np.ndarray,
+    config: DynamicEnvelopeConfig = DynamicEnvelopeConfig(),
+    point_id: str | None = None,
+) -> dict[str, Any]:
+    """Locate both physical channels once, before selecting model frames."""
+    if frames.ndim != 3 or frames.shape[1] != 2:
+        raise ValueError("dynamic locator expects both physical channels")
+    locator = locator_mean_signal(frames, config.locator_top_k)
+    envelope = _hilbert_envelope(locator).astype(np.float32)
+    smoothed = np.zeros_like(envelope)
+    smoothed[:, config.noise_start :] = _moving_average_nearest(
+        envelope[:, config.noise_start :], config.smooth_window
+    )
+    return locate_dynamic_span(smoothed, config, point_id=point_id, physical_channels=(0, 1))
+
+
+def prepare_frame_input(
+    sample: np.ndarray,
+    form: str,
+    channel_mode: int,
+    point_id: str | None = None,
+    dynamic_config: DynamicEnvelopeConfig | None = None,
+) -> tuple[np.ndarray, np.ndarray | None, dict[str, Any] | None]:
+    """Share one locator result across frame ranking and dynamic branches."""
+    form = canonical_form(form)
+    span = None
+    if form in ("max1", "top3_mean") or dynamic_config is not None:
+        span = detect_dynamic_span(sample, dynamic_config or DynamicEnvelopeConfig(), point_id)
+    selected = select_channels(sample, channel_mode)
+    physical = channel_physical_indices(channel_mode)
+    starts = None if span is None else span["starts"][list(physical)]
+    ends = None if span is None else span["ends"][list(physical)]
+    processed, chosen = process_frames(selected, form, starts, ends)
+    return processed, chosen, span
+
+
 def prepare_dynamic_envelope_branches(
     processed: np.ndarray,
-    locator_frames: np.ndarray,
+    span: dict[str, Any],
     config: DynamicEnvelopeConfig = DynamicEnvelopeConfig(),
     target_length: int = 512,
     tukey_alpha: float = 0.3,
@@ -875,23 +931,14 @@ def prepare_dynamic_envelope_branches(
 ) -> tuple[list[np.ndarray], dict[str, Any]]:
     """Create the two dynamic-envelope branches for one processed sample.
 
-    ``processed`` is the frame-processed ``[streams, channels, samples]`` block
-    that the branches are cut from.  ``locator_frames`` is the matching raw
-    ``[frames, channels, samples]`` block used only to build the locator signal:
-    like the reference, the boundary comes from the top-``locator_top_k`` frame
-    average and not from the selected frame form, so switching form does not
-    move the split.
+    ``span`` is located once from both original channels before frame ranking.
 
     Boundaries are detected **per channel**.  Branch 1 is
     ``[start, start + main_length)`` with ``start = max(t - lead_back,
-    main_start_min)``; branch 2 is the fixed ``[tail_start, samples)`` slice.  Both
-    are resampled to ``target_length`` and optionally Tukey-windowed by the
-    existing feature pipeline, then flattened to
-    ``[streams * channels, target_length]``.
+    main_start_min)``; branch 2 starts at each channel's main end and is
+    right-padded to ``tail_length`` before resampling and windowing.
 
-    ``physical_channels`` is forwarded to :func:`locate_dynamic_span` so the
-    manual-correction table keeps addressing physical channels even when the
-    caller has already applied ``--channel-mode``.
+    ``physical_channels`` selects columns from the already located span.
     """
 
     config.validate()
@@ -899,41 +946,22 @@ def prepare_dynamic_envelope_branches(
         raise ValueError(f"Expected [streams, channels, samples], got {processed.shape}")
     channel_count = int(processed.shape[1])
     sample_count = int(processed.shape[-1])
-    if locator_frames.ndim != 3:
-        raise ValueError(
-            f"Expected [frames, channels, samples] locator frames, got {locator_frames.shape}"
-        )
-    if locator_frames.shape[1] != channel_count or locator_frames.shape[-1] != sample_count:
-        raise ValueError(
-            "dynamic envelope locator frames must match the processed channel count "
-            f"and length; got {locator_frames.shape} against {processed.shape}"
-        )
+    physical_channels = tuple(range(channel_count)) if physical_channels is None else tuple(physical_channels)
+    if len(physical_channels) != channel_count:
+        raise ValueError("physical_channels must match processed channels")
+    picks = list(physical_channels)
+    starts = span["starts"][picks]
+    ends = span["ends"][picks]
+    tail_starts = span["tail_starts"][picks]
+    tail_valid_ends = span["tail_valid_ends"][picks]
+    tail_padding = span["tail_padding"][picks]
 
-    locator = locator_mean_signal(locator_frames, config.locator_top_k)
-    envelope = np.zeros((channel_count, sample_count), dtype=np.float32)
-    envelope[:] = _hilbert_envelope(locator).astype(np.float32)
-    smoothed = np.zeros_like(envelope)
-    # The head of the trace is deliberately zeroed so it can never take part in
-    # crossing detection or in the run masks.
-    smoothed[:, config.noise_start :] = _moving_average_nearest(
-        envelope[:, config.noise_start :], config.smooth_window
-    )
-
-    span = locate_dynamic_span(
-        smoothed,
-        config=config,
-        point_id=point_id,
-        physical_channels=physical_channels,
-    )
-    starts = span["starts"]
-    ends = span["ends"]
-    tail_start = span["tail_start"]
-    tail_end = span["tail_end"]
-
-    def cut(channel: int, start: int, end: int) -> np.ndarray:
+    def cut(channel: int, start: int, end: int, pad: int = 0) -> np.ndarray:
         """Resample one channel's interval into ``[streams, target_length]``."""
         block = processed[:, channel : channel + 1, start:end]
         flattened = block.reshape(-1, block.shape[-1])
+        if pad:
+            flattened = np.pad(flattened, ((0, 0), (0, pad)))
         resampled = resample_signals(flattened, target_length)
         if not apply_tukey:
             return resampled
@@ -944,7 +972,10 @@ def prepare_dynamic_envelope_branches(
     # branch block.  The channel axis is preserved here (rather than flattened)
     # so that per-channel feature groups stay separable downstream.
     main_parts = [cut(c, int(starts[c]), int(ends[c])) for c in range(channel_count)]
-    tail_parts = [cut(c, int(tail_start), int(tail_end)) for c in range(channel_count)]
+    tail_parts = [
+        cut(c, int(tail_starts[c]), int(tail_valid_ends[c]), int(tail_padding[c]))
+        for c in range(channel_count)
+    ]
     main_block = np.stack(main_parts, axis=1)
     tail_block = np.stack(tail_parts, axis=1)
 
@@ -961,43 +992,43 @@ def prepare_dynamic_envelope_branches(
         },
         {
             "name": TAIL_BRANCH_NAME,
-            "start_index": int(tail_start),
-            "end_index_exclusive": int(tail_end),
-            "start_index_by_channel": [int(tail_start)] * channel_count,
-            "end_index_exclusive_by_channel": [int(tail_end)] * channel_count,
-            "input_length_by_channel": [int(tail_end - tail_start)] * channel_count,
-            "input_length": int(tail_end - tail_start),
+            "start_index": int(tail_starts[0]),
+            "end_index_exclusive": int(tail_valid_ends[0]),
+            "start_index_by_channel": tail_starts.astype(int).tolist(),
+            "end_index_exclusive_by_channel": tail_valid_ends.astype(int).tolist(),
+            "input_length_by_channel": [int(config.tail_length)] * channel_count,
+            "valid_length_by_channel": (tail_valid_ends - tail_starts).astype(int).tolist(),
+            "padding_length_by_channel": tail_padding.astype(int).tolist(),
+            "input_length": int(config.tail_length),
             "feature_length": None,
         },
     ]
     info: dict[str, Any] = {
-        # Provenance label kept verbatim: it identifies the ported algorithm in
-        # already written ``feature_info.json`` files, it is not a path.
-        "algorithm": "reference_code.pipeline.segment",
+        "algorithm": PREPROCESSING_VERSION,
         "point_id": point_id,
         "channel_count": channel_count,
-        "physical_channels": span["physical_channels"],
+        "physical_channels": list(physical_channels),
         "sample_length": sample_count,
         "locator_top_k": int(config.locator_top_k),
         "main_length": int(config.main_length),
         "main_start_index_by_channel": starts.astype(int).tolist(),
         "main_end_exclusive_by_channel": ends.astype(int).tolist(),
-        "tail_interval": [int(tail_start), int(tail_end)],
-        "crossing_index": span["crossing_index"].astype(int).tolist(),
-        "automatic_crossing_index": span["automatic_crossing_index"].astype(int).tolist(),
-        "manual_correction_applied": span["manual_correction_applied"].astype(bool).tolist(),
-        "local_peak_index": span["local_peak_index"].astype(int).tolist(),
-        "local_peak_value": span["local_peak_value"].astype(float).tolist(),
-        "threshold_value": span["threshold_value"].astype(float).tolist(),
-        "premerge_crossing_index": span["premerge_crossing_index"].astype(int).tolist(),
-        "peak_search_window": span["peak_search_window"].astype(int).tolist(),
-        "reference_absolute_crossing": span["reference_absolute_crossing"].astype(int).tolist(),
-        "reference_index": span["reference_index"].astype(int).tolist(),
-        "reference_rule": span["reference_rule"],
+        "tail_start_index_by_channel": tail_starts.astype(int).tolist(),
+        "tail_valid_end_exclusive_by_channel": tail_valid_ends.astype(int).tolist(),
+        "tail_padding_length_by_channel": tail_padding.astype(int).tolist(),
+        "crossing_index": span["crossing_index"][picks].astype(int).tolist(),
+        "automatic_crossing_index": span["automatic_crossing_index"][picks].astype(int).tolist(),
+        "manual_correction_applied": span["manual_correction_applied"][picks].astype(bool).tolist(),
+        "local_peak_index": span["local_peak_index"][picks].astype(int).tolist(),
+        "local_peak_value": span["local_peak_value"][picks].astype(float).tolist(),
+        "threshold_value": span["threshold_value"][picks].astype(float).tolist(),
+        "premerge_crossing_index": span["premerge_crossing_index"][picks].astype(int).tolist(),
+        "peak_search_window": span["peak_search_window"][picks].astype(int).tolist(),
+        "reference_absolute_crossing": span["reference_absolute_crossing"][picks].astype(int).tolist(),
+        "reference_index": span["reference_index"][picks].astype(int).tolist(),
+        "reference_rule": [span["reference_rule"][c] for c in picks],
         "relative_fallback": float(span["relative_fallback"]),
-        "main_start_clamped": span["main_start_clamped"].astype(bool).tolist(),
-        "gap_length_by_channel": span["gap_length"].astype(int).tolist(),
-        "overlap_length_by_channel": span["overlap_length"].astype(int).tolist(),
+        "main_start_clamped": span["main_start_clamped"][picks].astype(bool).tolist(),
         "branches": branch_info,
     }
     return [main_block, tail_block], info
@@ -1179,24 +1210,22 @@ def sample_feature_vector(
     emd_config: EMDConfig,
     tukey_alpha: float = 0.3,
     dynamic_envelope_config: DynamicEnvelopeConfig | None = None,
-    score_region: RegionSpec = RegionSpec(0.0, 5.0, "selection_full"),
     point_id: str | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Preprocess one sample and keep physical-channel features separate."""
 
     if sample.ndim != 3:
         raise ValueError(f"Expected sample [50, 2, 896], got {sample.shape}")
-    selected_channels = select_channels(sample, channel_mode)
     physical_channels = channel_physical_indices(channel_mode)
-    processed, selected_frames = process_frames(
-        selected_channels, form, mapper=mapper, score_region=score_region
+    processed, selected_frames, span = prepare_frame_input(
+        sample, form, channel_mode, point_id, dynamic_envelope_config
     )
     specs: list[tuple[str, np.ndarray, list[int], list[int], float | None, float | None]] = []
     dynamic_info: dict[str, Any] | None = None
     if dynamic_envelope_config is not None:
         blocks, dynamic_info = prepare_dynamic_envelope_branches(
             processed,
-            locator_frames=selected_channels,
+            span=span,
             config=dynamic_envelope_config,
             target_length=target_length,
             tukey_alpha=tukey_alpha,
@@ -1228,9 +1257,13 @@ def sample_feature_vector(
     branch_info: list[dict[str, Any]] = []
     mm_per_index = mapper.max_depth_mm / mapper.signal_length
     for name, block, starts, ends, start_mm, end_mm in specs:
+        input_lengths = (
+            [dynamic_envelope_config.tail_length] * len(starts)
+            if name == TAIL_BRANCH_NAME and dynamic_envelope_config is not None
+            else [end - start for start, end in zip(starts, ends)]
+        )
         spacings = [
-            mm_per_index * (end - start) / target_length
-            for start, end in zip(starts, ends)
+            mm_per_index * length / target_length for length in input_lengths
         ]
         channel_features = [
             emd_feature_vector(block[:, channel, :], emd_config, spacings[channel])
@@ -1247,6 +1280,7 @@ def sample_feature_vector(
             "end_index_exclusive": ends[0],
             "start_index_by_channel": starts,
             "end_index_exclusive_by_channel": ends,
+            "input_length_by_channel": input_lengths,
             "input_streams": int(np.prod(block.shape[:2])),
             "feature_length": int(sum(widths)),
             "feature_groups": len(widths),
@@ -1258,6 +1292,8 @@ def sample_feature_vector(
         "form": canonical_form(form),
         "channel_mode": channel_mode,
         "selected_frames": None if selected_frames is None else selected_frames.tolist(),
+        "selection_main_start_index_by_channel": None if span is None else span["starts"].astype(int).tolist(),
+        "selection_main_end_exclusive_by_channel": None if span is None else span["ends"].astype(int).tolist(),
         "region_mode": "dyn_envelope" if dynamic_info is not None else "fixed",
         "branches": branch_info,
         "feature_groups": len(groups),
@@ -1445,7 +1481,6 @@ def build_feature_matrix(
     emd_config: EMDConfig,
     tukey_alpha: float = 0.3,
     dynamic_envelope_config: DynamicEnvelopeConfig | None = None,
-    score_region: RegionSpec = RegionSpec(0.0, 5.0, "selection_full"),
     limit: int | None = None,
     sample_ids: Sequence[str] | None = None,
 ) -> tuple[np.ndarray, list[dict[str, Any]]]:
@@ -1474,7 +1509,6 @@ def build_feature_matrix(
             tukey_alpha=tukey_alpha,
             dynamic_envelope_config=dynamic_envelope_config,
             emd_config=emd_config,
-            score_region=score_region,
             point_id=point_id,
         )
         vectors.append(vector)

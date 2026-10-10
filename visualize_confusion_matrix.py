@@ -25,6 +25,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from emd_pipeline import (
     FORM_ORDER,
+    PREPROCESSING_TAG,
     canonical_form,
     class_display_names,
     config_label_scheme_tag,
@@ -390,7 +391,7 @@ def main() -> None:
             continue
         # A 3-class run must never be drawn into (or overwrite) the historical
         # binary image of the same form/region/channel combination.
-        if config.get("feature_layout") != "core":
+        if config.get("feature_layout") != PREPROCESSING_TAG:
             continue
         if config_label_scheme_tag(config) != dataset_tag:
             continue
@@ -411,7 +412,7 @@ def main() -> None:
             f"channels_{_safe_name(channel)}__split_{args.split}"
         )
         label_tag = payload["label_tag"]
-        file_name = f"{file_name}__core"
+        file_name = f"{file_name}__core__{PREPROCESSING_TAG}"
         if label_tag:
             file_name = f"{file_name}__{_safe_name(label_tag)}"
         file_name = f"{file_name}.png"

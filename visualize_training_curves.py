@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from emd_pipeline import (
     FORM_ORDER,
+    PREPROCESSING_TAG,
     canonical_form,
     config_label_scheme_tag,
     label_scheme_tag,
@@ -218,7 +219,7 @@ def main() -> None:
             continue
         # Experiments are scoped to one dataset: a 3-class run must not be drawn
         # into (or overwrite) the historical binary curves.
-        if config.get("feature_layout") != "core":
+        if config.get("feature_layout") != PREPROCESSING_TAG:
             continue
         if config_label_scheme_tag(config) != dataset_tag:
             continue
@@ -233,14 +234,14 @@ def main() -> None:
             continue
         file_name = (
             f"form_{_safe_name(form)}__regions_{_safe_name(region)}__channels_{_safe_name(channel)}"
-            f"__core{'' if dataset_tag is None else '__' + dataset_tag}.png"
+            f"__core__{PREPROCESSING_TAG}{'' if dataset_tag is None else '__' + dataset_tag}.png"
         )
         output_path = output_dir / file_name
         title = f"{form} | {region} | channel_mode={channel}"
         if render_history(history, metrics, title, output_path):
             generated += 1
             manifest["files"].append(file_name)
-    (output_dir / "selection_manifest_core.json").write_text(
+    (output_dir / f"selection_manifest_{PREPROCESSING_TAG}.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )
     print(f"Training curve visualizations written to {output_dir} ({generated} files)")

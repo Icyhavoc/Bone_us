@@ -12,10 +12,10 @@ Focuses on the three train/val points whose Hilbert envelope never exceeds
 
 Left column: the fixed-region ``full`` preset (one region, 0-5 mm == samples
 ``[0, 896)``).  Right column: ``dyn_envelope``.  On the right the *solid* bands
-are the two-channel (mode 3) result, where a missing channel borrows its
-partner's crossing, and the *hatched red* band is the same point evaluated with
-only the sub-threshold channel selected -- which is what ``--channel-mode 1`` /
-``--channel-mode 2`` actually feed to the pipeline.
+are the two-channel locator result, where a missing channel borrows its
+partner's crossing. The *hatched red* band is a historical counterfactual:
+locating from the sub-threshold channel alone. The current pipeline locates
+from both channels even when only one channel is selected for classification.
 
 Usage::
 
@@ -102,13 +102,13 @@ def load_case(
 
     locator = E.locator_mean_signal(selected, config.locator_top_k)
     smoothed = smoothed_envelope(locator, config)
-    processed, chosen = E.process_frames(selected, "top3_mean", mapper)
     paired = E.locate_dynamic_span(
         smoothed, config, point_id=point_id, physical_channels=(0, 1)
     )
+    processed, chosen = E.process_frames(selected, "top3_mean", paired["starts"], paired["ends"])
 
     # Single-channel run: isolate the sub-threshold channel.  ``main_length`` is
-    # shrunk to 2 purely so the window-overflow guard cannot fire; the crossing
+    # shrunk to 4 purely so the window-overflow guard cannot fire; the crossing
     # and rule are unaffected by that field, and the real end is recomputed
     # below so an overflow stays visible instead of aborting this script.
     physical = E.channel_physical_indices(single_mode)
@@ -117,7 +117,7 @@ def load_case(
     smoothed_single = smoothed_envelope(locator_single, config)
     probe = E.locate_dynamic_span(
         smoothed_single,
-        replace(config, main_length=2),
+        replace(config, main_length=4),
         point_id=point_id,
         physical_channels=physical,
     )
@@ -248,12 +248,14 @@ def plot_dynamic(ax, case: dict, config: E.DynamicEnvelopeConfig, mapper: E.Dept
     box(ax, (case["single_start"] + clipped_end) / 2, single_y + 0.5 * single_h,
         label, fontsize=6.8, color="#8e2a1e")
 
-    tail_start, tail_end = int(span["tail_start"]), int(span["tail_end"])
     tail_y, tail_h = 1.42 * ymax, 0.14 * ymax
-    bar(ax, tail_y, tail_h, [(tail_start, tail_end)], "#4d9a4d", alpha=0.8)
-    box(ax, (tail_start + tail_end) / 2, tail_y + 0.5 * tail_h,
-        f"tail  [{tail_start}, {tail_end})   -   identical for both channels",
-        fontsize=6.8)
+    for channel in range(2):
+        tail_start = int(span["tail_starts"][channel])
+        tail_end = int(span["tail_valid_ends"][channel])
+        bar(ax, tail_y, tail_h, [(tail_start, tail_end)], CH_COLORS[channel], alpha=0.8)
+        box(ax, (tail_start + tail_end) / 2, tail_y + 0.5 * tail_h,
+            f"tail ch{channel + 1} [{tail_start}, {tail_end}) + {int(span['tail_padding'][channel])} zero",
+            fontsize=6.8)
 
     for channel in range(2):
         crossing = crossings[channel]
@@ -298,7 +300,7 @@ def main() -> None:
         fontsize=11, pad=28,
     )
     axes[0, 1].set_title(
-        "dyn_envelope   --   per-channel main window  +  shared fixed tail",
+        "dyn_envelope   --   per-channel main and contiguous padded tail",
         fontsize=11, pad=28,
     )
     axes[0, 1].legend(

@@ -23,6 +23,7 @@ from PIL import Image, ImageDraw, ImageFont
 from emd_pipeline import (
     FORM_ORDER,
     LOCATOR_BRANCH_NAME,
+    PREPROCESSING_TAG,
     TAIL_BRANCH_NAME,
     DepthMapper,
     DynamicEnvelopeConfig,
@@ -35,9 +36,8 @@ from emd_pipeline import (
     parse_regions,
     prepare_branch_signals,
     prepare_dynamic_envelope_branches,
-    process_frames,
+    prepare_frame_input,
     read_label_scheme,
-    select_channels,
 )
 from dyn_cli import add_dyn_arguments, dyn_config_from_args
 from run_emd_experiments import DYNAMIC_REGION_NAME, REGION_CHOICES, REGION_PRESETS
@@ -293,6 +293,7 @@ def _draw_plot_cell(
     depth_axis: np.ndarray,
     y_limits: tuple[float, float],
     title: str,
+    axis_label: str = "Depth / mm",
 ) -> None:
     left, top, right, bottom = box
     draw.rectangle(box, outline=(170, 170, 170), width=1)
@@ -329,7 +330,7 @@ def _draw_plot_cell(
     draw.text((left + 5, top + 4), title, fill=(20, 20, 20), font=_font(13, bold=True))
     draw.text(
         (plot_left + 5, bottom - 20),
-        "Depth / mm",
+        axis_label,
         fill=(70, 70, 70),
         font=_font(11),
     )
@@ -396,14 +397,13 @@ def _make_sheet(
                 cell_width - 16,
             )
         else:
-            tail_start = int(dynamic_envelope_config.tail_start)
-            tail_end = int(dynamic_envelope_config.signal_length)
+            tail_length = int(dynamic_envelope_config.tail_length)
             branch_title = _fit_title(
                 draw,
                 [
                     f"Branch 2: {_short_branch_name(TAIL_BRANCH_NAME)}",
-                    f"[{tail_start}, {tail_end}) = {tail_end - tail_start} pt",
-                    f"{(tail_end - tail_start) * mm_per_index:.2f} mm",
+                    f"from main end = {tail_length} pt",
+                    f"{tail_length * mm_per_index:.2f} mm (right-padded)",
                     f"{mm_per_index / target_length:.5f} mm/pt",
                 ],
                 branch_font,
@@ -433,13 +433,9 @@ def _make_sheet(
             fill=(80, 80, 80),
             font=_font(12),
         )
-        selected = select_channels(x[sample_index], channel_mode)
         physical_channels = channel_physical_indices(channel_mode)
-        processed, _ = process_frames(
-            selected,
-            form,
-            mapper=mapper,
-            score_region=RegionSpec(0.0, mapper.max_depth_mm, "selection_full"),
+        processed, _, span = prepare_frame_input(
+            x[sample_index], form, channel_mode, str(sample_id), dynamic_envelope_config
         )
         if dynamic_envelope_config is None:
             branch_items = [
@@ -460,7 +456,7 @@ def _make_sheet(
         else:
             dynamic_branches, dynamic_info = prepare_dynamic_envelope_branches(
                 processed,
-                locator_frames=selected,
+                span=span,
                 config=dynamic_envelope_config,
                 target_length=target_length,
                 tukey_alpha=tukey_alpha,
@@ -475,8 +471,8 @@ def _make_sheet(
                 branch_items.append(
                     (
                         branch_flat,
-                        mapper.index_to_depth(int(branch_info["start_index"])),
-                        mapper.index_to_depth(int(branch_info["end_index_exclusive"])),
+                        0.0,
+                        float(branch_info["input_length"]) * mm_per_index,
                     )
                 )
         for column, (branch_flat, start_mm, end_mm) in enumerate(branch_items):
@@ -495,6 +491,7 @@ def _make_sheet(
                 depth_axis,
                 y_limits,
                 f"{sample_id}",
+                "Relative depth / mm" if dynamic_envelope_config is not None else "Depth / mm",
             )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(output_path)
@@ -599,7 +596,7 @@ def main() -> None:
                 class_name = file_tokens[label]
                 file_name = (
                     f"form_{form}__regions_{_safe_name(region_name)}__"
-                    f"channels_{args.channel_mode}__class_{class_name}.png"
+                    f"channels_{args.channel_mode}__class_{class_name}__{PREPROCESSING_TAG}.png"
                 )
                 _make_sheet(
                     form,
@@ -629,7 +626,7 @@ def main() -> None:
     selection_manifest["tukey_alpha"] = args.tukey_alpha
     selection_manifest["dynamic_envelope"] = dynamic_envelope_config
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "selection_manifest.json").write_text(
+    (output_dir / f"selection_manifest_{PREPROCESSING_TAG}.json").write_text(
         json.dumps(json_ready(selection_manifest), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )

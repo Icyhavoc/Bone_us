@@ -103,12 +103,6 @@ def add_dyn_arguments(parser: argparse.ArgumentParser) -> None:
         help="fixed length of the main branch",
     )
     parser.add_argument(
-        "--dyn-tail-start",
-        type=int,
-        default=defaults.tail_start,
-        help="fixed start index of the tail branch",
-    )
-    parser.add_argument(
         "--dyn-no-manual-corrections",
         action="store_true",
         help="skip the hand-checked per-channel corrections ported from the reference",
@@ -132,7 +126,6 @@ def dyn_config_from_args(args: argparse.Namespace) -> DynamicEnvelopeConfig:
         lead_back=args.dyn_lead_back,
         main_start_min=args.dyn_main_start_min,
         main_length=args.dyn_main_length,
-        tail_start=args.dyn_tail_start,
         locator_top_k=args.dyn_top_k,
         apply_manual_corrections=not args.dyn_no_manual_corrections,
     )

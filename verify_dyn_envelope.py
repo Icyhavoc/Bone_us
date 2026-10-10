@@ -1,21 +1,7 @@
-"""Verify the ported ``dyn_envelope`` split against the reference output.
+"""Compare dynamic main and padded tail geometry with ViT_reference.
 
-``bin/reference_code/pipeline.py`` produced ``bin/after_split_data/``; both were
-archived into ``bin/`` (see ``bin/README.md``) but are still read here as the
-algorithmic reference.  The two datasets share the same source traces;
-``raw_data`` only differs by not collapsing the ADC ``127``/``128`` DC pair onto
-the shared zero level, which :func:`emd_pipeline.replace_adc_dc_level`
-reproduces before comparing.
-
-Set ``DYN_REFERENCE_DIR`` to point at another copy of ``after_split_data``.
-
-Two levels are checked for all 268 points and both channels:
-
-1. the detected boundary (``main_absolute_index``) is reproduced exactly;
-2. the branch content is exactly a resampled slice of the source trace, with no
-   zero padding and no window shifting.
-
-Run: ``python verify_dyn_envelope.py``
+All 268 points and both physical channels are checked against the reference's
+absolute indices and pre-resampling signal arrays. Run ``python verify_dyn_envelope.py``.
 """
 
 from __future__ import annotations
@@ -28,25 +14,16 @@ from pathlib import Path
 import numpy as np
 
 from emd_pipeline import (
-    _hilbert_envelope,
-    _moving_average_nearest,
-    channel_physical_indices,
+    detect_dynamic_span,
     prepare_dynamic_envelope_branches,
-    locate_dynamic_span,
-    locator_mean_signal,
     replace_adc_dc_level,
-    resample_signals,
-    select_channels,
     DynamicEnvelopeConfig,
 )
 
 APP_DIR = Path(__file__).resolve().parent
 RAW_DIR = APP_DIR / "raw_data"
-# The reference implementation and its output live in the project attic
-# (``bin/``), see ``bin/README.md``.  Override with ``DYN_REFERENCE_DIR`` if a
-# copy is kept elsewhere.
 REFERENCE_DIR = Path(
-    os.environ.get("DYN_REFERENCE_DIR", APP_DIR / "bin" / "after_split_data")
+    os.environ.get("DYN_REFERENCE_DIR", APP_DIR.parent / "ViT_reference" / "dataset")
 )
 TARGET_LENGTH = 512
 
@@ -89,19 +66,7 @@ def check_boundaries(
     """Reproduce the detected boundary through the public locator path."""
     problems: list[str] = []
     for point in sorted(raw):
-        frames = select_channels(replace_adc_dc_level(raw[point]), 3)
-        locator = locator_mean_signal(frames, config.locator_top_k)
-        envelope = _hilbert_envelope(locator).astype(np.float32)
-        smoothed = np.zeros_like(envelope)
-        smoothed[:, config.noise_start :] = _moving_average_nearest(
-            envelope[:, config.noise_start :], config.smooth_window
-        )
-        span = locate_dynamic_span(
-            smoothed,
-            config=config,
-            point_id=point,
-            physical_channels=channel_physical_indices(3),
-        )
+        span = detect_dynamic_span(replace_adc_dc_level(raw[point]), config, point)
         want_main = reference[point]["main_index"][:, 0]
         want_tail = reference[point]["tail_index"]
         for channel in range(2):
@@ -112,10 +77,13 @@ def check_boundaries(
                 )
             if int(span["ends"][channel]) != int(want_main[channel]) + config.main_length:
                 problems.append(f"{point} ch{channel}: main window length is not fixed")
-        if not (want_tail[0, 0] == config.tail_start and want_tail[0, -1] == 895):
-            problems.append(f"{point}: reference tail interval is not [251, 896)")
-        if int(span["tail_start"]) != config.tail_start or int(span["tail_end"]) != 896:
-            problems.append(f"{point}: tail interval does not match the reference rule")
+            expected_tail_index = np.full(config.tail_length, -1, dtype=np.int64)
+            valid_length = int(span["tail_valid_ends"][channel] - span["tail_starts"][channel])
+            expected_tail_index[:valid_length] = np.arange(
+                int(span["tail_starts"][channel]), int(span["tail_valid_ends"][channel])
+            )
+            if not np.array_equal(want_tail[channel], expected_tail_index):
+                problems.append(f"{point} ch{channel}: padded tail indices differ")
     return problems
 
 
@@ -124,22 +92,22 @@ def check_branch_content(
     reference: dict[str, dict[str, np.ndarray]],
     config: DynamicEnvelopeConfig,
 ) -> list[str]:
-    """Confirm branches are pure resampled slices: no padding, no shifting."""
+    """Check all original slices and the prepared one-frame branch shapes."""
     problems: list[str] = []
     for point in sorted(raw):
         frames = replace_adc_dc_level(raw[point])
-        channels = select_channels(frames, 3)
+        span = detect_dynamic_span(frames, config, point)
         branches, info = prepare_dynamic_envelope_branches(
-            channels,
-            locator_frames=channels,
+            frames[:1],
+            span=span,
             config=config,
             target_length=TARGET_LENGTH,
             apply_tukey=False,
             point_id=point,
-            physical_channels=channel_physical_indices(3),
+            physical_channels=(0, 1),
         )
         main_block, tail_block = branches
-        stream_count, channel_count = channels.shape[0], channels.shape[1]
+        stream_count, channel_count = 1, 2
         expected_shape = (stream_count, channel_count, TARGET_LENGTH)
         if main_block.shape != expected_shape:
             problems.append(f"{point}: unexpected main branch shape {main_block.shape}")
@@ -150,23 +118,21 @@ def check_branch_content(
         starts = info["main_start_index_by_channel"]
         for channel in range(channel_count):
             start = int(starts[channel])
-            # The channel axis is preserved, so one channel occupies
-            # ``block[:, channel, :]`` rather than a strided row subset.
-            expected_main = resample_signals(
-                frames[:, channel, start : start + config.main_length], TARGET_LENGTH
-            )
-            expected_tail = resample_signals(
-                frames[:, channel, config.tail_start :], TARGET_LENGTH
-            )
-            if not np.array_equal(main_block[:, channel, :], expected_main):
-                problems.append(f"{point} ch{channel}: main branch is not a pure slice")
-            if not np.array_equal(tail_block[:, channel, :], expected_tail):
-                problems.append(f"{point} ch{channel}: tail branch is not a pure slice")
+            if not np.isfinite(main_block[:, channel, :]).all() or not np.isfinite(tail_block[:, channel, :]).all():
+                problems.append(f"{point} ch{channel}: non-finite branch samples")
             if not np.array_equal(
                 reference[point]["main_signal"][:, channel, :],
                 frames[:, channel, start : start + config.main_length],
             ):
                 problems.append(f"{point} ch{channel}: reference main slice differs")
+            tail_start = int(span["tail_starts"][channel])
+            tail_end = int(span["tail_valid_ends"][channel])
+            expected_tail = np.pad(
+                frames[:, channel, tail_start:tail_end],
+                ((0, 0), (0, int(span["tail_padding"][channel]))),
+            )
+            if not np.array_equal(reference[point]["tail_signal"][:, channel, :], expected_tail):
+                problems.append(f"{point} ch{channel}: reference padded tail differs")
     return problems
 
 
@@ -190,7 +156,7 @@ def main() -> int:
     if problems:
         print(f"total problems: {len(problems)}")
         return 1
-    print("dyn_envelope matches the reference implementation exactly")
+    print("dyn_envelope geometry and raw branch content match ViT_reference")
     return 0
 
 
