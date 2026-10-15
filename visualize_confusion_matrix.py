@@ -153,6 +153,7 @@ def _render_binary_matrix(
     title: str,
     split: str,
     output_path: Path,
+    split_metrics: Mapping[str, Any] | None = None,
 ) -> None:
     """The original 2x2 layout.  Unchanged rather than merely equivalent: the
     binary images in ``visualizations/`` are the reference for every
@@ -174,6 +175,20 @@ def _render_binary_matrix(
         font=_font(16),
         anchor="mm",
     )
+    if split_metrics is not None and "decision_threshold" in split_metrics:
+        if "weighted_balanced_accuracy" in split_metrics:
+            reward = split_metrics.get("positive_reward")
+            mode = "reward off" if reward is None else f"label=1 reward={reward:g}"
+            value = split_metrics["weighted_balanced_accuracy"]
+            score = f"weighted balanced acc={'n/a' if value is None else f'{value:.3f}'}"
+        else:
+            mode = f"label=1 reward={split_metrics['positive_reward']:g}"
+            score = f"weighted accuracy={split_metrics['weighted_accuracy']:.3f}"
+        draw.text(
+            (width // 2, 106),
+            f"{mode} | threshold={split_metrics['decision_threshold']:.3f} | {score}",
+            fill="#52616b", font=_font(14), anchor="mm",
+        )
 
     for row in range(2):
         for column in range(2):
@@ -340,7 +355,7 @@ def render_confusion_matrix(
     """Dispatch on the number of classes; both layouts share rows=true."""
 
     if len(matrix) == 2:
-        _render_binary_matrix(matrix, class_names, title, split, output_path)
+        _render_binary_matrix(matrix, class_names, title, split, output_path, split_metrics)
         return
     _render_multi_matrix(matrix, class_names, split_metrics or {}, title, split, output_path)
 
@@ -352,6 +367,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--forms", default="all", help="all or comma-separated forms")
     parser.add_argument("--region-set", default="all")
     parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3], default=None)
+    parser.add_argument("--model-family", choices=["emd", "vit"], default="emd")
     parser.add_argument("--split", choices=["train", "val", "test"], default="test")
     parser.add_argument(
         "--data-dir",
@@ -393,6 +409,8 @@ def main() -> None:
         # binary image of the same form/region/channel combination.
         if config.get("feature_layout") != PREPROCESSING_TAG:
             continue
+        if config.get("model_family", "emd") != args.model_family:
+            continue
         if config_label_scheme_tag(config) != dataset_tag:
             continue
         form = str(config.get("form", ""))
@@ -412,9 +430,12 @@ def main() -> None:
             f"channels_{_safe_name(channel)}__split_{args.split}"
         )
         label_tag = payload["label_tag"]
-        file_name = f"{file_name}__core__{PREPROCESSING_TAG}"
+        file_name = f"{file_name}__{'vit' if args.model_family == 'vit' else 'core'}__{PREPROCESSING_TAG}"
         if label_tag:
             file_name = f"{file_name}__{_safe_name(label_tag)}"
+        decision_tag = config.get("decision_tag")
+        if args.model_family == "vit" and isinstance(decision_tag, str) and decision_tag:
+            file_name = f"{file_name}__{_safe_name(decision_tag)}"
         file_name = f"{file_name}.png"
         render_confusion_matrix(
             payload["matrix"],
@@ -435,7 +456,8 @@ def main() -> None:
         )
         generated += 1
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "selection_manifest_core.json").write_text(
+    manifest_name = "selection_manifest_core.json" if args.model_family == "emd" else "selection_manifest_vit.json"
+    (output_dir / manifest_name).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )
     print(f"Confusion matrix visualizations written to {output_dir} ({generated} files)")

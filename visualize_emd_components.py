@@ -1,7 +1,7 @@
 """Visualize every EMD component for one sample from each class.
 
 The script reuses the preprocessing/EMD functions in ``emd_pipeline.py`` and
-the standard region presets in ``run_emd_experiments.py``.  It selects one
+the standard region presets in ``experiment_setup.py``.  It selects one
 sample from each requested class and creates a component sheet for every
 form/region/class combination.  For Raw 50 Frames, EMD is applied to every
 frame/channel stream and the streams are overlaid in each component panel;
@@ -27,21 +27,19 @@ from emd_pipeline import (
     channel_physical_indices,
     emd_decompose,
     json_ready,
-    parse_regions,
     prepare_branch_signals,
     prepare_dynamic_envelope_branches,
     prepare_frame_input,
     read_label_scheme,
 )
 from dyn_cli import add_dyn_arguments, dyn_config_from_args
-from run_emd_experiments import DYNAMIC_REGION_NAME, REGION_CHOICES, REGION_PRESETS
+from experiment_setup import DYNAMIC_REGION_NAME, REGION_CHOICES, region_experiments
 from visualize_preprocessing import (
     CHANNEL_COLORS,
     _draw_plot_cell,
     _fit_title,
     _font,
     _parse_optional_labels,
-    _resolve_region_experiments,
     _safe_name,
     class_file_token,
     class_names_for_data_dir,
@@ -229,7 +227,7 @@ def main() -> None:
     forms = list(FORM_ORDER) if args.forms.strip().lower() == "all" else [
         canonical_form(item) for item in args.forms.split(",") if item.strip()
     ]
-    region_experiments = _resolve_region_experiments(args.region_set, args.regions_json)
+    regions_to_run = region_experiments(args.region_set, args.regions_json)
     x, labels, records, split_names = load_split_records(args.data_dir, args.split)
     num_classes = int(labels.max()) + 1 if labels.size else 2
     class_names = class_names_for_data_dir(args.data_dir, num_classes)
@@ -275,7 +273,7 @@ def main() -> None:
             for label in class_labels
         ],
         "forms": forms,
-        "regions": {name: regions for name, regions in region_experiments},
+        "regions": {name: regions for name, regions in regions_to_run},
         "mapper": mapper,
         "target_length": args.target_length,
         "tukey_alpha": args.tukey_alpha,
@@ -294,7 +292,7 @@ def main() -> None:
         }
 
     for form in forms:
-        for region_name, regions in region_experiments:
+        for region_name, regions in regions_to_run:
             selected_components: dict[int, list[np.ndarray]] = {}
             selected_ranges: dict[int, list[tuple[float, float]]] = {}
             selected_titles: dict[int, list[str]] = {}

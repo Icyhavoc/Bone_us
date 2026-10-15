@@ -14,7 +14,6 @@ experiments in total.
 from __future__ import annotations
 
 import argparse
-import json
 import time
 from pathlib import Path
 from typing import Sequence
@@ -24,7 +23,6 @@ import numpy as np
 from emd_pipeline import (
     DepthMapper,
     EMDConfig,
-    FORM_ORDER,
     MLPConfig,
     PREPROCESSING_TAG,
     PREPROCESSING_VERSION,
@@ -32,35 +30,24 @@ from emd_pipeline import (
     StandardScaler,
     ADC_DC_MAGNITUDE,
     build_feature_matrix,
-    canonical_form,
     classification_metrics,
     feature_dimension_names,
-    json_ready,
     label_scheme_tag,
     load_split,
-    parse_regions,
     read_label_scheme,
     write_json,
     NumpyMLPClassifier,
 )
 from dyn_cli import add_dyn_arguments, dyn_config_from_args
-
-
-REGION_PRESETS: dict[str, list[list[float]]] = {
-    "full": [[0.0, 5.0]],
-    "bone": [[1.0, 3.0]],
-    "bone_plus_post": [[0.2, 1.5], [1.5, 5.0]],
-}
-DYNAMIC_REGION_NAME = "dyn_envelope"
-REGION_CHOICES = ["all", *REGION_PRESETS.keys(), DYNAMIC_REGION_NAME]
-def _parse_forms(value: str) -> list[str]:
-    if value.strip().lower() == "all":
-        return list(FORM_ORDER)
-    forms = [canonical_form(item) for item in value.split(",") if item.strip()]
-    if not forms:
-        raise ValueError("At least one frame form is required")
-    # Keep the canonical order and remove duplicates.
-    return [form for form in FORM_ORDER if form in forms]
+from experiment_setup import (
+    DYNAMIC_REGION_NAME,
+    REGION_CHOICES,
+    REGION_PRESETS,
+    guard_existing_experiment,
+    infer_num_classes,
+    parse_forms,
+    region_experiments,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -113,19 +100,6 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _region_experiments(args: argparse.Namespace) -> list[tuple[str, list[RegionSpec]]]:
-    if args.regions_json is not None:
-        return [("custom", parse_regions(args.regions_json))]
-    if args.region_set == "all":
-        names = [*REGION_PRESETS.keys(), DYNAMIC_REGION_NAME]
-    else:
-        names = [args.region_set]
-    return [
-        (name, [] if name == DYNAMIC_REGION_NAME else parse_regions(REGION_PRESETS[name]))
-        for name in names
-    ]
-
-
 def _experiment_name(
     form: str,
     region_name: str,
@@ -144,29 +118,6 @@ def _dataset_tag(data_dir: Path) -> str | None:
     return label_scheme_tag(_read_label_scheme(data_dir))
 
 
-def _infer_num_classes(data_dir: Path, max_samples: int | None = None) -> int:
-    """Smallest class count that covers every label in every split.
-
-    Only ``y.npy`` is read here, so this costs microseconds compared with the
-    EMD feature extraction that follows and lets the MLP head be sized before
-    any of that work is done.
-    """
-
-    highest = -1
-    for split in ("train", "val", "test"):
-        path = data_dir / split / "y.npy"
-        if not path.is_file():
-            raise FileNotFoundError(f"missing label file: {path}")
-        labels = np.load(path)
-        if max_samples is not None:
-            labels = labels[:max_samples]
-        if labels.size:
-            highest = max(highest, int(labels.max()))
-    if highest < 0:
-        raise ValueError(f"no labels found under {data_dir}")
-    return highest + 1
-
-
 def _read_label_scheme(data_dir: Path) -> dict[str, object] | None:
     """The threshold scheme recorded by ``raw_data/relabel_by_thickness.py``.
 
@@ -176,21 +127,6 @@ def _read_label_scheme(data_dir: Path) -> dict[str, object] | None:
     """
 
     return read_label_scheme(data_dir)
-
-
-def _guard_existing_experiment(output_dir: Path, config: dict[str, object]) -> None:
-    """Never mix artifacts produced by different configurations."""
-
-    path = output_dir / "config.json"
-    if not path.exists():
-        return
-    previous = json.loads(path.read_text(encoding="utf-8"))
-    requested = json_ready(config)
-    if previous != requested:
-        raise SystemExit(
-            f"{path} records a different run; select another --output-dir "
-            "to keep both results"
-        )
 
 
 def run_one(
@@ -215,7 +151,7 @@ def run_one(
     dynamic_envelope_config = (
         dyn_config_from_args(args) if region_name == DYNAMIC_REGION_NAME else None
     )
-    inferred_classes = _infer_num_classes(data_dir, args.max_samples)
+    inferred_classes = infer_num_classes(data_dir, args.max_samples)
     if args.num_classes is not None and args.num_classes < inferred_classes:
         raise ValueError(
             f"--num-classes {args.num_classes} cannot hold the labels in {data_dir}, "
@@ -250,7 +186,7 @@ def run_one(
         "adc_dc_replacement": ADC_DC_MAGNITUDE,
         "max_samples": args.max_samples,
     }
-    _guard_existing_experiment(output_dir, experiment_config)
+    guard_existing_experiment(output_dir, experiment_config)
     output_dir.mkdir(parents=True, exist_ok=True)
     write_json(output_dir / "config.json", experiment_config)
     print(
@@ -367,21 +303,21 @@ def main() -> None:
     args = _parse_args()
     data_dir = args.data_dir.resolve()
     output_dir = args.output_dir.resolve()
-    forms = _parse_forms(args.forms)
-    region_experiments = _region_experiments(args)
+    forms = parse_forms(args.forms)
+    regions_to_run = region_experiments(args.region_set, args.regions_json)
     dataset_tag = _dataset_tag(data_dir)
     all_results: dict[str, object] = {
         "data_dir": data_dir,
         "output_dir": output_dir,
         "forms": forms,
-        "regions": {name: regions for name, regions in region_experiments},
+        "regions": {name: regions for name, regions in regions_to_run},
         "channel_mode": args.channel_mode,
         "dataset_tag": dataset_tag,
         "label_scheme": _read_label_scheme(data_dir),
         "results": {},
     }
     for form in forms:
-        for region_name, regions in region_experiments:
+        for region_name, regions in regions_to_run:
             experiment_name = _experiment_name(
                 form, region_name, args.channel_mode, dataset_tag
             )

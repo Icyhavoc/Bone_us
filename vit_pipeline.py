@@ -1,0 +1,112 @@
+"""Arrange the existing signed waveform branches for the ViT input."""
+
+from __future__ import annotations
+
+from typing import Any, Sequence
+
+import numpy as np
+
+from emd_pipeline import (
+    DepthMapper,
+    DynamicEnvelopeConfig,
+    RegionSpec,
+    canonical_form,
+    channel_physical_indices,
+    prepare_branch_block,
+    prepare_dynamic_envelope_branches,
+    prepare_frame_input,
+)
+
+
+def prepare_vit_sample(
+    sample: np.ndarray,
+    *,
+    form: str,
+    regions: Sequence[RegionSpec],
+    channel_mode: int,
+    mapper: DepthMapper,
+    target_length: int = 512,
+    tukey_alpha: float = 0.3,
+    dynamic_envelope_config: DynamicEnvelopeConfig | None = None,
+    point_id: str | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Return [region×channel, streams, length] and the per-sample audit."""
+
+    physical_channels = channel_physical_indices(channel_mode)
+    processed, selected_frames, span = prepare_frame_input(
+        sample, form, channel_mode, point_id, dynamic_envelope_config
+    )
+    if dynamic_envelope_config is None:
+        if not regions:
+            raise ValueError("at least one region is required")
+        blocks = [
+            prepare_branch_block(processed, region, mapper, target_length, tukey_alpha)
+            for region in regions
+        ]
+        branch_info = []
+        for region in regions:
+            start, end = mapper.slice_bounds(region)
+            branch_info.append({
+                "name": region.label, "start_index": start,
+                "end_index_exclusive": end,
+            })
+        dynamic_info = None
+    else:
+        if span is None:
+            raise AssertionError("dynamic branches require a located span")
+        blocks, dynamic_info = prepare_dynamic_envelope_branches(
+            processed, span, dynamic_envelope_config, target_length, tukey_alpha,
+            point_id=point_id, physical_channels=physical_channels,
+        )
+        branch_info = dynamic_info["branches"]
+    inputs = np.stack(
+        [block[:, channel, :] for block in blocks for channel in range(len(physical_channels))],
+        axis=0,
+    ).astype(np.float32, copy=False)
+    if not np.isfinite(inputs).all():
+        raise ValueError(f"non-finite ViT input for {point_id}")
+    names = [
+        f"region{index}_{branch['name']}_ch{physical + 1}"
+        for index, branch in enumerate(branch_info)
+        for physical in physical_channels
+    ]
+    audit: dict[str, Any] = {
+        "point_id": point_id,
+        "form": canonical_form(form),
+        "channel_mode": channel_mode,
+        "selected_frames": None if selected_frames is None else selected_frames.tolist(),
+        "selection_main_start_index_by_channel": None if span is None else span["starts"].astype(int).tolist(),
+        "selection_main_end_exclusive_by_channel": None if span is None else span["ends"].astype(int).tolist(),
+        "branch_names": names,
+        "branches": branch_info,
+    }
+    if dynamic_info is not None:
+        audit["dynamic_envelope"] = dynamic_info
+    return inputs, audit
+
+
+def build_vit_inputs(
+    samples: np.ndarray,
+    *,
+    sample_ids: Sequence[str],
+    form: str,
+    regions: Sequence[RegionSpec],
+    channel_mode: int,
+    mapper: DepthMapper,
+    target_length: int = 512,
+    tukey_alpha: float = 0.3,
+    dynamic_envelope_config: DynamicEnvelopeConfig | None = None,
+) -> tuple[np.ndarray, list[dict[str, Any]]]:
+    if len(samples) != len(sample_ids):
+        raise ValueError("sample_ids must match the sample count")
+    if len(samples) == 0:
+        raise ValueError("the selected split is empty")
+    prepared = [
+        prepare_vit_sample(
+            sample, form=form, regions=regions, channel_mode=channel_mode,
+            mapper=mapper, target_length=target_length, tukey_alpha=tukey_alpha,
+            dynamic_envelope_config=dynamic_envelope_config, point_id=str(point_id),
+        )
+        for sample, point_id in zip(samples, sample_ids)
+    ]
+    return np.stack([input_block for input_block, _ in prepared]), [audit for _, audit in prepared]

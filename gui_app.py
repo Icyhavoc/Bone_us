@@ -1,4 +1,4 @@
-"""Tkinter viewer for EMD experiments and generated visualizations.
+"""Tkinter viewer for ViT / EMD experiments and generated visualizations.
 
 The GUI reads ``experiments/`` and ``visualizations/``.  Select ``all`` to
 compare available experiment summaries, or select one frame-processing form
@@ -15,6 +15,7 @@ historical 1.0 mm binary split; datasets written under ``raw_data_relabeled/``
 from __future__ import annotations
 
 import json
+import math
 import queue
 import re
 import subprocess
@@ -242,6 +243,7 @@ class ExperimentCatalog:
                 {
                     "name": directory.name,
                     "directory": directory,
+                    "model_family": str(config.get("model_family", "emd")),
                     "label_tag": label_scheme_tag(
                         label_scheme if isinstance(label_scheme, dict) else None
                     ),
@@ -258,8 +260,10 @@ class ExperimentCatalog:
             )
         self.rows = rows
 
-    def filtered_rows(self, form: str, region: str, channel: str) -> list[dict[str, Any]]:
-        rows = self.rows
+    def filtered_rows(
+        self, form: str, region: str, channel: str, model_family: str = "emd"
+    ) -> list[dict[str, Any]]:
+        rows = [row for row in self.rows if row["model_family"] == model_family]
         # Experiments carry the label-scheme tag of the dataset they were
         # trained on; a 3-class run is not an "alternative" of a binary one.
         if self.dataset is not None:
@@ -344,7 +348,9 @@ class ExperimentCatalog:
             pair[class_name] = path
         return options
 
-    def training_curve_files(self, form: str, region: str, channel: str) -> list[Path]:
+    def training_curve_files(
+        self, form: str, region: str, channel: str, model_family: str = "emd"
+    ) -> list[Path]:
         root = self._kind_root("training_curves")
         if not root.exists():
             return []
@@ -353,13 +359,18 @@ class ExperimentCatalog:
         channel_part = "*" if channel == "all" else channel
         tag = self._dataset_tag
         suffix = "" if tag is None else f"__{tag}"
-        pattern = (
-            f"form_{form_part}__regions_{region_part}__channels_{channel_part}__core__{PREPROCESSING_TAG}{suffix}.png"
+        model_token = "vit" if model_family == "vit" else "core"
+        stem = (
+            f"form_{form_part}__regions_{region_part}__channels_{channel_part}__{model_token}__{PREPROCESSING_TAG}{suffix}"
         )
-        return sorted(root.glob(pattern))
+        files = list(root.glob(f"{stem}.png"))
+        if model_family == "vit":
+            files.extend(root.glob(f"{stem}__*.png"))
+        return sorted(files)
 
     def confusion_matrix_files(
-        self, form: str, region: str, channel: str, split: str = "test"
+        self, form: str, region: str, channel: str, split: str = "test",
+        model_family: str = "emd",
     ) -> list[Path]:
         root = self._kind_root("confusion_matrices")
         if not root.exists() or form == "all":
@@ -369,19 +380,26 @@ class ExperimentCatalog:
         channel_part = "*" if channel == "all" else channel
         tag = self._dataset_tag
         suffix = "" if tag is None else f"__{tag}"
-        pattern = (
+        model_token = "vit" if model_family == "vit" else "core"
+        stem = (
             f"form_{form_part}__regions_{region_part}__channels_{channel_part}"
-            f"__split_{split}__core__{PREPROCESSING_TAG}{suffix}.png"
+            f"__split_{split}__{model_token}__{PREPROCESSING_TAG}{suffix}"
         )
-        return sorted(root.glob(pattern))
+        files = list(root.glob(f"{stem}.png"))
+        if model_family == "vit":
+            files.extend(root.glob(f"{stem}__*.png"))
+        return sorted(files)
 
-    def confusion_matrix_options(self, split: str = "test") -> dict[str, Path]:
+    def confusion_matrix_options(
+        self, split: str = "test", model_family: str = "emd"
+    ) -> dict[str, Path]:
         """Return all generated confusion matrices for the target selector."""
 
         root = self._kind_root("confusion_matrices")
+        model_token = "vit" if model_family == "vit" else "core"
         pattern = re.compile(
             rf"^form_(?P<form>.+?)__regions_(?P<region>.+?)"
-            rf"__channels_(?P<channel>[123])__split_{re.escape(split)}__core__{re.escape(PREPROCESSING_TAG)}(?:__.+)?\.png$"
+            rf"__channels_(?P<channel>[123])__split_{re.escape(split)}__{model_token}__{re.escape(PREPROCESSING_TAG)}(?:__.+)?\.png$"
         )
         options: dict[str, Path] = {}
         if not root.exists():
@@ -394,6 +412,12 @@ class ExperimentCatalog:
                 f"form={match.group('form')} | region={match.group('region')} | "
                 f"channel={match.group('channel')}"
             )
+            if "__norm_w1_" in path.stem:
+                key += " | normalized reward=" + path.stem.rsplit("__norm_w1_", 1)[1].replace("p", ".")
+            elif "__fixed0p5" in path.stem:
+                key += " | reward=off"
+            elif "__w1_" in path.stem:
+                key += " | count reward=" + path.stem.rsplit("__w1_", 1)[1].replace("p", ".")
             options[key] = path
         return options
 
@@ -774,7 +798,7 @@ class TrainingCurvePanel(ttk.Frame):
 class EMDViewerApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("EMD + MLP 实验查看器")
+        self.title("骨厚度分类实验查看器")
         self.geometry("1520x920")
         self.minsize(1100, 700)
         self.datasets = discover_datasets()
@@ -807,7 +831,7 @@ class EMDViewerApp(tk.Tk):
     def _build_controls(self) -> None:
         header = ttk.Frame(self, padding=(16, 12, 16, 6))
         header.pack(fill="x")
-        ttk.Label(header, text="EMD + MLP 实验查看器", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(header, text="骨厚度分类实验查看器", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             header,
             text=(
@@ -822,6 +846,9 @@ class EMDViewerApp(tk.Tk):
         self.dataset_var = tk.StringVar(
             value=self.initial_dataset.display if self.initial_dataset else ""
         )
+        self.model_var = tk.StringVar(value="ViT")
+        self.reward_enabled_var = tk.BooleanVar(value=True)
+        self.positive_reward_var = tk.StringVar(value="2")
         self.form_var = tk.StringVar(value="all")
         self.region_var = tk.StringVar(value="all")
         self.channel_var = tk.StringVar(value="1")
@@ -829,6 +856,22 @@ class EMDViewerApp(tk.Tk):
         self._add_combo(
             controls, "数据集", self.dataset_var, list(self.dataset_map), 0, "dataset", width=32
         )
+        ttk.Label(controls, text="模型").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.model_combo = ttk.Combobox(
+            controls, textvariable=self.model_var, values=["ViT", "EMD+MLP"],
+            state="readonly", width=16,
+        )
+        self.model_combo.grid(row=1, column=1, sticky="w", pady=(6, 0))
+        ttk.Label(controls, text="label=1 奖励").grid(row=1, column=2, sticky="w", pady=(6, 0))
+        self.positive_reward_entry = ttk.Entry(
+            controls, textvariable=self.positive_reward_var, width=10,
+        )
+        self.positive_reward_entry.grid(row=1, column=3, sticky="w", pady=(6, 0))
+        self.reward_check = ttk.Checkbutton(
+            controls, text="启用 reward 调阈值", variable=self.reward_enabled_var,
+            command=self._update_train_button,
+        )
+        self.reward_check.grid(row=1, column=4, columnspan=2, sticky="w", pady=(6, 0))
         self._add_combo(controls, "预处理方式", self.form_var, list(FORM_LABELS), 2, "form")
         self._add_combo(controls, "区域组合", self.region_var, list(REGION_LABELS), 4, "region")
         self._add_combo(controls, "通道", self.channel_var, ["all", "1", "2", "3"], 6, "channel")
@@ -847,11 +890,12 @@ class EMDViewerApp(tk.Tk):
         for column in (1, 3, 5, 7):
             controls.columnconfigure(column, weight=1)
         self.dataset_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_dataset_change())
+        self.model_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
         self.form_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
         self.region_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
         self.channel_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
         ttk.Label(controls, textvariable=self.status_var, style="Hint.TLabel").grid(
-            row=1, column=0, columnspan=12, sticky="w", pady=(8, 0)
+            row=2, column=0, columnspan=12, sticky="w", pady=(8, 0)
         )
 
     def _add_combo(
@@ -900,11 +944,17 @@ class EMDViewerApp(tk.Tk):
             "val_auc",
             "test_auc",
             "test_accuracy",
+            "test_weighted_balanced_accuracy",
+            "decision_threshold",
             "test_f1",
             "test_sensitivity",
             "test_specificity",
         )
-        self.summary_tree = ttk.Treeview(self.summary_tab, columns=columns, show="headings", height=15)
+        summary_table = ttk.Frame(self.summary_tab)
+        summary_table.pack(fill="both", expand=True)
+        summary_table.rowconfigure(0, weight=1)
+        summary_table.columnconfigure(0, weight=1)
+        self.summary_tree = ttk.Treeview(summary_table, columns=columns, show="headings", height=15)
         headings = {
             "experiment": "实验",
             "feature_dim": "特征维数",
@@ -914,6 +964,8 @@ class EMDViewerApp(tk.Tk):
             "val_auc": "Val AUC",
             "test_auc": "Test AUC",
             "test_accuracy": "Test Accuracy",
+            "test_weighted_balanced_accuracy": "Weighted Balanced Acc",
+            "decision_threshold": "P(label=1) 阈值",
             "test_f1": "Test F1",
             "test_sensitivity": "Test Sensitivity",
             "test_specificity": "Test Specificity",
@@ -927,6 +979,8 @@ class EMDViewerApp(tk.Tk):
             "val_auc": 85,
             "test_auc": 85,
             "test_accuracy": 105,
+            "test_weighted_balanced_accuracy": 160,
+            "decision_threshold": 120,
             "test_f1": 85,
             "test_sensitivity": 115,
             "test_specificity": 115,
@@ -934,10 +988,14 @@ class EMDViewerApp(tk.Tk):
         for column in columns:
             self.summary_tree.heading(column, text=headings[column])
             self.summary_tree.column(column, width=widths[column], anchor="center")
-        summary_scroll = ttk.Scrollbar(self.summary_tab, orient="vertical", command=self.summary_tree.yview)
-        self.summary_tree.configure(yscrollcommand=summary_scroll.set)
-        self.summary_tree.pack(side="left", fill="both", expand=True)
-        summary_scroll.pack(side="right", fill="y")
+        summary_scroll = ttk.Scrollbar(summary_table, orient="vertical", command=self.summary_tree.yview)
+        summary_xscroll = ttk.Scrollbar(summary_table, orient="horizontal", command=self.summary_tree.xview)
+        self.summary_tree.configure(
+            yscrollcommand=summary_scroll.set, xscrollcommand=summary_xscroll.set,
+        )
+        self.summary_tree.grid(row=0, column=0, sticky="nsew")
+        summary_scroll.grid(row=0, column=1, sticky="ns")
+        summary_xscroll.grid(row=1, column=0, sticky="ew")
 
         log_frame = ttk.LabelFrame(self.summary_tab, text="运行日志", padding=4)
         log_frame.pack(fill="x", expand=False, pady=(10, 0))
@@ -1075,10 +1133,15 @@ class EMDViewerApp(tk.Tk):
         return [len(paths) for paths in per_class]
 
     def _refresh_confusion_matrix_layout(self, form: str, region: str, channel: str) -> int:
-        current_paths = self.catalog.confusion_matrix_files(form, region, channel, split="test")
+        model_family = self._model_family()
+        current_paths = self.catalog.confusion_matrix_files(
+            form, region, channel, split="test", model_family=model_family
+        )
         self._current_confusion_paths = current_paths
         current_count = self.current_confusion_images.show_images(current_paths)
-        self.confusion_option_map = self.catalog.confusion_matrix_options(split="test")
+        self.confusion_option_map = self.catalog.confusion_matrix_options(
+            split="test", model_family=model_family
+        )
         options = sorted(self.confusion_option_map)
         self.confusion_choice.configure(values=options)
         if self.confusion_choice_var.get() not in self.confusion_option_map:
@@ -1093,10 +1156,11 @@ class EMDViewerApp(tk.Tk):
 
     def refresh(self) -> None:
         self.catalog.reload()
+        model_family = self._model_family()
         form = self.form_var.get()
         region = self.region_var.get()
         channel = self.channel_var.get()
-        rows = self.catalog.filtered_rows(form, region, channel)
+        rows = self.catalog.filtered_rows(form, region, channel, model_family)
         self._fill_summary(rows)
         pre_counts = self._refresh_preprocessing_layout(form, region, channel)
         pre_summary = "、".join(
@@ -1104,11 +1168,11 @@ class EMDViewerApp(tk.Tk):
         )
         confusion_count = self._refresh_confusion_matrix_layout(form, region, channel)
         if form == "all":
-            self.emd_images.clear("请选择一种具体预处理方式后查看 EMD 分量图。")
-            curve_paths = self.catalog.training_curve_files(form, region, channel)
+            self.emd_images.clear("EMD 分量图仅用于 EMD+MLP，且需选择具体预处理方式。")
+            curve_paths = self.catalog.training_curve_files(form, region, channel, model_family)
             curve_count = self.training_curve_images.show_images(curve_paths)
             self.status_var.set(
-                f"数据集：{self.dataset_var.get()}｜已加载 {len(rows)} 组实验摘要；"
+                f"模型：{self.model_var.get()}｜数据集：{self.dataset_var.get()}｜已加载 {len(rows)} 组实验摘要；"
                 f"预处理图 {pre_summary}，训练曲线 {curve_count} 张。"
             )
             self.summary_hint.configure(
@@ -1116,14 +1180,19 @@ class EMDViewerApp(tk.Tk):
             )
             self._update_train_button()
             return
-        emd_paths = self.catalog.image_files(
-            "emd", form, region, channel, "all", self._class_tokens()
+        emd_paths = (
+            self.catalog.image_files("emd", form, region, channel, "all", self._class_tokens())
+            if model_family == "emd" else []
         )
-        curve_paths = self.catalog.training_curve_files(form, region, channel)
+        curve_paths = self.catalog.training_curve_files(form, region, channel, model_family)
         curve_count = self.training_curve_images.show_images(curve_paths)
-        emd_count = self.emd_images.show_images(emd_paths)
+        if model_family == "emd":
+            emd_count = self.emd_images.show_images(emd_paths)
+        else:
+            self.emd_images.clear("ViT 直接使用预处理波形；此页只显示 EMD 分量。")
+            emd_count = 0
         self.status_var.set(
-            f"数据集：{self.dataset_var.get()}｜当前筛选 {len(rows)} 组实验；"
+            f"模型：{self.model_var.get()}｜数据集：{self.dataset_var.get()}｜当前筛选 {len(rows)} 组实验；"
             f"预处理图 {pre_summary}，训练曲线 {curve_count} 张、EMD 图 {emd_count} 张。"
         )
         self.summary_hint.configure(
@@ -1132,6 +1201,14 @@ class EMDViewerApp(tk.Tk):
         self._update_train_button()
 
     def _update_train_button(self) -> None:
+        reward_available = (
+            not self.training_active and self._model_family() == "vit"
+            and (self.catalog.dataset is None or self.catalog.dataset.num_classes == 2)
+        )
+        self.reward_check.configure(state="normal" if reward_available else "disabled")
+        self.positive_reward_entry.configure(
+            state="normal" if reward_available and self.reward_enabled_var.get() else "disabled"
+        )
         if self.training_active:
             self.train_button.configure(state="disabled")
         else:
@@ -1148,12 +1225,16 @@ class EMDViewerApp(tk.Tk):
         state = "disabled" if active else "readonly"
         for combo in (
             self.dataset_combo,
+            self.model_combo,
             self.form_combo,
             self.region_combo,
             self.channel_combo,
         ):
             combo.configure(state=state)
         self._update_train_button()
+
+    def _model_family(self) -> str:
+        return "vit" if self.model_var.get() == "ViT" else "emd"
 
     def _build_training_commands(self, channel: str | None = None) -> list[list[str]]:
         form = self.form_var.get()
@@ -1166,6 +1247,7 @@ class EMDViewerApp(tk.Tk):
                 for command in self._build_training_commands(selected_channel)
             ]
         profile = self.catalog.dataset
+        model_family = self._model_family()
         data_dir = RAW_DATA_DIR if profile is None else profile.data_dir
         num_classes = 2 if profile is None else profile.num_classes
         tag = None if profile is None else profile.tag
@@ -1185,7 +1267,7 @@ class EMDViewerApp(tk.Tk):
 
         training_command = [
             sys.executable,
-            str(APP_DIR / "run_emd_experiments.py"),
+            str(APP_DIR / ("run_vit_experiments.py" if model_family == "vit" else "run_emd_experiments.py")),
             "--data-dir",
             str(data_dir),
             "--num-classes",
@@ -1199,76 +1281,47 @@ class EMDViewerApp(tk.Tk):
             "--output-dir",
             str(EXPERIMENTS_DIR),
         ]
+        if model_family == "vit" and num_classes == 2:
+            if not self.reward_enabled_var.get():
+                training_command.append("--no-reward")
+            else:
+                try:
+                    positive_reward = float(self.positive_reward_var.get())
+                except ValueError as exc:
+                    raise ValueError("label=1 奖励必须为不小于 1 的有限数字") from exc
+                if not math.isfinite(positive_reward) or positive_reward < 1.0:
+                    raise ValueError("label=1 奖励必须为不小于 1 的有限数字")
+                training_command.extend(["--positive-reward", str(positive_reward)])
         commands = [training_command]
         if self.auto_visualize_var.get():
-            commands.extend(
-                [
-                    [
-                        sys.executable,
-                        str(APP_DIR / "visualize_preprocessing.py"),
-                        "--data-dir",
-                        str(data_dir),
-                        "--forms",
-                        form,
-                        "--region-set",
-                        region,
-                        "--channel-mode",
-                        channel,
-                        "--output-dir",
-                        str(_scoped("preprocessing")),
-                        *_class_label_args(),
-                    ],
-                    [
-                        sys.executable,
-                        str(APP_DIR / "visualize_emd_components.py"),
-                        "--data-dir",
-                        str(data_dir),
-                        "--forms",
-                        form,
-                        "--region-set",
-                        region,
-                        "--channel-mode",
-                        channel,
-                        "--output-dir",
-                        str(_scoped("emd")),
-                        *_class_label_args(),
-                    ],
-                    [
-                        sys.executable,
-                        str(APP_DIR / "visualize_training_curves.py"),
-                        "--experiments-dir",
-                        str(EXPERIMENTS_DIR),
-                        "--data-dir",
-                        str(data_dir),
-                        "--output-dir",
-                        str(_scoped("training_curves")),
-                        "--forms",
-                        form,
-                        "--region-set",
-                        region,
-                        "--channel-mode",
-                        channel,
-                    ],
-                    [
-                        sys.executable,
-                        str(APP_DIR / "visualize_confusion_matrix.py"),
-                        "--experiments-dir",
-                        str(EXPERIMENTS_DIR),
-                        "--data-dir",
-                        str(data_dir),
-                        "--output-dir",
-                        str(_scoped("confusion_matrices")),
-                        "--forms",
-                        form,
-                        "--region-set",
-                        region,
-                        "--channel-mode",
-                        channel,
-                        "--split",
-                        "test",
-                    ],
+            input_args = [
+                "--data-dir", str(data_dir), "--forms", form,
+                "--region-set", region, "--channel-mode", channel,
+            ]
+            commands.append([
+                sys.executable, str(APP_DIR / "visualize_preprocessing.py"),
+                *input_args, "--output-dir", str(_scoped("preprocessing")),
+                *_class_label_args(),
+            ])
+            if model_family == "emd":
+                commands.append([
+                    sys.executable, str(APP_DIR / "visualize_emd_components.py"),
+                    *input_args, "--output-dir", str(_scoped("emd")),
+                    *_class_label_args(),
+                ])
+            for kind, script in (
+                ("training_curves", "visualize_training_curves.py"),
+                ("confusion_matrices", "visualize_confusion_matrix.py"),
+            ):
+                command = [
+                    sys.executable, str(APP_DIR / script),
+                    "--experiments-dir", str(EXPERIMENTS_DIR),
+                    *input_args, "--output-dir", str(_scoped(kind)),
+                    "--model-family", model_family,
                 ]
-            )
+                if kind == "confusion_matrices":
+                    command.extend(["--split", "test"])
+                commands.append(command)
         return commands
 
     def start_training(self) -> None:
@@ -1282,11 +1335,12 @@ class EMDViewerApp(tk.Tk):
         self._set_controls_during_training(True)
         self._append_log("=" * 70)
         self._append_log(
-            f"开始训练：dataset={self.dataset_var.get()}, form={self.form_var.get()}, "
+            f"开始训练：model={self.model_var.get()}, dataset={self.dataset_var.get()}, form={self.form_var.get()}, "
             f"region={self.region_var.get()}, channel={self.channel_var.get()}"
         )
         if self.auto_visualize_var.get():
-            self._append_log("训练完成后将自动生成预处理图、EMD 分量图、训练曲线图和混淆矩阵图。")
+            self._append_log("训练完成后将自动生成预处理图、训练曲线图和混淆矩阵图。"
+                             + ("EMD+MLP 还生成 EMD 分量图。" if self._model_family() == "emd" else ""))
         threading.Thread(
             target=self._training_worker,
             args=(commands,),
@@ -1363,6 +1417,8 @@ class EMDViewerApp(tk.Tk):
                 _metric(val, "auc"),
                 _metric(test, "auc"),
                 _metric(test, "accuracy"),
+                _metric(test, "weighted_balanced_accuracy"),
+                _metric(test, "decision_threshold"),
                 _metric(test, "f1_score"),
                 _metric(test, "sensitivity"),
                 _metric(test, "specificity"),

@@ -33,14 +33,13 @@ from emd_pipeline import (
     class_display_names,
     json_ready,
     load_split,
-    parse_regions,
     prepare_branch_signals,
     prepare_dynamic_envelope_branches,
     prepare_frame_input,
     read_label_scheme,
 )
 from dyn_cli import add_dyn_arguments, dyn_config_from_args
-from run_emd_experiments import DYNAMIC_REGION_NAME, REGION_CHOICES, REGION_PRESETS
+from experiment_setup import DYNAMIC_REGION_NAME, REGION_CHOICES, region_experiments
 
 
 # Historical binary names, used whenever the dataset ships no label_scheme.json.
@@ -242,18 +241,6 @@ def select_class_indices(
             )
         selected[label] = np.sort(rng.choice(candidates, size=samples_per_class, replace=False))
     return selected
-
-
-def _resolve_region_experiments(
-    region_set: str, regions_json: str | None
-) -> list[tuple[str, list[RegionSpec]]]:
-    if regions_json is not None:
-        return [("custom", parse_regions(regions_json))]
-    names = [*REGION_PRESETS, DYNAMIC_REGION_NAME] if region_set == "all" else [region_set]
-    return [
-        (name, [] if name == DYNAMIC_REGION_NAME else parse_regions(REGION_PRESETS[name]))
-        for name in names
-    ]
 
 
 def _curve_data(
@@ -534,7 +521,7 @@ def main() -> None:
     forms = list(FORM_ORDER) if args.forms.strip().lower() == "all" else [
         canonical_form(item) for item in args.forms.split(",") if item.strip()
     ]
-    regions_to_run = _resolve_region_experiments(args.region_set, args.regions_json)
+    regions_to_run = region_experiments(args.region_set, args.regions_json)
     x, labels, records, split_names = load_split_records(args.data_dir, args.split)
     num_classes = int(labels.max()) + 1 if labels.size else 2
     class_names = class_names_for_data_dir(args.data_dir, num_classes)

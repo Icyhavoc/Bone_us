@@ -184,6 +184,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--forms", default="all", help="all or comma-separated forms")
     parser.add_argument("--region-set", default="all")
     parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3], default=None)
+    parser.add_argument("--model-family", choices=["emd", "vit"], default="emd")
     parser.add_argument(
         "--data-dir",
         type=Path,
@@ -221,6 +222,8 @@ def main() -> None:
         # into (or overwrite) the historical binary curves.
         if config.get("feature_layout") != PREPROCESSING_TAG:
             continue
+        if config.get("model_family", "emd") != args.model_family:
+            continue
         if config_label_scheme_tag(config) != dataset_tag:
             continue
         form = str(config.get("form", ""))
@@ -234,14 +237,21 @@ def main() -> None:
             continue
         file_name = (
             f"form_{_safe_name(form)}__regions_{_safe_name(region)}__channels_{_safe_name(channel)}"
-            f"__core__{PREPROCESSING_TAG}{'' if dataset_tag is None else '__' + dataset_tag}.png"
+            f"__{'vit' if args.model_family == 'vit' else 'core'}__{PREPROCESSING_TAG}"
+            f"{'' if dataset_tag is None else '__' + dataset_tag}"
         )
+        decision_tag = config.get("decision_tag")
+        if args.model_family == "vit" and isinstance(decision_tag, str) and decision_tag:
+            file_name = f"{file_name}__{_safe_name(decision_tag)}"
+        file_name = f"{file_name}.png"
         output_path = output_dir / file_name
         title = f"{form} | {region} | channel_mode={channel}"
         if render_history(history, metrics, title, output_path):
             generated += 1
             manifest["files"].append(file_name)
-    (output_dir / f"selection_manifest_{PREPROCESSING_TAG}.json").write_text(
+    manifest_name = (f"selection_manifest_{PREPROCESSING_TAG}.json" if args.model_family == "emd"
+                     else f"selection_manifest_vit_{PREPROCESSING_TAG}.json")
+    (output_dir / manifest_name).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )
     print(f"Training curve visualizations written to {output_dir} ({generated} files)")
