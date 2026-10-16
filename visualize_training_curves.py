@@ -1,4 +1,4 @@
-"""Render validation and test loss histories saved by EMD experiments."""
+"""Render training and validation loss histories saved by experiments."""
 
 from __future__ import annotations
 
@@ -81,9 +81,9 @@ def render_history(
     title: str,
     output_path: Path,
 ) -> bool:
+    train_points = _history_points(history, "train_loss")
     val_points = _history_points(history, "val_loss")
-    test_points = _history_points(history, "test_loss")
-    if not val_points and not test_points:
+    if not train_points and not val_points:
         return False
 
     width, height = 1400, 850
@@ -98,7 +98,7 @@ def render_history(
     legend_font = _font(18)
     draw.text((plot_left, 28), title, fill="#1f2d36", font=title_font)
 
-    all_points = val_points + test_points
+    all_points = train_points + val_points
     max_epoch = max(epoch for epoch, _loss in all_points)
     min_loss = min(loss for _epoch, loss in all_points)
     max_loss = max(loss for _epoch, loss in all_points)
@@ -136,7 +136,8 @@ def render_history(
     draw.text(((plot_left + plot_right) // 2, height - 48), "Epoch", fill="#1f2d36", font=label_font, anchor="mm")
     draw.text((30, (plot_top + plot_bottom) // 2), "Loss", fill="#1f2d36", font=label_font, anchor="mm")
 
-    series = ((val_points, "#2f6f9f", "Validation loss"), (test_points, "#c45a32", "Test loss"))
+    series = ((train_points, "#c45a32", "Training loss"),
+              (val_points, "#2f6f9f", "Validation loss"))
     for points, color, label in series:
         if not points:
             continue
@@ -159,18 +160,12 @@ def render_history(
             draw.text((x + 8, plot_top + 10), f"Best epoch={best_epoch}", fill="#4b5563", font=legend_font)
 
     legend_x, legend_y = plot_right + 34, plot_top + 24
-    for _points, color, label in series:
+    for points, color, label in series:
+        if not points:
+            continue
         draw.line((legend_x, legend_y, legend_x + 28, legend_y), fill=color, width=4)
         draw.text((legend_x + 40, legend_y - 12), label, fill="#1f2d36", font=legend_font)
         legend_y += 38
-    if not test_points:
-        draw.multiline_text(
-            (legend_x, legend_y + 12),
-            "Test loss unavailable in this history;\nrerun training to add it.",
-            fill="#7a4b50",
-            font=_font(16),
-            spacing=5,
-        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(output_path)
@@ -178,7 +173,7 @@ def render_history(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Visualize validation and test loss by epoch")
+    parser = argparse.ArgumentParser(description="Visualize training and validation loss by epoch")
     parser.add_argument("--experiments-dir", type=Path, default=Path("experiments"))
     parser.add_argument("--output-dir", type=Path, default=Path("visualizations/training_curves"))
     parser.add_argument("--forms", default="all", help="all or comma-separated forms")
