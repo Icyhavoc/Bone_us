@@ -44,6 +44,7 @@ VISUALIZATIONS_DIR = APP_DIR / "visualizations"
 RAW_DATA_DIR = APP_DIR / "raw_data"
 RELABELED_DATA_DIR = APP_DIR / "raw_data_relabeled"
 GUI_DEFAULT_DATASET_TAG = "cls2_thr1.3"
+MODEL_TOKENS = {"emd": "core", "vit": "vit", "vit_cross_vote": "vit_cross_vote"}
 # ``raw_data`` predates ``label_scheme.json``; its stored rule is
 # ``label = int(depth_value >= 1.0)``, re-verified against the stored labels.
 DEFAULT_BINARY_THRESHOLDS: tuple[float, ...] = (1.0,)
@@ -62,6 +63,7 @@ REGION_LABELS = {
     "bone": "1-3 mm",
     "bone_plus_post": "0.2-1.5 mm + 1.5-5 mm",
     "dyn_envelope": "Dynamic Envelope",
+    "dyn_envelope_full": "动态头部 + 尾部 + 全段",
     "custom": "自定义区域",
 }
 
@@ -322,7 +324,7 @@ class ExperimentCatalog:
         root = self._kind_root("preprocessing")
         pattern = re.compile(
             r"^form_(?P<form>.+?)__regions_(?P<region>.+?)"
-            r"__channels_(?P<channel>[123])"
+            r"__channels_(?P<channel>[1234])"
             rf"__class_(?P<class>imminent|safe|label\d+)__{re.escape(PREPROCESSING_TAG)}\.png$"
         )
         options: dict[str, dict[str, Path]] = {}
@@ -359,12 +361,12 @@ class ExperimentCatalog:
         channel_part = "*" if channel == "all" else channel
         tag = self._dataset_tag
         suffix = "" if tag is None else f"__{tag}"
-        model_token = "vit" if model_family == "vit" else "core"
+        model_token = MODEL_TOKENS[model_family]
         stem = (
             f"form_{form_part}__regions_{region_part}__channels_{channel_part}__{model_token}__{PREPROCESSING_TAG}{suffix}"
         )
         files = list(root.glob(f"{stem}.png"))
-        if model_family == "vit":
+        if model_family != "emd":
             files.extend(root.glob(f"{stem}__*.png"))
         return sorted(files)
 
@@ -380,13 +382,13 @@ class ExperimentCatalog:
         channel_part = "*" if channel == "all" else channel
         tag = self._dataset_tag
         suffix = "" if tag is None else f"__{tag}"
-        model_token = "vit" if model_family == "vit" else "core"
+        model_token = MODEL_TOKENS[model_family]
         stem = (
             f"form_{form_part}__regions_{region_part}__channels_{channel_part}"
             f"__split_{split}__{model_token}__{PREPROCESSING_TAG}{suffix}"
         )
         files = list(root.glob(f"{stem}.png"))
-        if model_family == "vit":
+        if model_family != "emd":
             files.extend(root.glob(f"{stem}__*.png"))
         return sorted(files)
 
@@ -396,10 +398,10 @@ class ExperimentCatalog:
         """Return all generated confusion matrices for the target selector."""
 
         root = self._kind_root("confusion_matrices")
-        model_token = "vit" if model_family == "vit" else "core"
+        model_token = MODEL_TOKENS[model_family]
         pattern = re.compile(
             rf"^form_(?P<form>.+?)__regions_(?P<region>.+?)"
-            rf"__channels_(?P<channel>[123])__split_{re.escape(split)}__{model_token}__{re.escape(PREPROCESSING_TAG)}(?:__.+)?\.png$"
+            rf"__channels_(?P<channel>[1234])__split_{re.escape(split)}__{model_token}__{re.escape(PREPROCESSING_TAG)}(?:__.+)?\.png$"
         )
         options: dict[str, Path] = {}
         if not root.exists():
@@ -836,7 +838,7 @@ class EMDViewerApp(tk.Tk):
             header,
             text=(
                 "选择数据集决定使用哪套厚度阈值划分；再选预处理方式/区域/通道查看指标、"
-                "预处理信号和 EMD 分量。通道 all 会依次训练 1、2、3。"
+                "预处理信号和 EMD 分量。通道 all 会依次训练 1、2、3、4。"
             ),
             style="Hint.TLabel",
         ).pack(anchor="w", pady=(3, 0))
@@ -858,8 +860,9 @@ class EMDViewerApp(tk.Tk):
         )
         ttk.Label(controls, text="模型").grid(row=1, column=0, sticky="w", pady=(6, 0))
         self.model_combo = ttk.Combobox(
-            controls, textvariable=self.model_var, values=["ViT", "EMD+MLP"],
-            state="readonly", width=16,
+            controls, textvariable=self.model_var,
+            values=["ViT", "ViT+cross-vote", "EMD+MLP"],
+            state="readonly", width=20,
         )
         self.model_combo.grid(row=1, column=1, sticky="w", pady=(6, 0))
         ttk.Label(controls, text="label=1 奖励").grid(row=1, column=2, sticky="w", pady=(6, 0))
@@ -874,7 +877,7 @@ class EMDViewerApp(tk.Tk):
         self.reward_check.grid(row=1, column=4, columnspan=2, sticky="w", pady=(6, 0))
         self._add_combo(controls, "预处理方式", self.form_var, list(FORM_LABELS), 2, "form")
         self._add_combo(controls, "区域组合", self.region_var, list(REGION_LABELS), 4, "region")
-        self._add_combo(controls, "通道", self.channel_var, ["all", "1", "2", "3"], 6, "channel")
+        self._add_combo(controls, "通道", self.channel_var, ["all", "1", "2", "3", "4"], 6, "channel")
         ttk.Button(controls, text="刷新", command=self.refresh).grid(row=0, column=8, padx=(18, 4))
         ttk.Button(controls, text="打开实验目录", command=self._open_experiment_dir).grid(
             row=0, column=9, padx=4
@@ -890,7 +893,7 @@ class EMDViewerApp(tk.Tk):
         for column in (1, 3, 5, 7):
             controls.columnconfigure(column, weight=1)
         self.dataset_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_dataset_change())
-        self.model_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+        self.model_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_model_change())
         self.form_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
         self.region_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
         self.channel_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
@@ -970,6 +973,9 @@ class EMDViewerApp(tk.Tk):
             "test_sensitivity": "Test Sensitivity",
             "test_specificity": "Test Specificity",
         }
+        self._summary_headings = headings
+        self._summary_sort_column: str | None = None
+        self._summary_sort_descending = False
         widths = {
             "experiment": 330,
             "feature_dim": 80,
@@ -986,7 +992,10 @@ class EMDViewerApp(tk.Tk):
             "test_specificity": 115,
         }
         for column in columns:
-            self.summary_tree.heading(column, text=headings[column])
+            self.summary_tree.heading(
+                column, text=headings[column],
+                command=lambda selected=column: self._sort_summary(selected),
+            )
             self.summary_tree.column(column, width=widths[column], anchor="center")
         summary_scroll = ttk.Scrollbar(summary_table, orient="vertical", command=self.summary_tree.yview)
         summary_xscroll = ttk.Scrollbar(summary_table, orient="horizontal", command=self.summary_tree.xview)
@@ -1209,6 +1218,10 @@ class EMDViewerApp(tk.Tk):
         self.positive_reward_entry.configure(
             state="normal" if reward_available and self.reward_enabled_var.get() else "disabled"
         )
+        self.region_combo.configure(
+            state="disabled" if self.training_active or self._model_family() == "vit_cross_vote"
+            else "readonly"
+        )
         if self.training_active:
             self.train_button.configure(state="disabled")
         else:
@@ -1234,7 +1247,14 @@ class EMDViewerApp(tk.Tk):
         self._update_train_button()
 
     def _model_family(self) -> str:
-        return "vit" if self.model_var.get() == "ViT" else "emd"
+        return {
+            "ViT": "vit", "ViT+cross-vote": "vit_cross_vote", "EMD+MLP": "emd",
+        }[self.model_var.get()]
+
+    def _on_model_change(self) -> None:
+        if self._model_family() == "vit_cross_vote":
+            self.region_var.set("dyn_envelope_full")
+        self.refresh()
 
     def _build_training_commands(self, channel: str | None = None) -> list[list[str]]:
         form = self.form_var.get()
@@ -1243,7 +1263,7 @@ class EMDViewerApp(tk.Tk):
         if channel == "all":
             return [
                 command
-                for selected_channel in ("1", "2", "3")
+                for selected_channel in ("1", "2", "3", "4")
                 for command in self._build_training_commands(selected_channel)
             ]
         profile = self.catalog.dataset
@@ -1267,7 +1287,7 @@ class EMDViewerApp(tk.Tk):
 
         training_command = [
             sys.executable,
-            str(APP_DIR / ("run_vit_experiments.py" if model_family == "vit" else "run_emd_experiments.py")),
+            str(APP_DIR / ("run_emd_experiments.py" if model_family == "emd" else "run_vit_experiments.py")),
             "--data-dir",
             str(data_dir),
             "--num-classes",
@@ -1281,6 +1301,8 @@ class EMDViewerApp(tk.Tk):
             "--output-dir",
             str(EXPERIMENTS_DIR),
         ]
+        if model_family == "vit_cross_vote":
+            training_command.extend(["--model-variant", "cross_vote"])
         if model_family == "vit" and num_classes == 2:
             if not self.reward_enabled_var.get():
                 training_command.append("--no-reward")
@@ -1424,6 +1446,46 @@ class EMDViewerApp(tk.Tk):
                 _metric(test, "specificity"),
             )
             self.summary_tree.insert("", "end", values=values)
+        self._apply_summary_sort()
+
+    def _sort_summary(self, column: str) -> None:
+        if self._summary_sort_column == column:
+            self._summary_sort_descending = not self._summary_sort_descending
+        else:
+            self._summary_sort_column = column
+            self._summary_sort_descending = False
+        self._apply_summary_sort()
+
+    def _apply_summary_sort(self) -> None:
+        column = self._summary_sort_column
+        if column is None:
+            return
+        items = list(self.summary_tree.get_children())
+        if column == "experiment":
+            items.sort(
+                key=lambda item: self.summary_tree.set(item, column).casefold(),
+                reverse=self._summary_sort_descending,
+            )
+        else:
+            values: list[tuple[float, str]] = []
+            missing: list[str] = []
+            for item in items:
+                try:
+                    number = float(self.summary_tree.set(item, column))
+                except ValueError:
+                    missing.append(item)
+                    continue
+                if math.isfinite(number):
+                    values.append((number, item))
+                else:
+                    missing.append(item)
+            values.sort(key=lambda pair: pair[0], reverse=self._summary_sort_descending)
+            items = [item for _, item in values] + missing
+        for index, item in enumerate(items):
+            self.summary_tree.move(item, "", index)
+        arrow = " ▼" if self._summary_sort_descending else " ▲"
+        for name, label in self._summary_headings.items():
+            self.summary_tree.heading(name, text=label + (arrow if name == column else ""))
 
     def _open_experiment_dir(self) -> None:
         try:

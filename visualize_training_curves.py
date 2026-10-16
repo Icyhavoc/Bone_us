@@ -183,8 +183,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("visualizations/training_curves"))
     parser.add_argument("--forms", default="all", help="all or comma-separated forms")
     parser.add_argument("--region-set", default="all")
-    parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3], default=None)
-    parser.add_argument("--model-family", choices=["emd", "vit"], default="emd")
+    parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3, 4], default=None)
+    parser.add_argument("--model-family", choices=["emd", "vit", "vit_cross_vote"], default="emd")
     parser.add_argument(
         "--data-dir",
         type=Path,
@@ -237,7 +237,7 @@ def main() -> None:
             continue
         file_name = (
             f"form_{_safe_name(form)}__regions_{_safe_name(region)}__channels_{_safe_name(channel)}"
-            f"__{'vit' if args.model_family == 'vit' else 'core'}__{PREPROCESSING_TAG}"
+            f"__{'core' if args.model_family == 'emd' else args.model_family}__{PREPROCESSING_TAG}"
             f"{'' if dataset_tag is None else '__' + dataset_tag}"
         )
         decision_tag = config.get("decision_tag")
@@ -249,8 +249,10 @@ def main() -> None:
         if render_history(history, metrics, title, output_path):
             generated += 1
             manifest["files"].append(file_name)
-    manifest_name = (f"selection_manifest_{PREPROCESSING_TAG}.json" if args.model_family == "emd"
-                     else f"selection_manifest_vit_{PREPROCESSING_TAG}.json")
+    manifest_name = (
+        f"selection_manifest_{PREPROCESSING_TAG}.json" if args.model_family == "emd"
+        else f"selection_manifest_{args.model_family}_{PREPROCESSING_TAG}.json"
+    )
     (output_dir / manifest_name).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )

@@ -366,8 +366,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("visualizations/confusion_matrices"))
     parser.add_argument("--forms", default="all", help="all or comma-separated forms")
     parser.add_argument("--region-set", default="all")
-    parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3], default=None)
-    parser.add_argument("--model-family", choices=["emd", "vit"], default="emd")
+    parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3, 4], default=None)
+    parser.add_argument("--model-family", choices=["emd", "vit", "vit_cross_vote"], default="emd")
     parser.add_argument("--split", choices=["train", "val", "test"], default="test")
     parser.add_argument(
         "--data-dir",
@@ -430,7 +430,7 @@ def main() -> None:
             f"channels_{_safe_name(channel)}__split_{args.split}"
         )
         label_tag = payload["label_tag"]
-        file_name = f"{file_name}__{'vit' if args.model_family == 'vit' else 'core'}__{PREPROCESSING_TAG}"
+        file_name = f"{file_name}__{'core' if args.model_family == 'emd' else args.model_family}__{PREPROCESSING_TAG}"
         if label_tag:
             file_name = f"{file_name}__{_safe_name(label_tag)}"
         decision_tag = config.get("decision_tag")
@@ -456,7 +456,10 @@ def main() -> None:
         )
         generated += 1
     output_dir.mkdir(parents=True, exist_ok=True)
-    manifest_name = "selection_manifest_core.json" if args.model_family == "emd" else "selection_manifest_vit.json"
+    manifest_name = (
+        "selection_manifest_core.json" if args.model_family == "emd"
+        else f"selection_manifest_{args.model_family}.json"
+    )
     (output_dir / manifest_name).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )

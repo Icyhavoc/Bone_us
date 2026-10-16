@@ -293,7 +293,9 @@ def parse_regions(value: str | Sequence[Sequence[float]]) -> list[RegionSpec]:
 # locator runs on the already-selected block while ``MANUAL_CORRECTIONS`` is
 # keyed by physical channel: the two index spaces coincide for mode 3 but not
 # for modes 1 and 2.
-CHANNEL_MODE_SLICES: dict[int, tuple[int, int]] = {1: (0, 1), 2: (1, 2), 3: (0, 2)}
+CHANNEL_MODE_SLICES: dict[int, tuple[int, int]] = {
+    1: (0, 1), 2: (1, 2), 3: (0, 2), 4: (0, 2),
+}
 
 
 def channel_physical_indices(channel_mode: int) -> tuple[int, ...]:
@@ -306,7 +308,7 @@ def channel_physical_indices(channel_mode: int) -> tuple[int, ...]:
     try:
         start, stop = CHANNEL_MODE_SLICES[channel_mode]
     except KeyError:
-        raise ValueError("channel_mode must be 1, 2, or 3") from None
+        raise ValueError("channel_mode must be 1, 2, 3, or 4") from None
     return tuple(range(start, stop))
 
 
@@ -320,7 +322,7 @@ def select_channels(frames: np.ndarray, channel_mode: int) -> np.ndarray:
     try:
         start, stop = CHANNEL_MODE_SLICES[channel_mode]
     except KeyError:
-        raise ValueError("channel_mode must be 1, 2, or 3") from None
+        raise ValueError("channel_mode must be 1, 2, 3, or 4") from None
     return frames[:, start:stop, :]
 
 
@@ -390,6 +392,34 @@ def process_frames(
         averaged = np.mean(frames[selected], axis=0, dtype=np.float32)
         return averaged[None, ...], selected.astype(np.int64)
     raise AssertionError(f"Unhandled frame form: {form}")
+
+
+def channel4_overlap_order(
+    frames: np.ndarray, head_starts: Sequence[int], head_ends: Sequence[int],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Rank shared frame IDs from each beam's own main window."""
+
+    if frames.ndim != 3 or frames.shape[1] != 2:
+        raise ValueError("channel 4 needs both physical channels")
+    frame_order = np.arange(frames.shape[0])
+    peaks = [
+        np.max(np.abs(frames[:, channel, int(head_starts[channel]):int(head_ends[channel])]), axis=1)
+        for channel in range(2)
+    ]
+    rankings = [np.lexsort((frame_order, -channel_peaks))[:10] for channel_peaks in peaks]
+    beam2_top = set(int(index) for index in rankings[1])
+    overlap = np.asarray(
+        [index for index in rankings[0] if int(index) in beam2_top], dtype=np.int64
+    )
+    return overlap, {
+        "algorithm": "independent_top10_overlap_beam1_v1",
+        "top10_frames_by_channel": [ranking.astype(int).tolist() for ranking in rankings],
+        "top10_peak_abs_by_channel": [
+            peaks[channel][ranking].astype(float).tolist()
+            for channel, ranking in enumerate(rankings)
+        ],
+        "overlap_frames_beam1_order": overlap.astype(int).tolist(),
+    }
 
 
 def resample_signals(signals: np.ndarray, target_length: int) -> np.ndarray:
@@ -915,7 +945,27 @@ def prepare_frame_input(
     physical = channel_physical_indices(channel_mode)
     starts = None if span is None else span["starts"][list(physical)]
     ends = None if span is None else span["ends"][list(physical)]
+    if channel_mode == 4 and form in ("max1", "top3_mean"):
+        assert starts is not None and ends is not None and span is not None
+        overlap, selection = channel4_overlap_order(selected, starts, ends)
+        required = 1 if form == "max1" else 3
+        selection["required_overlap_count"] = required
+        selection["used_overlap"] = bool(len(overlap) >= required)
+        if len(overlap) >= required:
+            chosen = overlap[:required]
+            processed = (
+                selected[chosen[0]:chosen[0] + 1].astype(np.float32)
+                if form == "max1" else
+                np.mean(selected[chosen], axis=0, dtype=np.float32)[None, ...]
+            )
+            selection["selected_frames"] = chosen.astype(int).tolist()
+            span["channel4_selection"] = selection
+            return processed, chosen, span
+        selection["fallback"] = "channel3_similarity_ranking"
+        span["channel4_selection"] = selection
     processed, chosen = process_frames(selected, form, starts, ends)
+    if channel_mode == 4 and span is not None and "channel4_selection" in span:
+        span["channel4_selection"]["selected_frames"] = chosen.astype(int).tolist()
     return processed, chosen, span
 
 
@@ -1241,6 +1291,15 @@ def sample_feature_vector(
                 None,
                 None,
             ))
+        for region in regions:
+            start, end = mapper.slice_bounds(region)
+            block = prepare_branch_block(
+                processed, region, mapper, target_length, tukey_alpha
+            )
+            specs.append((
+                region.label, block, [start] * block.shape[1],
+                [end] * block.shape[1], region.start_mm, region.end_mm,
+            ))
     else:
         for region in regions:
             start, end = mapper.slice_bounds(region)
@@ -1292,6 +1351,7 @@ def sample_feature_vector(
         "form": canonical_form(form),
         "channel_mode": channel_mode,
         "selected_frames": None if selected_frames is None else selected_frames.tolist(),
+        "channel4_selection": None if span is None else span.get("channel4_selection"),
         "selection_main_start_index_by_channel": None if span is None else span["starts"].astype(int).tolist(),
         "selection_main_end_exclusive_by_channel": None if span is None else span["ends"].astype(int).tolist(),
         "region_mode": "dyn_envelope" if dynamic_info is not None else "fixed",
@@ -1593,13 +1653,21 @@ def _softmax(logits: np.ndarray) -> np.ndarray:
     return values / np.sum(values, axis=1, keepdims=True)
 
 
-def binary_metrics(y_true: np.ndarray, probabilities: np.ndarray, threshold: float = 0.5) -> dict[str, float | int | None]:
+def binary_metrics(
+    y_true: np.ndarray, probabilities: np.ndarray, threshold: float = 0.5,
+    *, decision: str = "threshold",
+) -> dict[str, float | int | None]:
     """Compute the required binary metrics without scikit-learn."""
 
     y_true = np.asarray(y_true, dtype=np.int64)
     probabilities = np.asarray(probabilities, dtype=np.float64)
     scores = probabilities[:, 1]
-    predictions = (scores >= threshold).astype(np.int64)
+    if decision == "argmax":
+        predictions = np.argmax(probabilities, axis=1).astype(np.int64)
+    elif decision == "threshold":
+        predictions = (scores >= threshold).astype(np.int64)
+    else:
+        raise ValueError(f"unknown binary decision: {decision}")
     tn = int(np.sum((y_true == 0) & (predictions == 0)))
     fp = int(np.sum((y_true == 0) & (predictions == 1)))
     fn = int(np.sum((y_true == 1) & (predictions == 0)))
@@ -1667,6 +1735,7 @@ def classification_metrics(
     probabilities: np.ndarray,
     num_classes: int | None = None,
     threshold: float = 0.5,
+    *, binary_decision: str = "threshold",
 ) -> dict[str, Any]:
     """Metrics for a binary or k-class softmax model, without scikit-learn.
 
@@ -1699,7 +1768,7 @@ def classification_metrics(
             f"labels run from {int(y_true.min())} to {int(y_true.max())} but num_classes={num_classes}"
         )
     if num_classes == 2:
-        return binary_metrics(y_true, probabilities, threshold)
+        return binary_metrics(y_true, probabilities, threshold, decision=binary_decision)
 
     predictions = np.argmax(probabilities, axis=1).astype(np.int64)
     matrix = np.zeros((num_classes, num_classes), dtype=np.int64)

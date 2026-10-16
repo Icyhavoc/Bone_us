@@ -32,7 +32,9 @@ from emd_pipeline import (
     write_json,
 )
 from experiment_setup import (
+    CROSS_VOTE_REGION_NAME,
     DYNAMIC_REGION_NAME,
+    DYNAMIC_REGION_NAMES,
     REGION_CHOICES,
     guard_existing_experiment,
     infer_num_classes,
@@ -50,7 +52,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from vit_model import RegionChannelViT, ViTConfig
+from vit_model import RegionChannelCrossVoteViT, RegionChannelViT, ViTConfig
 
 
 def _parse_args() -> argparse.Namespace:
@@ -59,8 +61,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("experiments"))
     parser.add_argument("--forms", default="max1", help="all or comma-separated frame forms")
     parser.add_argument("--region-set", choices=REGION_CHOICES, default=DYNAMIC_REGION_NAME)
+    parser.add_argument("--model-variant", choices=["concat", "cross_vote"], default="concat")
     parser.add_argument("--regions-json", default=None)
-    parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3], default=3)
+    parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3, 4], default=3)
     parser.add_argument("--target-length", type=int, default=512)
     parser.add_argument("--tukey-alpha", type=float, default=0.3)
     parser.add_argument("--max-depth-mm", type=float, default=5.0)
@@ -142,7 +145,7 @@ def _load_prepared_split(
 
 @torch.inference_mode()
 def _evaluate(
-    model: RegionChannelViT,
+    model: RegionChannelViT | RegionChannelCrossVoteViT,
     inputs: np.ndarray,
     labels: np.ndarray,
     criterion: nn.Module,
@@ -165,8 +168,22 @@ def _evaluate(
     return np.concatenate(probabilities), loss_sum / len(labels)
 
 
+@torch.inference_mode()
+def _cross_vote_branch_probabilities(
+    model: RegionChannelCrossVoteViT, inputs: np.ndarray,
+    batch_size: int, device: torch.device,
+) -> np.ndarray:
+    model.eval()
+    batches = [
+        model.branch_probabilities(torch.from_numpy(inputs[start:start + batch_size]).to(device))
+        .cpu().numpy()
+        for start in range(0, len(inputs), batch_size)
+    ]
+    return np.concatenate(batches)
+
+
 def _fit(
-    model: RegionChannelViT,
+    model: RegionChannelViT | RegionChannelCrossVoteViT,
     train_x: np.ndarray,
     train_y: np.ndarray,
     val_x: np.ndarray,
@@ -174,7 +191,10 @@ def _fit(
     args: argparse.Namespace,
     device: torch.device,
 ) -> tuple[list[dict[str, Any]], int, float]:
-    criterion = nn.CrossEntropyLoss()
+    criterion = (
+        nn.NLLLoss() if isinstance(model, RegionChannelCrossVoteViT)
+        else nn.CrossEntropyLoss()
+    )
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay,
     )
@@ -204,7 +224,11 @@ def _fit(
         val_probabilities, val_loss = _evaluate(
             model, val_x, val_y, criterion, args.batch_size, device,
         )
-        val_metrics = classification_metrics(val_y, val_probabilities, model.config.num_classes)
+        val_metrics = classification_metrics(
+            val_y, val_probabilities, model.config.num_classes,
+            binary_decision=("argmax" if isinstance(model, RegionChannelCrossVoteViT)
+                             else "threshold"),
+        )
         history.append({
             "epoch": epoch, "train_loss": train_loss, "val_loss": val_loss,
             "val_auc": val_metrics["auc"], "val_accuracy": val_metrics["accuracy"],
@@ -265,9 +289,11 @@ def _binary_metrics(
 
 
 def _experiment_name(
-    form: str, region: str, channel: int, tag: str | None, decision_tag: str | None
+    form: str, region: str, channel: int, tag: str | None,
+    decision_tag: str | None, model_variant: str,
 ) -> str:
-    name = f"form_{form}__regions_{region}__channels_{channel}__vit__{PREPROCESSING_TAG}"
+    model_token = "vit_cross_vote" if model_variant == "cross_vote" else "vit"
+    name = f"form_{form}__regions_{region}__channels_{channel}__{model_token}__{PREPROCESSING_TAG}"
     if tag is not None:
         name = f"{name}__{tag}"
     return name if decision_tag is None else f"{name}__{decision_tag}"
@@ -285,9 +311,11 @@ def run_one(
     decision_tag: str | None,
 ) -> dict[str, Any]:
     mapper = DepthMapper(args.max_depth_mm, args.signal_length, args.rounding)
-    dynamic_config = dyn_config_from_args(args) if region_name == DYNAMIC_REGION_NAME else None
+    dynamic_config = dyn_config_from_args(args) if region_name in DYNAMIC_REGION_NAMES else None
     streams = 2 if form == "mean_std" else 50 if form == "raw50" else 1
-    branches = (2 if dynamic_config is not None else len(regions)) * (2 if args.channel_mode == 3 else 1)
+    branches = (2 + len(regions) if dynamic_config is not None else len(regions)) * (
+        2 if args.channel_mode in (3, 4) else 1
+    )
     vit_config = ViTConfig(
         branches=branches, streams=streams, length=args.target_length,
         num_classes=num_classes, patch_size=args.patch_size, dim=args.dim,
@@ -296,7 +324,8 @@ def run_one(
     )
     vit_config.validate()
     config: dict[str, Any] = {
-        "model_family": "vit", "feature_layout": PREPROCESSING_TAG,
+        "model_family": "vit_cross_vote" if args.model_variant == "cross_vote" else "vit",
+        "feature_layout": PREPROCESSING_TAG,
         "form": form, "region_name": region_name, "regions": regions,
         "channel_mode": args.channel_mode, "target_length": args.target_length,
         "tukey_alpha": args.tukey_alpha, "dynamic_envelope": dynamic_config,
@@ -308,12 +337,20 @@ def run_one(
                      "batch_size": args.batch_size, "learning_rate": args.learning_rate,
                      "weight_decay": args.weight_decay, "seed": args.seed},
     }
+    if args.model_variant == "cross_vote":
+        config["model_variant"] = "cross_vote"
+    if args.channel_mode == 4:
+        config["frame_selection"] = "independent_top10_overlap_beam1_v1"
     if num_classes == 2:
-        config["decision"] = {
-            "method": "fixed_0.5" if args.no_reward else "normalized_reward",
-            "positive_reward": None if args.no_reward else args.positive_reward,
-            "selection_split": None if args.no_reward else "val",
-        }
+        config["decision"] = (
+            {"method": "vote_argmax", "positive_reward": None, "selection_split": None}
+            if args.model_variant == "cross_vote" else
+            {
+                "method": "fixed_0.5" if args.no_reward else "normalized_reward",
+                "positive_reward": None if args.no_reward else args.positive_reward,
+                "selection_split": None if args.no_reward else "val",
+            }
+        )
         config["decision_tag"] = decision_tag
     guard_existing_experiment(output_dir, config)
     device = _device(args.device)
@@ -346,14 +383,17 @@ def run_one(
         "stream_meaning": "mean,std" if form == "mean_std" else
                           "original 50 frames" if form == "raw50" else "one selected waveform",
     })
-    model = RegionChannelViT(vit_config).to(device)
+    model = (
+        RegionChannelCrossVoteViT(vit_config) if args.model_variant == "cross_vote"
+        else RegionChannelViT(vit_config)
+    ).to(device)
     train_x, train_y = data["train"]
     val_x, val_y = data["val"]
     history, best_epoch, best_loss = _fit(model, train_x, train_y, val_x, val_y, args, device)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.NLLLoss() if args.model_variant == "cross_vote" else nn.CrossEntropyLoss()
     val_probabilities: np.ndarray | None = None
     decision_threshold: float | None = None
-    if num_classes == 2:
+    if num_classes == 2 and args.model_variant == "concat":
         decision_threshold = 0.5
         if not args.no_reward:
             val_probabilities, _ = _evaluate(model, val_x, val_y, criterion, args.batch_size, device)
@@ -371,7 +411,8 @@ def run_one(
             )
     torch.save({"model": model.cpu().state_dict(), "config": vit_config.__dict__,
                 "best_epoch": best_epoch, "decision_threshold": decision_threshold,
-                "positive_reward": args.positive_reward if num_classes == 2 and not args.no_reward else None},
+                "positive_reward": args.positive_reward if num_classes == 2 and not args.no_reward and args.model_variant == "concat" else None,
+                "model_variant": args.model_variant},
                output_dir / "vit_model.pt")
     model.to(device)
     write_json(output_dir / "history.json", history)
@@ -393,17 +434,39 @@ def run_one(
         if probabilities is None:
             probabilities, _ = _evaluate(model, inputs, labels, criterion, args.batch_size, device)
         np.save(output_dir / f"probabilities_{split}.npy", probabilities)
-        split_metrics[split] = (
-            _binary_metrics(
-                labels, probabilities, decision_threshold,
-                None if args.no_reward else args.positive_reward,
+        if args.model_variant == "cross_vote":
+            branch_probabilities = _cross_vote_branch_probabilities(
+                model, inputs, args.batch_size, device
             )
-            if decision_threshold is not None else
-            classification_metrics(labels, probabilities, num_classes)
-        )
+            np.save(output_dir / f"branch_probabilities_{split}.npy", branch_probabilities)
+            np.save(output_dir / f"vote_scores_{split}.npy", branch_probabilities.sum(axis=1))
+            split_metrics[split] = classification_metrics(
+                labels, probabilities, num_classes, binary_decision="argmax"
+            )
+            split_metrics[split]["decision_mode"] = "vote_argmax"
+            if num_classes == 2:
+                specificity = split_metrics[split]["specificity"]
+                sensitivity = split_metrics[split]["sensitivity"]
+                split_metrics[split]["weighted_balanced_accuracy"] = (
+                    specificity + sensitivity
+                ) / 2
+        else:
+            split_metrics[split] = (
+                _binary_metrics(
+                    labels, probabilities, decision_threshold,
+                    None if args.no_reward else args.positive_reward,
+                )
+                if decision_threshold is not None else
+                classification_metrics(labels, probabilities, num_classes)
+            )
     metrics: dict[str, Any] = {
         "feature_dim": branches * args.dim,
         "feature_group_dims": [args.dim] * branches,
+        "feature_aggregation": (
+            "probability_sum" if args.model_variant == "cross_vote"
+            else "concatenated_features"
+        ),
+        "vote_count": branches if args.model_variant == "cross_vote" else None,
         "best_epoch": best_epoch, "trained_epochs": len(history),
         "best_val_loss": best_loss,
         "split_counts": {split: len(labels) for split, (_, labels) in data.items()},
@@ -440,10 +503,17 @@ def main() -> None:
     num_classes = max(inferred, recorded) if args.num_classes is None else args.num_classes
     if num_classes < max(inferred, recorded):
         raise ValueError("--num-classes is smaller than the dataset label scheme")
+    if args.model_variant == "cross_vote":
+        if args.regions_json is not None or args.region_set not in (
+            DYNAMIC_REGION_NAME, CROSS_VOTE_REGION_NAME,
+        ):
+            raise ValueError("cross_vote requires the dynamic head, tail and full region set")
+        args.region_set = CROSS_VOTE_REGION_NAME
+        args.no_reward = True
     decision_tag = (
         ("fixed0p5" if args.no_reward else
          "norm_w1_" + str(args.positive_reward).replace(".", "p").replace("+", ""))
-        if num_classes == 2 else None
+        if num_classes == 2 and args.model_variant == "concat" else None
     )
     forms = parse_forms(args.forms)
     regions_to_run = region_experiments(args.region_set, args.regions_json)
@@ -451,15 +521,23 @@ def main() -> None:
     results: dict[str, Any] = {}
     for form in forms:
         for region_name, regions in regions_to_run:
-            name = _experiment_name(form, region_name, args.channel_mode, tag, decision_tag)
+            name = _experiment_name(
+                form, region_name, args.channel_mode, tag, decision_tag,
+                args.model_variant,
+            )
             results[name] = run_one(
                 data_dir, output_dir / name, form, region_name, regions, args,
                 num_classes, label_scheme, decision_tag,
             )
-    write_json(output_dir / "summary_vit.json", {
+    summary_name = (
+        "summary_vit_cross_vote.json" if args.model_variant == "cross_vote"
+        else "summary_vit.json"
+    )
+    write_json(output_dir / summary_name, {
         "data_dir": data_dir, "forms": forms,
         "regions": [name for name, _ in regions_to_run],
         "channel_mode": args.channel_mode, "decision_tag": decision_tag,
+        "model_variant": args.model_variant,
         "results": results,
         "elapsed_seconds": time.time() - started,
     })

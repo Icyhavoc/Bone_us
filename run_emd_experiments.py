@@ -40,7 +40,7 @@ from emd_pipeline import (
 )
 from dyn_cli import add_dyn_arguments, dyn_config_from_args
 from experiment_setup import (
-    DYNAMIC_REGION_NAME,
+    DYNAMIC_REGION_NAMES,
     REGION_CHOICES,
     REGION_PRESETS,
     guard_existing_experiment,
@@ -66,7 +66,7 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help='custom depth regions, e.g. "[[0,5],[1,3]]"; regions may overlap or nest',
     )
-    parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3], default=3)
+    parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3, 4], default=3)
     parser.add_argument("--target-length", type=int, default=512)
     parser.add_argument("--tukey-alpha", type=float, default=0.3)
     # dyn_envelope mirrors bin/reference_code/pipeline.py; see dyn_cli for the flags.
@@ -149,7 +149,7 @@ def run_one(
         sift_sd_threshold=args.sift_sd_threshold,
     )
     dynamic_envelope_config = (
-        dyn_config_from_args(args) if region_name == DYNAMIC_REGION_NAME else None
+        dyn_config_from_args(args) if region_name in DYNAMIC_REGION_NAMES else None
     )
     inferred_classes = infer_num_classes(data_dir, args.max_samples)
     if args.num_classes is not None and args.num_classes < inferred_classes:
@@ -186,6 +186,8 @@ def run_one(
         "adc_dc_replacement": ADC_DC_MAGNITUDE,
         "max_samples": args.max_samples,
     }
+    if args.channel_mode == 4:
+        experiment_config["frame_selection"] = "independent_top10_overlap_beam1_v1"
     guard_existing_experiment(output_dir, experiment_config)
     output_dir.mkdir(parents=True, exist_ok=True)
     write_json(output_dir / "config.json", experiment_config)

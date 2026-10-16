@@ -1,4 +1,4 @@
-# BMU 骨分层：ViT 分类与 EMD+MLP 对照
+# BMU 骨分层：ViT、ViT+cross-vote 与 EMD+MLP 对照
 
 本目录的现行 ViT 主流程：
 
@@ -9,7 +9,7 @@ X.npy [样本, 50 帧, 2 通道, 896 点]
   → 固定深度区间或逐样本动态分区
   → 每个通道、每个分区独立三次样条重采样和 Tukey 加窗
   → 每个“分区 × 物理通道”进入独立 1D ViT 编码器
-  → 拼接编码向量，由一个 k 类分类头输出
+  → 标准 ViT 拼接编码向量后分类，或 cross-vote 各路独立分类后逐类投票
 ```
 
 原有 EMD 统计特征、训练集标准化和 NumPy MLP 作为独立对照路径继续可运行。
@@ -35,11 +35,17 @@ python raw_data/relabel_by_thickness.py --thresholds 0.8,1.2 --output-dir raw_da
 
 帧方式：`mean_std`、`raw50`、`max1`、`top3_mean`。后两种先用完整双通道 50 帧定位各自的动态主体窗（默认 170 点），即使最终使用固定分区也按主体窗选帧。单通道按本通道主体窗内的最大绝对幅值排序；双通道先取通道 1 主体窗峰值最高的 10 帧，再按两通道相似度排序，`max1` 取相似度最高的 1 帧，`top3_mean` 取最高 3 帧并逐通道平均。相似度为同一绝对位置窗口内、允许 ±5 点位移的最大绝对去均值相关系数，乘以两通道 RMS 的 `min/max` 能量比。通道 1 峰值只用于筛选候选和同分排序，不决定最终首帧。
 
+`--channel-mode 4` 是双通道选帧对照：在**各自**动态主体窗内，分别按最大绝对幅值选 beam 1、beam 2 的前 10 帧，再取帧号交集。`max1` 有交集就取其中 beam 1 幅值最大的同一帧；没有交集则完整沿用 channel 3 的相似度排序。`top3_mean` 仅在交集至少有 3 帧时取其中 beam 1 幅值最大的 3 帧并逐通道平均；交集少于 3 帧时完整沿用 channel 3，不用交集帧补位。同分按原帧序确定。`mean_std`、`raw50` 的处理与 channel 3 相同。审计文件记录两组前 10 帧、交集、实际选帧和是否回退。
+
 固定区域预置：`full` = [0,5] mm、`bone` = [1,3] mm、`bone_plus_post` = [0.2,1.5] 与 [1.5,5] mm。可用 `--regions-json` 输入自定义区间，允许重叠或不连续，少于 4 个原始采样点的区间会报错。`dyn_envelope` 按每个通道定位主体窗，尾窗紧接该通道主体窗末尾取 600 点，超过原信号末尾则右侧补零。包络只决定边界，进入模型的仍是对应有符号波形。每个分区使用 SciPy `CubicSpline` 三次样条重采样到默认 512 点，再乘 Tukey 窗。
 
-`--channel-mode 1`、`2` 取单个物理通道；`3` 保留两个通道。通道 1 和通道 2 各自切片，**不相加或平均**。
+`dyn_envelope_full` 在动态主体窗和动态尾窗后追加 [0,5] mm 全段分区。双通道得到“头部、尾部、全段 × 两物理通道”的 6 路输入；单通道得到 3 路。`--region-set all` 仍只遍历原有四种区域配置，不自动加入此对照区域。
+
+`--channel-mode 1`、`2` 取单个物理通道；`3`、`4` 都保留两个通道，区别仅在选帧规则。通道 1 和通道 2 各自切片，**不相加或平均**。
 
 ViT 输入为 `[样本, 分区×物理通道, 流, 512]`。`mean_std` 有 2 条流，`raw50` 有 50 条流，`max1` / `top3_mean` 各有 1 条流；这些流属于同一个样本。每路独立进行 1D patch embedding、位置编码、Transformer 和池化，拼接后由一个 k 类分类头输出。默认模型参数参考 `ViT_reference`，当前训练使用现有 train/val/test，按 val loss 早停，冻结权重后才处理 test 信号；不加载参考权重，也不翻转标签。
+
+`ViT+cross-vote` 复用同一输入和独立编码器，但每路有自己的 k 类分类头；对每路 softmax 概率逐类求和，以最大和对应的标签作为结果。训练用各路**平均概率**对正确类的负对数作为损失，平均与求和的 argmax 相同；仍按 val loss 早停。`probabilities_*.npy` 保存归一化的平均概率，`branch_probabilities_*.npy` 保存逐路概率，`vote_scores_*.npy` 保存逐类求和得分。二分类也直接 argmax，不使用 reward 或验证集调阈值。
 
 ViT 二分类保留普通交叉熵训练和 val loss 选模型；模型确定后，默认只在 **val** 上选择使 `TN/(TN+FP) + w×TP/(TP+FN)` 最大的概率阈值（`w=2`，同分取较高阈值），再固定用于 train/val/test 指标和混淆矩阵。两类识别率分别归一化，因此验证集类别数量不会直接决定权重；val 必须包含两类。`--positive-reward` 可修改 label=1 召回率权重（至少 1），GUI 可勾选启用并调整。关闭 GUI 开关或传入 `--no-reward` 时固定使用原始 0.5 阈值，不进行阈值搜索。普通 accuracy 仍原样报告，另报告加权双类召回率 `[TN/(TN+FP) + w×TP/(TP+FN)]/(1+w)`、正类召回率及所选阈值；关闭时该指标取 `w=1`，缺少某一类的划分显示 `n/a`。该规则只改变判定，**不改变 ViT 训练损失**。三分类及以上仍使用 argmax。旧的固定阈值实验及先前按原始正确数加权的 `__w1_...` 实验保持原样；新实验用 `__norm_w1_2p0` 或 `__fixed0p5` 区分，互不覆盖。
 
@@ -52,19 +58,20 @@ EMD+MLP 路径仍对每条信号最多提取 5 个 IMF 和余项，对每个分�
 ```powershell
 python run_vit_experiments.py --data-dir raw_data_relabeled/cls2_thr1.3 --forms max1 --region-set dyn_envelope --channel-mode 3 --positive-reward 2
 python run_vit_experiments.py --data-dir raw_data_relabeled/cls2_thr1.3 --forms max1 --region-set dyn_envelope --channel-mode 3 --no-reward
+python run_vit_experiments.py --data-dir raw_data_relabeled/cls2_thr1.3 --model-variant cross_vote --forms max1 --region-set dyn_envelope_full --channel-mode 4
 python run_emd_experiments.py --forms max1 --region-set full --channel-mode 3
 python run_emd_experiments.py --data-dir raw_data_relabeled/cls3_thr0.8_1.2 --forms top3_mean --region-set dyn_envelope --channel-mode 3
 python gui_app.py
 ```
 
-ViT 默认运行 `max1 + dyn_envelope + 通道 3`；显式指定 `--forms all --region-set all` 可运行全部 16 个方式/区域组合。ViT 二分类实验写入 `experiments/form_<方式>__regions_<区域>__channels_<通道>__vit__headsim_cubic[__数据集tag]__norm_w1_2p0/`；关闭 reward 时后缀为 `__fixed0p5`。两者均保存配置、分支次序、逐样本分段审计、权重、判定阈值、训练历史、概率和指标；多分类目录不带判定后缀。EMD+MLP 保持原有 `__core__headsim_cubic` 目录及产物。已有目录配置不一致时拒绝混写，换设置请指定新的 `--output-dir`；小样本 `--max-samples` 仅用于链路验证，指标不可引用为模型性能。
+ViT 默认运行 `max1 + dyn_envelope + 通道 3`；显式指定 `--forms all --region-set all` 可运行原有全部 16 个方式/区域组合。ViT 二分类实验写入 `experiments/form_<方式>__regions_<区域>__channels_<通道>__vit__headsim_cubic[__数据集tag]__norm_w1_2p0/`；关闭 reward 时后缀为 `__fixed0p5`。cross-vote 目录独立使用 `__vit_cross_vote__headsim_cubic`，固定使用 `dyn_envelope_full`，即使 CLI 未显式传 `--region-set` 也会选择它；其他区域和自定义区域不适用于此模型。两种 ViT 均保存配置、分支次序、逐样本分段审计、权重、训练历史、概率和指标。EMD+MLP 保持 `__core__headsim_cubic` 目录及产物。已有目录配置不一致时拒绝混写，换设置请指定新的 `--output-dir`；小样本 `--max-samples` 仅用于链路验证，指标不可引用为模型性能。
 
 主要入口：
 
 | 文件 | 用途 |
 | --- | --- |
 | `emd_pipeline.py` | 数据加载、ADC 归零、分区、EMD、特征、标准化和 MLP |
-| `vit_pipeline.py`、`vit_model.py` | 共用前处理后的 ViT 输入布局与独立分支模型 |
+| `vit_pipeline.py`、`vit_model.py` | 共用前处理后的 ViT 输入布局、拼接分类及 cross-vote 独立分类模型 |
 | `run_vit_experiments.py` | ViT 训练与保存结果（需要 PyTorch） |
 | `experiment_setup.py` | 两条训练路径共用的帧、区域与输出保护配置 |
 | `run_emd_experiments.py` | 训练与保存结果 |
@@ -75,6 +82,6 @@ ViT 默认运行 `max1 + dyn_envelope + 通道 3`；显式指定 `--forms all --
 | `visualize_training_curves.py`、`visualize_confusion_matrix.py` | 当前主流程的训练曲线和混淆矩阵 |
 | `verify_dyn_envelope.py` | 动态分区校验 |
 
-GUI 默认选择 ViT 和 1.3 mm 数据集，可切换到 EMD+MLP。ViT 自动生成预处理、训练曲线和混淆矩阵图；EMD+MLP 另生成 EMD 分量图。通道 `all` 会依次运行模式 1、2、3。历史实验、原始数据和 `bin/` 归档保留在原处；旧探索脚本不属于现行入口。
+GUI 默认选择 ViT 和 1.3 mm 数据集，可切换到 ViT+cross-vote 或 EMD+MLP。cross-vote 固定选择“动态头部＋尾部＋全段”，reward 控件不可用。Summary 表格点击任一列标题可按该列升序或降序排列，刷新后保留所选排序。ViT 自动生成预处理、训练曲线和混淆矩阵图；EMD+MLP 另生成 EMD 分量图。通道 `all` 会依次运行模式 1、2、3、4。历史实验、原始数据和 `bin/` 归档保留在原处；旧探索脚本不属于现行入口。
 
 项目目标与实现约束见工作区的 `../.codex/skills/bmu-emd-project/SKILL.md`，当前代码范围及历史产物说明见 `PROJECT_SUMMARY.md`。

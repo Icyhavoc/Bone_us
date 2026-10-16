@@ -39,7 +39,7 @@ from emd_pipeline import (
     read_label_scheme,
 )
 from dyn_cli import add_dyn_arguments, dyn_config_from_args
-from experiment_setup import DYNAMIC_REGION_NAME, REGION_CHOICES, region_experiments
+from experiment_setup import DYNAMIC_REGION_NAMES, REGION_CHOICES, region_experiments
 
 
 # Historical binary names, used whenever the dataset ships no label_scheme.json.
@@ -346,7 +346,7 @@ def _make_sheet(
     cell_height = 205
     left_margin = 150
     top_margin = 88
-    branch_count = 2 if dynamic_envelope_config is not None else len(regions)
+    branch_count = 2 + len(regions) if dynamic_envelope_config is not None else len(regions)
     width = left_margin + cell_width * branch_count
     height = top_margin + cell_height * len(selected_indices)
     image = Image.new("RGB", (width, height), (255, 255, 255))
@@ -383,7 +383,7 @@ def _make_sheet(
                 branch_font,
                 cell_width - 16,
             )
-        else:
+        elif column == 1:
             tail_length = int(dynamic_envelope_config.tail_length)
             branch_title = _fit_title(
                 draw,
@@ -396,6 +396,8 @@ def _make_sheet(
                 branch_font,
                 cell_width - 16,
             )
+        else:
+            branch_title = f"Branch {column + 1}: {regions[column - 2].label}"
         draw.text(
             (x0 + 8, 58),
             branch_title,
@@ -462,6 +464,14 @@ def _make_sheet(
                         float(branch_info["input_length"]) * mm_per_index,
                     )
                 )
+            for region in regions:
+                branch_items.append((
+                    prepare_branch_signals(
+                        processed, region, mapper, target_length,
+                        tukey_alpha=tukey_alpha, apply_tukey=False,
+                    ),
+                    region.start_mm, region.end_mm,
+                ))
         for column, (branch_flat, start_mm, end_mm) in enumerate(branch_items):
             branch = branch_flat.reshape(processed.shape[0], processed.shape[1], target_length)
             depth_axis = np.linspace(start_mm, end_mm, target_length)
@@ -478,7 +488,7 @@ def _make_sheet(
                 depth_axis,
                 y_limits,
                 f"{sample_id}",
-                "Relative depth / mm" if dynamic_envelope_config is not None else "Depth / mm",
+                "Relative depth / mm" if dynamic_envelope_config is not None and column < 2 else "Depth / mm",
             )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(output_path)
@@ -492,7 +502,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--forms", default="all", help="all or comma-separated forms")
     parser.add_argument("--region-set", choices=REGION_CHOICES, default="all")
     parser.add_argument("--regions-json", default=None)
-    parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3], default=3)
+    parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3, 4], default=3)
     parser.add_argument("--samples-per-class", type=int, default=10)
     parser.add_argument("--imminent-label", type=int, default=0)
     parser.add_argument("--safe-label", type=int, default=1)
@@ -600,7 +610,7 @@ def main() -> None:
                     mapper,
                     args.target_length,
                     args.tukey_alpha,
-                    dynamic_envelope_config if region_name == DYNAMIC_REGION_NAME else None,
+                    dynamic_envelope_config if region_name in DYNAMIC_REGION_NAMES else None,
                     (args.y_min, args.y_max),
                     output_dir / file_name,
                 )

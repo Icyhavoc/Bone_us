@@ -16,7 +16,9 @@ REGION_PRESETS: dict[str, list[list[float]]] = {
     "bone_plus_post": [[0.2, 1.5], [1.5, 5.0]],
 }
 DYNAMIC_REGION_NAME = "dyn_envelope"
-REGION_CHOICES = ["all", *REGION_PRESETS, DYNAMIC_REGION_NAME]
+CROSS_VOTE_REGION_NAME = "dyn_envelope_full"
+DYNAMIC_REGION_NAMES = (DYNAMIC_REGION_NAME, CROSS_VOTE_REGION_NAME)
+REGION_CHOICES = ["all", *REGION_PRESETS, *DYNAMIC_REGION_NAMES]
 
 
 def parse_forms(value: str) -> list[str]:
@@ -37,7 +39,11 @@ def region_experiments(
     if any(name not in REGION_CHOICES for name in names):
         raise ValueError(f"unknown region set: {region_set}")
     return [
-        (name, [] if name == DYNAMIC_REGION_NAME else parse_regions(REGION_PRESETS[name]))
+        (
+            name,
+            [] if name == DYNAMIC_REGION_NAME else
+            parse_regions(REGION_PRESETS["full"] if name == CROSS_VOTE_REGION_NAME else REGION_PRESETS[name]),
+        )
         for name in names
     ]
 

@@ -99,3 +99,40 @@ class RegionChannelViT(nn.Module):
             raise ValueError(f"expected [batch, {expected}], got {tuple(signals.shape)}")
         encoded = [encoder(signals[:, index]) for index, encoder in enumerate(self.encoders)]
         return self.head(torch.cat(encoded, dim=1))
+
+
+class RegionChannelCrossVoteViT(nn.Module):
+    """Independent branch classifiers, combined by summed class probabilities."""
+
+    def __init__(self, config: ViTConfig) -> None:
+        super().__init__()
+        config.validate()
+        self.config = config
+        self.encoders = nn.ModuleList(
+            WaveformEncoder(config) for _ in range(config.branches)
+        )
+        self.heads = nn.ModuleList(
+            nn.Sequential(
+                nn.Linear(config.dim, config.dim),
+                nn.GELU(),
+                nn.Dropout(config.dropout),
+                nn.Linear(config.dim, config.num_classes),
+            )
+            for _ in range(config.branches)
+        )
+
+    def branch_probabilities(self, signals: torch.Tensor) -> torch.Tensor:
+        expected = (self.config.branches, self.config.streams, self.config.length)
+        if signals.ndim != 4 or tuple(signals.shape[1:]) != expected:
+            raise ValueError(f"expected [batch, {expected}], got {tuple(signals.shape)}")
+        logits = torch.stack([
+            head(encoder(signals[:, index]))
+            for index, (encoder, head) in enumerate(zip(self.encoders, self.heads))
+        ], dim=1)
+        return logits.softmax(dim=-1)
+
+    def forward(self, signals: torch.Tensor) -> torch.Tensor:
+        # NLLLoss on the mean probability trains the same decision used at
+        # inference.  Summing instead of averaging gives the same argmax.
+        probabilities = self.branch_probabilities(signals).mean(dim=1)
+        return probabilities.clamp_min(torch.finfo(probabilities.dtype).tiny).log()

@@ -33,7 +33,9 @@ from emd_pipeline import (
     read_label_scheme,
 )
 from dyn_cli import add_dyn_arguments, dyn_config_from_args
-from experiment_setup import DYNAMIC_REGION_NAME, REGION_CHOICES, region_experiments
+from experiment_setup import (
+    CROSS_VOTE_REGION_NAME, DYNAMIC_REGION_NAMES, REGION_CHOICES, region_experiments,
+)
 from visualize_preprocessing import (
     CHANNEL_COLORS,
     _draw_plot_cell,
@@ -58,7 +60,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--forms", default="all", help="all or comma-separated forms")
     parser.add_argument("--region-set", choices=REGION_CHOICES, default="all")
     parser.add_argument("--regions-json", default=None)
-    parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3], default=3)
+    parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3, 4], default=3)
     parser.add_argument("--imminent-label", type=int, default=0)
     parser.add_argument("--safe-label", type=int, default=1)
     parser.add_argument(
@@ -216,7 +218,11 @@ def _make_component_sheet(
                 depth_axis,
                 component_limits[column][component_index],
                 title,
-                "Relative depth / mm" if region_name == DYNAMIC_REGION_NAME else "Depth / mm",
+                (
+                    "Relative/absolute depth / mm" if region_name == CROSS_VOTE_REGION_NAME
+                    else "Relative depth / mm" if region_name in DYNAMIC_REGION_NAMES
+                    else "Depth / mm"
+                ),
             )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(output_path)
@@ -302,12 +308,12 @@ def main() -> None:
                 processed, selected_frames, span = prepare_frame_input(
                     x[index], form, args.channel_mode,
                     str(records[index].get("sample_id", "")),
-                    dynamic_envelope_config if region_name == DYNAMIC_REGION_NAME else None,
+                    dynamic_envelope_config if region_name in DYNAMIC_REGION_NAMES else None,
                 )
                 branch_components: list[np.ndarray] = []
                 branch_ranges: list[tuple[float, float]] = []
                 branch_titles: list[str] = []
-                if region_name == DYNAMIC_REGION_NAME:
+                if region_name in DYNAMIC_REGION_NAMES:
                     dynamic_branches, dynamic_info = prepare_dynamic_envelope_branches(
                         processed,
                         span=span,
@@ -340,6 +346,16 @@ def main() -> None:
                     manifest.setdefault("dynamic_envelope_details", {})[
                         f"{form}/{region_name}/{label}"
                     ] = dynamic_info
+                    for region in regions:
+                        branch_flat = prepare_branch_signals(
+                            processed, region, mapper, args.target_length,
+                            tukey_alpha=args.tukey_alpha,
+                        )
+                        branch_components.append(_decompose_streams(
+                            branch_flat.reshape(-1, args.target_length), emd_config
+                        ))
+                        branch_ranges.append((region.start_mm, region.end_mm))
+                        branch_titles.append(f"Branch {len(branch_titles) + 1}: {region.label}")
                 else:
                     branch_items = ((
                         prepare_branch_signals(

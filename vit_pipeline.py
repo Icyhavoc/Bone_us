@@ -58,7 +58,19 @@ def prepare_vit_sample(
             processed, span, dynamic_envelope_config, target_length, tukey_alpha,
             point_id=point_id, physical_channels=physical_channels,
         )
-        branch_info = dynamic_info["branches"]
+        branch_info = list(dynamic_info["branches"])
+        for region in regions:
+            start, end = mapper.slice_bounds(region)
+            blocks.append(prepare_branch_block(
+                processed, region, mapper, target_length, tukey_alpha
+            ))
+            branch_info.append({
+                "name": region.label, "start_index": start,
+                "end_index_exclusive": end,
+                "start_index_by_channel": [start] * len(physical_channels),
+                "end_index_exclusive_by_channel": [end] * len(physical_channels),
+                "input_length_by_channel": [end - start] * len(physical_channels),
+            })
     inputs = np.stack(
         [block[:, channel, :] for block in blocks for channel in range(len(physical_channels))],
         axis=0,
@@ -75,6 +87,7 @@ def prepare_vit_sample(
         "form": canonical_form(form),
         "channel_mode": channel_mode,
         "selected_frames": None if selected_frames is None else selected_frames.tolist(),
+        "channel4_selection": None if span is None else span.get("channel4_selection"),
         "selection_main_start_index_by_channel": None if span is None else span["starts"].astype(int).tolist(),
         "selection_main_end_exclusive_by_channel": None if span is None else span["ends"].astype(int).tolist(),
         "branch_names": names,
