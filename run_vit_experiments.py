@@ -41,6 +41,11 @@ from experiment_setup import (
     parse_forms,
     region_experiments,
 )
+from learning_rate_schedule import (
+    DEFAULT_LR_SCHEDULE, DEFAULT_MIN_LEARNING_RATE, DEFAULT_WARMUP_EPOCHS,
+    LR_SCHEDULES, learning_rate_for_epoch, learning_rate_tag,
+    validate_learning_rate_settings,
+)
 from vit_pipeline import build_vit_inputs
 
 # This Conda workspace ships two OpenMP runtimes.  Initialize SciPy's batched
@@ -85,6 +90,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=12)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--lr-schedule", choices=LR_SCHEDULES, default=DEFAULT_LR_SCHEDULE)
+    parser.add_argument("--min-learning-rate", type=float, default=DEFAULT_MIN_LEARNING_RATE)
+    parser.add_argument("--warmup-epochs", type=int, default=DEFAULT_WARMUP_EPOCHS)
     parser.add_argument("--weight-decay", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=2023)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
@@ -95,8 +103,15 @@ def _parse_args() -> argparse.Namespace:
         parser.error("epochs, patience, batch size and target length must be positive")
     if args.max_samples is not None and args.max_samples < 1:
         parser.error("--max-samples must be positive")
-    if args.learning_rate <= 0 or args.weight_decay < 0:
-        parser.error("learning rate must be positive and weight decay nonnegative")
+    try:
+        validate_learning_rate_settings(
+            args.learning_rate, args.min_learning_rate,
+            args.warmup_epochs, args.lr_schedule,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
+        parser.error("weight decay must be finite and nonnegative")
     if not math.isfinite(args.positive_reward) or args.positive_reward < 1.0:
         parser.error("--positive-reward must be finite and at least 1")
     if args.device == "cuda" and not torch.cuda.is_available():
@@ -208,6 +223,12 @@ def _fit(
     best_state: dict[str, torch.Tensor] | None = None
     history: list[dict[str, Any]] = []
     for epoch in range(1, args.epochs + 1):
+        learning_rate = learning_rate_for_epoch(
+            epoch, args.epochs, args.learning_rate, args.min_learning_rate,
+            args.warmup_epochs, args.lr_schedule,
+        )
+        for group in optimizer.param_groups:
+            group["lr"] = learning_rate
         model.train()
         loss_sum = 0.0
         for waveforms, labels in loader:
@@ -230,10 +251,11 @@ def _fit(
                              else "threshold"),
         )
         history.append({
-            "epoch": epoch, "train_loss": train_loss, "val_loss": val_loss,
+            "epoch": epoch, "learning_rate": learning_rate,
+            "train_loss": train_loss, "val_loss": val_loss,
             "val_auc": val_metrics["auc"], "val_accuracy": val_metrics["accuracy"],
         })
-        print(f"epoch {epoch:03d}: train_loss={train_loss:.4f} "
+        print(f"epoch {epoch:03d}: lr={learning_rate:.8g} train_loss={train_loss:.4f} "
               f"val_loss={val_loss:.4f} val_acc={val_metrics['accuracy']:.4f}", flush=True)
         if val_loss < best_loss - 1e-6:
             best_loss, best_epoch = val_loss, epoch
@@ -335,6 +357,9 @@ def run_one(
         "max_samples": args.max_samples,
         "training": {"epochs": args.epochs, "patience": args.patience,
                      "batch_size": args.batch_size, "learning_rate": args.learning_rate,
+                     "lr_schedule": args.lr_schedule,
+                     "min_learning_rate": args.min_learning_rate,
+                     "warmup_epochs": args.warmup_epochs,
                      "weight_decay": args.weight_decay, "seed": args.seed},
     }
     if args.model_variant == "cross_vote":
@@ -517,6 +542,10 @@ def main() -> None:
     )
     forms = parse_forms(args.forms)
     regions_to_run = region_experiments(args.region_set, args.regions_json)
+    lr_tag = learning_rate_tag(
+        args.learning_rate, args.min_learning_rate,
+        args.warmup_epochs, args.lr_schedule,
+    )
     started = time.time()
     results: dict[str, Any] = {}
     for form in forms:
@@ -525,6 +554,7 @@ def main() -> None:
                 form, region_name, args.channel_mode, tag, decision_tag,
                 args.model_variant,
             )
+            name = f"{name}__{lr_tag}"
             results[name] = run_one(
                 data_dir, output_dir / name, form, region_name, regions, args,
                 num_classes, label_scheme, decision_tag,
@@ -533,6 +563,7 @@ def main() -> None:
         "summary_vit_cross_vote.json" if args.model_variant == "cross_vote"
         else "summary_vit.json"
     )
+    summary_name = summary_name.removesuffix(".json") + f"__{lr_tag}.json"
     write_json(output_dir / summary_name, {
         "data_dir": data_dir, "forms": forms,
         "regions": [name for name, _ in regions_to_run],

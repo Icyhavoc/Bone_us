@@ -66,6 +66,8 @@ python gui_app.py
 
 ViT 默认运行 `max1 + dyn_envelope + 通道 3`；显式指定 `--forms all --region-set all` 可运行原有全部 16 个方式/区域组合。ViT 二分类实验写入 `experiments/form_<方式>__regions_<区域>__channels_<通道>__vit__headsim_cubic[__数据集tag]__norm_w1_2p0/`；关闭 reward 时后缀为 `__fixed0p5`。cross-vote 目录独立使用 `__vit_cross_vote__headsim_cubic`，固定使用 `dyn_envelope_full`，即使 CLI 未显式传 `--region-set` 也会选择它；其他区域和自定义区域不适用于此模型。两种 ViT 均保存配置、分支次序、逐样本分段审计、权重、训练历史、概率和指标。EMD+MLP 保持 `__core__headsim_cubic` 目录及产物。已有目录配置不一致时拒绝混写，换设置请指定新的 `--output-dir`；小样本 `--max-samples` 仅用于链路验证，指标不可引用为模型性能。
 
+三种 GUI 模型（ViT、ViT+cross-vote、EMD+MLP）现在共用逐轮学习率规则：默认线性预热 5 轮，再按余弦曲线降到 `5e-6`；ViT 峰值保持 `3e-4`，EMD+MLP 峰值保持 `1e-3`。两个训练入口都支持 `--learning-rate`、`--min-learning-rate`、`--warmup-epochs` 和 `--lr-schedule {warmup_cosine,constant}`。每轮实际值写入 `history.json`，配置写入 `config.json`，新实验目录带学习率方案后缀（例如 ViT 的 `__lr_warmcos5_peak3em4_min5em6`），保留历史固定学习率结果。按验证集早停时，实际训练可能尚未降到下限；这次变更不调整数据、损失、模型结构和判定规则。
+
 主要入口：
 
 | 文件 | 用途 |
@@ -74,6 +76,7 @@ ViT 默认运行 `max1 + dyn_envelope + 通道 3`；显式指定 `--forms all --
 | `vit_pipeline.py`、`vit_model.py` | 共用前处理后的 ViT 输入布局、拼接分类及 cross-vote 独立分类模型 |
 | `run_vit_experiments.py` | ViT 训练与保存结果（需要 PyTorch） |
 | `experiment_setup.py` | 两条训练路径共用的帧、区域与输出保护配置 |
+| `learning_rate_schedule.py` | 三种模型共用的预热、余弦衰减和实验标签 |
 | `run_emd_experiments.py` | 训练与保存结果 |
 | `raw_data/relabel_by_thickness.py` | 可变阈值重标与数据集生成 |
 | `dyn_cli.py` | 动态分区参数 |

@@ -24,6 +24,11 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 from scipy.interpolate import CubicSpline
 
+from learning_rate_schedule import (
+    DEFAULT_LR_SCHEDULE, DEFAULT_MIN_LEARNING_RATE, DEFAULT_WARMUP_EPOCHS,
+    learning_rate_for_epoch, validate_learning_rate_settings,
+)
+
 
 FORM_ALIASES = {
     "mean_std": "mean_std",
@@ -244,14 +249,19 @@ class MLPConfig:
     patience: int = 40
     min_delta: float = 1e-4
     seed: int = 42
+    lr_schedule: str = DEFAULT_LR_SCHEDULE
+    min_learning_rate: float = DEFAULT_MIN_LEARNING_RATE
+    warmup_epochs: int = DEFAULT_WARMUP_EPOCHS
 
     def validate(self) -> None:
         if not self.hidden_dims or any(v <= 0 for v in self.hidden_dims):
             raise ValueError("hidden_dims must contain positive integers")
         if self.num_classes < 2:
             raise ValueError("num_classes must be at least 2")
-        if self.learning_rate <= 0:
-            raise ValueError("learning_rate must be positive")
+        validate_learning_rate_settings(
+            self.learning_rate, self.min_learning_rate,
+            self.warmup_epochs, self.lr_schedule,
+        )
         if self.weight_decay < 0:
             raise ValueError("weight_decay cannot be negative")
         if not (0.0 <= self.dropout < 1.0):
@@ -1910,6 +1920,11 @@ class NumpyMLPClassifier:
         batch_size = min(self.config.batch_size, x_train.shape[0])
 
         for epoch in range(1, self.config.epochs + 1):
+            learning_rate = learning_rate_for_epoch(
+                epoch, self.config.epochs, self.config.learning_rate,
+                self.config.min_learning_rate, self.config.warmup_epochs,
+                self.config.lr_schedule,
+            )
             order = self.rng.permutation(x_train.shape[0])
             train_losses: list[float] = []
             for start in range(0, x_train.shape[0], batch_size):
@@ -1950,8 +1965,8 @@ class NumpyMLPClassifier:
                     vhat_w = v_weights[layer] / (1 - beta2**step)
                     mhat_b = m_biases[layer] / (1 - beta1**step)
                     vhat_b = v_biases[layer] / (1 - beta2**step)
-                    self.weights[layer] -= self.config.learning_rate * mhat_w / (np.sqrt(vhat_w) + 1e-8)
-                    self.biases[layer] -= self.config.learning_rate * mhat_b / (np.sqrt(vhat_b) + 1e-8)
+                    self.weights[layer] -= learning_rate * mhat_w / (np.sqrt(vhat_w) + 1e-8)
+                    self.biases[layer] -= learning_rate * mhat_b / (np.sqrt(vhat_b) + 1e-8)
 
             train_probabilities = self.predict_proba(x_train)
             val_probabilities = self.predict_proba(x_val)
@@ -1966,6 +1981,7 @@ class NumpyMLPClassifier:
                 )
             record = {
                 "epoch": epoch,
+                "learning_rate": learning_rate,
                 "train_loss": float(np.mean(train_losses)),
                 "val_loss": val_loss,
                 "test_loss": test_loss,

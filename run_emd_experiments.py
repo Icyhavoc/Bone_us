@@ -48,6 +48,10 @@ from experiment_setup import (
     parse_forms,
     region_experiments,
 )
+from learning_rate_schedule import (
+    DEFAULT_LR_SCHEDULE, DEFAULT_MIN_LEARNING_RATE, DEFAULT_WARMUP_EPOCHS,
+    LR_SCHEDULES, learning_rate_tag, validate_learning_rate_settings,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -80,6 +84,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--patience", type=int, default=40)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--lr-schedule", choices=LR_SCHEDULES, default=DEFAULT_LR_SCHEDULE)
+    parser.add_argument("--min-learning-rate", type=float, default=DEFAULT_MIN_LEARNING_RATE)
+    parser.add_argument("--warmup-epochs", type=int, default=DEFAULT_WARMUP_EPOCHS)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -97,7 +104,15 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="limit every split for a quick smoke test; omit for the full dataset",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    try:
+        validate_learning_rate_settings(
+            args.learning_rate, args.min_learning_rate,
+            args.warmup_epochs, args.lr_schedule,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
 
 
 def _experiment_name(
@@ -161,6 +176,9 @@ def run_one(
     mlp_config = MLPConfig(
         num_classes=num_classes,
         learning_rate=args.learning_rate,
+        lr_schedule=args.lr_schedule,
+        min_learning_rate=args.min_learning_rate,
+        warmup_epochs=args.warmup_epochs,
         dropout=args.dropout,
         epochs=args.epochs,
         patience=args.patience,
@@ -308,6 +326,10 @@ def main() -> None:
     forms = parse_forms(args.forms)
     regions_to_run = region_experiments(args.region_set, args.regions_json)
     dataset_tag = _dataset_tag(data_dir)
+    lr_tag = learning_rate_tag(
+        args.learning_rate, args.min_learning_rate,
+        args.warmup_epochs, args.lr_schedule,
+    )
     all_results: dict[str, object] = {
         "data_dir": data_dir,
         "output_dir": output_dir,
@@ -323,6 +345,7 @@ def main() -> None:
             experiment_name = _experiment_name(
                 form, region_name, args.channel_mode, dataset_tag
             )
+            experiment_name = f"{experiment_name}__{lr_tag}"
             experiment_dir = output_dir / experiment_name
             result = run_one(
                 data_dir=data_dir,
@@ -334,8 +357,9 @@ def main() -> None:
             )
             all_results["results"][experiment_name] = result
     output_dir.mkdir(parents=True, exist_ok=True)
-    write_json(output_dir / "summary.json", all_results)
-    print(f"All experiments completed. Summary: {output_dir / 'summary.json'}")
+    summary_path = output_dir / f"summary__{lr_tag}.json"
+    write_json(summary_path, all_results)
+    print(f"All experiments completed. Summary: {summary_path}")
 
 
 if __name__ == "__main__":
