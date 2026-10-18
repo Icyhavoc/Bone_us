@@ -76,3 +76,13 @@ def guard_existing_experiment(output_dir: Path, config: dict[str, object]) -> No
             f"{path} records a different run; select another --output-dir "
             "to keep both results"
         )
+
+
+def confusion_image_name(experiment_name: str, split: str) -> str:
+    """Give each experiment its own confusion image, including run variants."""
+
+    prefix, marker, remainder = experiment_name.partition("__channels_")
+    channel, separator, model_and_run = remainder.partition("__")
+    if not marker or not separator or not prefix.startswith("form_") or not channel or not model_and_run:
+        raise ValueError(f"invalid experiment directory name: {experiment_name}")
+    return f"{prefix}__channels_{channel}__split_{split}__{model_and_run}.png"

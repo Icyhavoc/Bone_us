@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -32,6 +31,7 @@ from emd_pipeline import (
     label_scheme_tag,
     read_label_scheme,
 )
+from experiment_setup import confusion_image_name
 
 
 SPLIT_LABELS = {"train": "Train", "val": "Validation", "test": "Test"}
@@ -50,10 +50,6 @@ def _read_json(path: Path, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default
-
-
-def _safe_name(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "unknown"
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.ImageFont:
@@ -425,18 +421,11 @@ def main() -> None:
         payload = _confusion_payload(config, metrics, args.split)
         if payload is None:
             continue
-        file_name = (
-            f"form_{_safe_name(form)}__regions_{_safe_name(region)}__"
-            f"channels_{_safe_name(channel)}__split_{args.split}"
-        )
+        try:
+            file_name = confusion_image_name(directory.name, args.split)
+        except ValueError:
+            continue
         label_tag = payload["label_tag"]
-        file_name = f"{file_name}__{'core' if args.model_family == 'emd' else args.model_family}__{PREPROCESSING_TAG}"
-        if label_tag:
-            file_name = f"{file_name}__{_safe_name(label_tag)}"
-        decision_tag = config.get("decision_tag")
-        if args.model_family == "vit" and isinstance(decision_tag, str) and decision_tag:
-            file_name = f"{file_name}__{_safe_name(decision_tag)}"
-        file_name = f"{file_name}.png"
         render_confusion_matrix(
             payload["matrix"],
             payload["class_names"],

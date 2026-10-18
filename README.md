@@ -85,6 +85,6 @@ ViT 默认运行 `max1 + dyn_envelope + 通道 3`；显式指定 `--forms all --
 | `visualize_training_curves.py`、`visualize_confusion_matrix.py` | 当前主流程的训练曲线和混淆矩阵 |
 | `verify_dyn_envelope.py` | 动态分区校验 |
 
-GUI 默认选择 ViT 和 1.3 mm 数据集，可切换到 ViT+cross-vote 或 EMD+MLP。cross-vote 固定选择“动态头部＋尾部＋全段”，reward 控件不可用。Summary 表格点击任一列标题可按该列升序或降序排列，刷新后保留所选排序。ViT 自动生成预处理、训练曲线和混淆矩阵图；EMD+MLP 另生成 EMD 分量图。训练曲线只绘制 Train/Validation loss，不显示 Test loss。通道 `all` 会依次运行模式 1、2、3、4。历史实验、原始数据和 `bin/` 归档保留在原处；旧探索脚本不属于现行入口。
+GUI 默认选择 ViT 和 1.3 mm 数据集，可切换到 ViT+cross-vote 或 EMD+MLP。cross-vote 固定选择“动态头部＋尾部＋全段”，reward 控件不可用。Summary 表格点击任一列标题可按该列升序或降序排列，刷新后保留所选排序。ViT 自动生成预处理、训练曲线和混淆矩阵图；EMD+MLP 另生成 EMD 分量图。训练曲线只绘制 Train/Validation loss，不显示 Test loss。Confusion Matrix 左侧遵从顶部模型和组合筛选；右侧下拉框可跨 ViT、ViT+cross-vote、EMD+MLP 比较，显示模型、方式、区域、通道和实验变体，只列当前 `experiments/` 中仍有完整配置与指标且已有对应图像的实验。混淆矩阵图名包含完整实验目录标识，旧图像即使留在 `visualizations/` 也不会被误列为当前实验。通道 `all` 会依次运行模式 1、2、3、4；旧探索脚本不属于现行入口。
 
 项目目标与实现约束见工作区的 `../.codex/skills/bmu-emd-project/SKILL.md`，当前代码范围及历史产物说明见 `PROJECT_SUMMARY.md`。

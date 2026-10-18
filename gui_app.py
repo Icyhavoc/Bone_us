@@ -29,6 +29,7 @@ from typing import Any, Iterable, Sequence
 
 from PIL import Image, ImageTk
 
+from experiment_setup import confusion_image_name
 from emd_pipeline import (
     PREPROCESSING_TAG,
     class_display_names,
@@ -45,6 +46,7 @@ RAW_DATA_DIR = APP_DIR / "raw_data"
 RELABELED_DATA_DIR = APP_DIR / "raw_data_relabeled"
 GUI_DEFAULT_DATASET_TAG = "cls2_thr1.3"
 MODEL_TOKENS = {"emd": "core", "vit": "vit", "vit_cross_vote": "vit_cross_vote"}
+MODEL_DISPLAY_NAMES = {"emd": "EMD+MLP", "vit": "ViT", "vit_cross_vote": "ViT+cross-vote"}
 # ``raw_data`` predates ``label_scheme.json``; its stored rule is
 # ``label = int(depth_value >= 1.0)``, re-verified against the stored labels.
 DEFAULT_BINARY_THRESHOLDS: tuple[float, ...] = (1.0,)
@@ -374,52 +376,66 @@ class ExperimentCatalog:
         self, form: str, region: str, channel: str, split: str = "test",
         model_family: str = "emd",
     ) -> list[Path]:
+        """Current-model images backed by experiments still in the catalog."""
+
         root = self._kind_root("confusion_matrices")
         if not root.exists() or form == "all":
             return []
-        form_part = form
-        region_part = "*" if region == "all" else region
-        channel_part = "*" if channel == "all" else channel
-        tag = self._dataset_tag
-        suffix = "" if tag is None else f"__{tag}"
-        model_token = MODEL_TOKENS[model_family]
-        stem = (
-            f"form_{form_part}__regions_{region_part}__channels_{channel_part}"
-            f"__split_{split}__{model_token}__{PREPROCESSING_TAG}{suffix}"
-        )
-        files = list(root.glob(f"{stem}.png"))
-        if model_family != "emd":
-            files.extend(root.glob(f"{stem}__*.png"))
+        files = []
+        for row in self.rows:
+            if row["label_tag"] != self._dataset_tag or row["model_family"] != model_family:
+                continue
+            if row["form"] != form:
+                continue
+            if region != "all" and row["region"] != region:
+                continue
+            if channel != "all" and row["channel"] != channel:
+                continue
+            try:
+                path = root / confusion_image_name(row["name"], split)
+            except ValueError:
+                continue
+            if path.is_file():
+                files.append(path)
         return sorted(files)
 
     def confusion_matrix_options(
-        self, split: str = "test", model_family: str = "emd"
+        self, split: str = "test", model_family: str | None = None,
     ) -> dict[str, Path]:
-        """Return all generated confusion matrices for the target selector."""
+        """Offer existing experiments across models, never orphaned PNG files."""
 
         root = self._kind_root("confusion_matrices")
-        model_token = MODEL_TOKENS[model_family]
-        pattern = re.compile(
-            rf"^form_(?P<form>.+?)__regions_(?P<region>.+?)"
-            rf"__channels_(?P<channel>[1234])__split_{re.escape(split)}__{model_token}__{re.escape(PREPROCESSING_TAG)}(?:__.+)?\.png$"
-        )
         options: dict[str, Path] = {}
         if not root.exists():
             return options
-        for path in sorted(root.glob("*.png")):
-            match = pattern.match(path.name)
-            if match is None:
+        for row in self.rows:
+            family = row["model_family"]
+            if (row["label_tag"] != self._dataset_tag
+                    or family not in MODEL_TOKENS
+                    or (model_family is not None and family != model_family)):
                 continue
-            key = (
-                f"form={match.group('form')} | region={match.group('region')} | "
-                f"channel={match.group('channel')}"
+            try:
+                path = root / confusion_image_name(row["name"], split)
+            except ValueError:
+                continue
+            if not path.is_file():
+                continue
+            base_name = (
+                f"form_{row['form']}__regions_{row['region']}"
+                f"__channels_{row['channel']}__{MODEL_TOKENS[family]}__{PREPROCESSING_TAG}"
             )
-            if "__norm_w1_" in path.stem:
-                key += " | normalized reward=" + path.stem.rsplit("__norm_w1_", 1)[1].replace("p", ".")
-            elif "__fixed0p5" in path.stem:
-                key += " | reward=off"
-            elif "__w1_" in path.stem:
-                key += " | count reward=" + path.stem.rsplit("__w1_", 1)[1].replace("p", ".")
+            variant = row["name"].removeprefix(base_name).removeprefix("__")
+            tag = row["label_tag"]
+            if tag is not None:
+                variant = variant.removeprefix(tag).removeprefix("__")
+            key = (
+                f"model={MODEL_DISPLAY_NAMES[family]} | form={row['form']} | "
+                f"region={row['region']} | channel={row['channel']}"
+            )
+            if variant:
+                key += f" | run={variant}"
+            if key in options:
+                key += f" | experiment={row['name']}"
             options[key] = path
         return options
 
@@ -1148,9 +1164,7 @@ class EMDViewerApp(tk.Tk):
         )
         self._current_confusion_paths = current_paths
         current_count = self.current_confusion_images.show_images(current_paths)
-        self.confusion_option_map = self.catalog.confusion_matrix_options(
-            split="test", model_family=model_family
-        )
+        self.confusion_option_map = self.catalog.confusion_matrix_options(split="test")
         options = sorted(self.confusion_option_map)
         self.confusion_choice.configure(values=options)
         if self.confusion_choice_var.get() not in self.confusion_option_map:

@@ -21,7 +21,7 @@
 3. 每个分区按通道独立切片、用 SciPy 三次样条重采样到默认 512 点、加 Tukey 窗。通道模式 3 不做通道相加。
 4. ViT 输入保留 `[分区×通道, 流, 长度]`：每个分区和物理通道用独立的 patch/Transformer 编码器，拼接后由一个 k 类头分类。训练按 val loss 早停；二分类仅用 val 按 `TN/(TN+FP) + w×TP/(TP+FN)` 选择正类概率阈值（默认 w=2），也可关闭 reward 固定使用 0.5；多分类仍为 argmax。普通 accuracy 与加权双类召回率、正类召回率和阈值一起保存。`input_audit_*.json` 保存选中帧、动态边界及尾窗补零。
 5. EMD+MLP 对每通道每分区提取 8 个统计量，训练集拟合标准化器，再由单个 `64 → 32 → k` MLP 分类；原入口保持可运行。
-6. `dyn_envelope_full` 在动态主体和尾窗之后追加 [0,5] mm 全段，双通道共六路。ViT+cross-vote 的每路编码向量经独立分类头得到概率，逐类求和后 argmax；训练对平均概率使用负对数损失，按 val loss 早停。此模型二分类也不用 reward 或阈值搜索，结果另存 `__vit_cross_vote__` 目录，并保存每路概率、平均概率及求和得分。GUI、曲线和混淆矩阵按模型类型独立筛选。
+6. `dyn_envelope_full` 在动态主体和尾窗之后追加 [0,5] mm 全段，双通道共六路。ViT+cross-vote 的每路编码向量经独立分类头得到概率，逐类求和后 argmax；训练对平均概率使用负对数损失，按 val loss 早停。此模型二分类也不用 reward 或阈值搜索，结果另存 `__vit_cross_vote__` 目录，并保存每路概率、平均概率及求和得分。GUI 左侧混淆矩阵按当前模型筛选，右侧只列仍在当前 `experiments/` 中的实验，并允许跨 ViT、ViT+cross-vote、EMD+MLP 选图比较；旧 PNG 不再产生孤立选项。
 7. 三条现行模型训练路径（ViT 拼接、ViT+cross-vote、EMD+MLP）共用逐轮学习率策略：默认预热 5 轮后余弦衰减，下限 `5e-6`；ViT 峰值 `3e-4`，MLP 峰值 `1e-3`。CLI 可调整峰值、下限、预热轮数，也可显式选择固定学习率；GUI 使用动态默认值。每轮实际学习率、训练配置和独立实验目录后缀可审计。早停规则、数据处理、损失、阈值及模型结构沿用 main。
 
 代码入口为 `emd_pipeline.py`、`vit_pipeline.py`、`vit_model.py`、`run_vit_experiments.py`、`run_emd_experiments.py` 和 `gui_app.py`。ViT 二分类新规则产物带 `__vit__headsim_cubic...__norm_w1_2p0`，关闭 reward 的固定阈值产物带 `__fixed0p5`；旧 ViT 产物保留原名，先前按计数加权的产物仍带 `__w1_...`。cross-vote 产物带 `__vit_cross_vote__headsim_cubic`，EMD+MLP 产物带 `__core__headsim_cubic`。GUI 按模型和数据集筛选，标准 ViT 可启停二分类 reward 并调整权重。预处理、训练曲线和混淆矩阵用于三条路径，EMD 分量图只用于 EMD+MLP。
