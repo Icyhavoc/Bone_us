@@ -42,11 +42,12 @@ from experiment_setup import (
     region_experiments,
 )
 from learning_rate_schedule import (
-    DEFAULT_LR_SCHEDULE, DEFAULT_MIN_LEARNING_RATE, DEFAULT_WARMUP_EPOCHS,
+    DEFAULT_LR_SCHEDULE, DEFAULT_MIN_LEARNING_RATE,
     LR_SCHEDULES, learning_rate_for_epoch, learning_rate_tag,
     validate_learning_rate_settings,
 )
 from vit_pipeline import build_vit_inputs
+from vit_hyperparameters import PRESETS, hyperparameter_reference, resolve_hyperparameters
 
 # This Conda workspace ships two OpenMP runtimes.  Initialize SciPy's batched
 # spline solver before PyTorch so mean/std and raw50 can coexist with torch.
@@ -80,25 +81,28 @@ def _parse_args() -> argparse.Namespace:
                         help="binary only: weight for label=1 recall in validation threshold selection")
     parser.add_argument("--no-reward", action="store_true",
                         help="binary only: use the original fixed 0.5 decision threshold")
-    parser.add_argument("--patch-size", type=int, default=8)
-    parser.add_argument("--dim", type=int, default=256)
-    parser.add_argument("--depth", type=int, default=3)
-    parser.add_argument("--heads", type=int, default=2)
-    parser.add_argument("--mlp-dim", type=int, default=512)
-    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--hyperparameter-preset", choices=["auto", *PRESETS], default="auto",
+                        help="auto chooses the matching reference top-1; explicit options override it")
+    parser.add_argument("--patch-size", type=int, default=None)
+    parser.add_argument("--dim", type=int, default=None)
+    parser.add_argument("--depth", type=int, default=None)
+    parser.add_argument("--heads", type=int, default=None)
+    parser.add_argument("--mlp-dim", type=int, default=None)
+    parser.add_argument("--dropout", type=float, default=None)
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--patience", type=int, default=12)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--learning-rate", type=float, default=None)
     parser.add_argument("--lr-schedule", choices=LR_SCHEDULES, default=DEFAULT_LR_SCHEDULE)
     parser.add_argument("--min-learning-rate", type=float, default=DEFAULT_MIN_LEARNING_RATE)
-    parser.add_argument("--warmup-epochs", type=int, default=DEFAULT_WARMUP_EPOCHS)
-    parser.add_argument("--weight-decay", type=float, default=0.05)
+    parser.add_argument("--warmup-epochs", type=int, default=None)
+    parser.add_argument("--weight-decay", type=float, default=None)
     parser.add_argument("--seed", type=int, default=2023)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--max-samples", type=int, default=None,
                         help="limit each split for a short smoke run")
     args = parser.parse_args()
+    resolve_hyperparameters(args)
     if min(args.epochs, args.patience, args.batch_size, args.target_length) < 1:
         parser.error("epochs, patience, batch size and target length must be positive")
     if args.max_samples is not None and args.max_samples < 1:
@@ -355,6 +359,8 @@ def run_one(
         "vit": vit_config, "data_dir": data_dir, "num_classes": num_classes,
         "label_scheme": label_scheme, "adc_dc_replacement": ADC_DC_MAGNITUDE,
         "max_samples": args.max_samples,
+        "hyperparameter_preset": args.hyperparameter_preset,
+        "hyperparameter_reference": hyperparameter_reference(args.hyperparameter_preset),
         "training": {"epochs": args.epochs, "patience": args.patience,
                      "batch_size": args.batch_size, "learning_rate": args.learning_rate,
                      "lr_schedule": args.lr_schedule,
@@ -554,7 +560,7 @@ def main() -> None:
                 form, region_name, args.channel_mode, tag, decision_tag,
                 args.model_variant,
             )
-            name = f"{name}__{lr_tag}"
+            name = f"{name}__{lr_tag}__hp_{args.hyperparameter_preset}"
             results[name] = run_one(
                 data_dir, output_dir / name, form, region_name, regions, args,
                 num_classes, label_scheme, decision_tag,
@@ -563,7 +569,7 @@ def main() -> None:
         "summary_vit_cross_vote.json" if args.model_variant == "cross_vote"
         else "summary_vit.json"
     )
-    summary_name = summary_name.removesuffix(".json") + f"__{lr_tag}.json"
+    summary_name = summary_name.removesuffix(".json") + f"__{lr_tag}__hp_{args.hyperparameter_preset}.json"
     write_json(output_dir / summary_name, {
         "data_dir": data_dir, "forms": forms,
         "regions": [name for name, _ in regions_to_run],

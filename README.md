@@ -29,7 +29,13 @@ python raw_data/relabel_by_thickness.py --thresholds 0.8,1.2 --output-dir raw_da
 
 第一条只预览分布。一个阈值给二分类，两个阈值给三分类；阈值属于其右侧类别，例如 0.8 mm 属于第 1 类。默认按新标签分层重新划分 train/val/test；`--keep-split` 只重贴标签并保留原归属，其数据集 tag 追加 `_keepsplit`。输出包含 `label_scheme.json`、分组统计和样本清单。请为不同阈值或划分使用独立数据目录；源 `raw_data` 不会被覆盖。
 
-当前保留的 1.3 mm 二分类数据集为 `raw_data_relabeled/cls2_thr1.3`（按新标签分层重划分）。GUI 启动时默认选择它；原始 `raw_data` 的 1.0 mm 标签及 CLI 默认数据目录仍保持不变。先前生成的 `cls2_thr1.3_keepsplit` 与它标签和样本池相同，但有 158/268 条样本的 split 归属不同；该副本已删除，`--keep-split` 接口仍可在需要时重新生成该划分。
+GUI 默认数据集为 **统一 · 二分类 · 阈值 1.3 mm · cls2_thr1.3**，目录 `raw_data_relabeled/统一_cls2_thr1.3`，独立 tag 为 `cls2_thr1.3_unified`。逐样本、逐行沿用 `ViT_reference/dataset` 的 train/validation/test（validation 映射为 val），共 161/40/67 点；薄骨/厚骨分别为 100/61、25/15、41/26，仍为 0=薄骨（<1.3 mm）、1=厚骨（≥1.3 mm）。冻结清单已与 top15 五种方法的开发/测试名单核对。
+
+```powershell
+python create_unified_dataset.py
+```
+
+构建器使用现有 `raw_data` 与仓库内 `dataset_protocols/cls2_thr1.3_unified.json`，按 sample_id 对齐，不重新随机划分，已有输出拒绝覆盖。旧 `raw_data_relabeled/cls2_thr1.3`（按新标签分层重划分）、三分类及 `raw_data` 全部保留；CLI 默认目录仍为 `raw_data`。信号逐值复制，ADC 归零在读取时进行。数组继续留在本地，Git 保存可重建脚本和固定清单。详细参数快照及数据协议见 [ViT_HYPERPARAMETERS.md](docs/ViT_HYPERPARAMETERS.md)。
 
 ## 信号与模型
 
@@ -43,7 +49,9 @@ python raw_data/relabel_by_thickness.py --thresholds 0.8,1.2 --output-dir raw_da
 
 `--channel-mode 1`、`2` 取单个物理通道；`3`、`4` 都保留两个通道，区别仅在选帧规则。通道 1 和通道 2 各自切片，**不相加或平均**。
 
-ViT 输入为 `[样本, 分区×物理通道, 流, 512]`。`mean_std` 有 2 条流，`raw50` 有 50 条流，`max1` / `top3_mean` 各有 1 条流；这些流属于同一个样本。每路独立进行 1D patch embedding、位置编码、Transformer 和池化，拼接后由一个 k 类分类头输出。默认模型参数参考 `ViT_reference`，当前训练使用现有 train/val/test，按 val loss 早停，冻结权重后才处理 test 信号；不加载参考权重，也不翻转标签。
+ViT 输入为 `[样本, 分区×物理通道, 流, 512]`。`mean_std` 有 2 条流，`raw50` 有 50 条流，`max1` / `top3_mean` 各有 1 条流；这些流属于同一个样本。每路独立进行 1D patch embedding、位置编码、Transformer 和池化，拼接后由一个 k 类分类头输出。训练使用所选数据集的 train/val/test，按 val loss 早停，冻结权重后才处理 test 信号。
+
+ViT 默认 `--hyperparameter-preset auto`，从参考 `top15_hyperparameters_test_accuracy_20261024` 的对应方法第一组取值：普通拼接 `baseline/random_0047`（patch=16、dim=64、depth=4、heads=8、mlp=256、batch=4）；三分区拼接 `six_channel/random_0048`；cross-vote 用 `six_channel_beam_vote/random_0086`。显式 CLI 参数优先，`--hyperparameter-preset legacy` 恢复旧参数。配置保存来源及实际取值，实验名增加 `__hp_<preset>`。参考排名来自已查看的测试集，只用于参数迁移；本项目前处理与验证规则继续沿用。完整新旧对照见 [ViT_HYPERPARAMETERS.md](docs/ViT_HYPERPARAMETERS.md)。
 
 `ViT+cross-vote` 复用同一输入和独立编码器，但每路有自己的 k 类分类头；对每路 softmax 概率逐类求和，以最大和对应的标签作为结果。训练用各路**平均概率**对正确类的负对数作为损失，平均与求和的 argmax 相同；仍按 val loss 早停。`probabilities_*.npy` 保存归一化的平均概率，`branch_probabilities_*.npy` 保存逐路概率，`vote_scores_*.npy` 保存逐类求和得分。二分类也直接 argmax，不使用 reward 或验证集调阈值。
 
@@ -56,9 +64,9 @@ EMD+MLP 路径仍对每条信号最多提取 5 个 IMF 和余项，对每个分�
 从本目录执行：
 
 ```powershell
-python run_vit_experiments.py --data-dir raw_data_relabeled/cls2_thr1.3 --forms max1 --region-set dyn_envelope --channel-mode 3 --positive-reward 2
-python run_vit_experiments.py --data-dir raw_data_relabeled/cls2_thr1.3 --forms max1 --region-set dyn_envelope --channel-mode 3 --no-reward
-python run_vit_experiments.py --data-dir raw_data_relabeled/cls2_thr1.3 --model-variant cross_vote --forms max1 --region-set dyn_envelope_full --channel-mode 4
+python run_vit_experiments.py --data-dir raw_data_relabeled/统一_cls2_thr1.3 --forms max1 --region-set dyn_envelope --channel-mode 3 --positive-reward 2
+python run_vit_experiments.py --data-dir raw_data_relabeled/统一_cls2_thr1.3 --forms max1 --region-set dyn_envelope --channel-mode 3 --no-reward
+python run_vit_experiments.py --data-dir raw_data_relabeled/统一_cls2_thr1.3 --model-variant cross_vote --forms max1 --region-set dyn_envelope_full --channel-mode 4
 python run_emd_experiments.py --forms max1 --region-set full --channel-mode 3
 python run_emd_experiments.py --data-dir raw_data_relabeled/cls3_thr0.8_1.2 --forms top3_mean --region-set dyn_envelope --channel-mode 3
 python gui_app.py
@@ -66,7 +74,7 @@ python gui_app.py
 
 ViT 默认运行 `max1 + dyn_envelope + 通道 3`；显式指定 `--forms all --region-set all` 可运行原有全部 16 个方式/区域组合。ViT 二分类实验写入 `experiments/form_<方式>__regions_<区域>__channels_<通道>__vit__headsim_cubic[__数据集tag]__norm_w1_2p0/`；关闭 reward 时后缀为 `__fixed0p5`。cross-vote 目录独立使用 `__vit_cross_vote__headsim_cubic`，固定使用 `dyn_envelope_full`，即使 CLI 未显式传 `--region-set` 也会选择它；其他区域和自定义区域不适用于此模型。两种 ViT 均保存配置、分支次序、逐样本分段审计、权重、训练历史、概率和指标。EMD+MLP 保持 `__core__headsim_cubic` 目录及产物。已有目录配置不一致时拒绝混写，换设置请指定新的 `--output-dir`；小样本 `--max-samples` 仅用于链路验证，指标不可引用为模型性能。
 
-三种 GUI 模型（ViT、ViT+cross-vote、EMD+MLP）现在共用逐轮学习率规则：默认线性预热 5 轮，再按余弦曲线降到 `5e-6`；ViT 峰值保持 `3e-4`，EMD+MLP 峰值保持 `1e-3`。两个训练入口都支持 `--learning-rate`、`--min-learning-rate`、`--warmup-epochs` 和 `--lr-schedule {warmup_cosine,constant}`。每轮实际值写入 `history.json`，配置写入 `config.json`，新实验目录带学习率方案后缀（例如 ViT 的 `__lr_warmcos5_peak3em4_min5em6`），保留历史固定学习率结果。按验证集早停时，实际训练可能尚未降到下限；这次变更不调整数据、损失、模型结构和判定规则。
+三种 GUI 模型（ViT、ViT+cross-vote、EMD+MLP）共用逐轮学习率规则：默认预热 5 轮，再按余弦曲线降到 `5e-6`；ViT 峰值由 preset 决定（普通拼接和 cross-vote 为 `3e-4`，三分区拼接为 `1e-3`），EMD+MLP 峰值为 `1e-3`。两个入口支持 `--learning-rate`、`--min-learning-rate`、`--warmup-epochs`、`--lr-schedule {warmup_cosine,constant}`。实际学习率写入 `history.json`，配置写入 `config.json`，实验目录带学习率及 ViT 参数 preset 后缀，保留历史结果。按验证集早停时，实际训练可能尚未降到下限。
 
 主要入口：
 
@@ -77,6 +85,8 @@ ViT 默认运行 `max1 + dyn_envelope + 通道 3`；显式指定 `--forms all --
 | `run_vit_experiments.py` | ViT 训练与保存结果（需要 PyTorch） |
 | `experiment_setup.py` | 两条训练路径共用的帧、区域与输出保护配置 |
 | `learning_rate_schedule.py` | 三种模型共用的预热、余弦衰减和实验标签 |
+| `vit_hyperparameters.py` | ViT 参考 preset、旧参数与自动选择 |
+| `create_unified_dataset.py`、`dataset_protocols/` | 按冻结参考 ID 顺序重建统一数据集 |
 | `run_emd_experiments.py` | 训练与保存结果 |
 | `raw_data/relabel_by_thickness.py` | 可变阈值重标与数据集生成 |
 | `dyn_cli.py` | 动态分区参数 |

@@ -44,7 +44,7 @@ EXPERIMENTS_DIR = APP_DIR / "experiments"
 VISUALIZATIONS_DIR = APP_DIR / "visualizations"
 RAW_DATA_DIR = APP_DIR / "raw_data"
 RELABELED_DATA_DIR = APP_DIR / "raw_data_relabeled"
-GUI_DEFAULT_DATASET_TAG = "cls2_thr1.3"
+GUI_DEFAULT_DATASET_TAG = "cls2_thr1.3_unified"
 MODEL_TOKENS = {"emd": "core", "vit": "vit", "vit_cross_vote": "vit_cross_vote"}
 MODEL_DISPLAY_NAMES = {"emd": "EMD+MLP", "vit": "ViT", "vit_cross_vote": "ViT+cross-vote"}
 # ``raw_data`` predates ``label_scheme.json``; its stored rule is
@@ -98,6 +98,9 @@ class DatasetProfile:
 
         kind = CLASS_NUMBER_WORDS.get(self.num_classes, f"{self.num_classes} 分类")
         thresholds = " / ".join(str(float(value)) for value in self.thresholds)
+        scheme = read_label_scheme(self.data_dir)
+        if scheme and scheme.get("display_name"):
+            return str(scheme["display_name"])
         if self.is_default:
             return f"原始 · {kind} · depth >= {thresholds} mm"
         if self.tag == GUI_DEFAULT_DATASET_TAG:

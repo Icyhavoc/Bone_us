@@ -9,6 +9,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from vit_hyperparameters import DEFAULT_MODEL_PARAMETERS
+
 
 @dataclass(frozen=True)
 class ViTConfig:
@@ -16,12 +18,12 @@ class ViTConfig:
     streams: int
     length: int
     num_classes: int
-    patch_size: int = 8
-    dim: int = 256
-    depth: int = 3
-    heads: int = 2
-    mlp_dim: int = 512
-    dropout: float = 0.1
+    patch_size: int = DEFAULT_MODEL_PARAMETERS["patch_size"]
+    dim: int = DEFAULT_MODEL_PARAMETERS["dim"]
+    depth: int = DEFAULT_MODEL_PARAMETERS["depth"]
+    heads: int = DEFAULT_MODEL_PARAMETERS["heads"]
+    mlp_dim: int = DEFAULT_MODEL_PARAMETERS["mlp_dim"]
+    dropout: float = DEFAULT_MODEL_PARAMETERS["dropout"]
 
     def validate(self) -> None:
         if min(self.branches, self.streams, self.length, self.num_classes,
