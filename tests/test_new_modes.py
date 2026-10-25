@@ -12,7 +12,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from emd_pipeline import classification_metrics, prepare_frame_input
+from emd_pipeline import classification_metrics, prepare_frame_input, process_frames
 from experiment_setup import CROSS_VOTE_REGION_NAME, region_experiments
 from vit_model import RegionChannelCrossVoteViT, ViTConfig
 
@@ -54,15 +54,15 @@ class Channel4Tests(unittest.TestCase):
 
         only_two = _sample(list(range(8, 18)))
         _, fallback, span = self._prepare(only_two, "top3_mean")
-        _, channel3, _ = self._prepare(only_two, "top3_mean", mode=3)
-        np.testing.assert_array_equal(fallback, channel3)
+        _, legacy = process_frames(only_two, "top3_mean", _span()["starts"], _span()["ends"])
+        np.testing.assert_array_equal(fallback, legacy)
         self.assertFalse(span["channel4_selection"]["used_overlap"])
 
-    def test_max1_no_overlap_uses_channel3(self) -> None:
+    def test_max1_no_overlap_keeps_legacy_similarity_fallback(self) -> None:
         sample = _sample(list(range(10, 20)))
         _, fallback, span = self._prepare(sample, "max1")
-        _, channel3, _ = self._prepare(sample, "max1", mode=3)
-        np.testing.assert_array_equal(fallback, channel3)
+        _, legacy = process_frames(sample, "max1", _span()["starts"], _span()["ends"])
+        np.testing.assert_array_equal(fallback, legacy)
         self.assertEqual(span["channel4_selection"]["fallback"], "channel3_similarity_ranking")
 
     def test_unranked_forms_keep_both_physical_channels(self) -> None:
@@ -72,6 +72,43 @@ class Channel4Tests(unittest.TestCase):
             channel3, _, _ = prepare_frame_input(sample, form, 3)
             self.assertIsNone(chosen)
             np.testing.assert_array_equal(channel4, channel3)
+
+
+class Channel3Tests(unittest.TestCase):
+    def _prepare(self, sample: np.ndarray, form: str):
+        with patch("emd_pipeline.detect_dynamic_span", return_value=_span()):
+            return prepare_frame_input(sample, form, 3)
+
+    def test_independent_max1_with_different_frame_ids(self) -> None:
+        sample = _sample(list(range(5, 15)))
+        # A stronger out-of-window peak must not affect Beam2's main-window rank.
+        sample[40, 1, 0] = 1000
+        processed, chosen, span = self._prepare(sample, "max1")
+        self.assertEqual(chosen.tolist(), [[0], [5]])
+        self.assertEqual(processed.shape, (1, 2, 20))
+        np.testing.assert_array_equal(processed[0, 0], sample[0, 0])
+        np.testing.assert_array_equal(processed[0, 1], sample[5, 1])
+        self.assertEqual(span["channel3_selection"]["selected_frames_by_channel"], [[0], [5]])
+
+    def test_no_overlap_still_selects_each_beams_max1(self) -> None:
+        processed, chosen, _ = self._prepare(_sample(list(range(10, 20))), "max1")
+        self.assertEqual(chosen.tolist(), [[0], [10]])
+        self.assertEqual(processed[0, 0, 0], 20)
+        self.assertEqual(processed[0, 1, 10], 20)
+
+    def test_top3_means_each_channel_independently(self) -> None:
+        sample = _sample(list(range(5, 15)))
+        processed, chosen, _ = self._prepare(sample, "top3_mean")
+        self.assertEqual(chosen.tolist(), [[0, 1, 2], [5, 6, 7]])
+        np.testing.assert_array_equal(processed[0, 0], sample[[0, 1, 2], 0].mean(0))
+        np.testing.assert_array_equal(processed[0, 1], sample[[5, 6, 7], 1].mean(0))
+
+    def test_ties_use_original_frame_order(self) -> None:
+        sample = np.zeros((50, 2, 20), dtype=np.float32)
+        sample[[3, 7], 0, 0] = 1
+        sample[[4, 8], 1, 10] = 1
+        _, chosen, _ = self._prepare(sample, "max1")
+        self.assertEqual(chosen.tolist(), [[3], [4]])
 
 
 class CrossVoteTests(unittest.TestCase):

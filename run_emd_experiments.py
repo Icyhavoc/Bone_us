@@ -21,6 +21,7 @@ from typing import Sequence
 import numpy as np
 
 from emd_pipeline import (
+    CHANNEL3_FRAME_SELECTION,
     DepthMapper,
     EMDConfig,
     MLPConfig,
@@ -124,6 +125,8 @@ def _experiment_name(
     """Keep simplified runs distinct from prior experimental feature layouts."""
 
     name = f"form_{form}__regions_{region_name}__channels_{channel_mode}__core__{PREPROCESSING_TAG}"
+    if channel_mode == 3:
+        name = f"{name}__sel_{CHANNEL3_FRAME_SELECTION}"
     return name if not label_tag else f"{name}__{label_tag}"
 
 
@@ -204,6 +207,8 @@ def run_one(
         "adc_dc_replacement": ADC_DC_MAGNITUDE,
         "max_samples": args.max_samples,
     }
+    if args.channel_mode == 3:
+        experiment_config["frame_selection"] = CHANNEL3_FRAME_SELECTION
     if args.channel_mode == 4:
         experiment_config["frame_selection"] = "independent_top10_overlap_beam1_v1"
     guard_existing_experiment(output_dir, experiment_config)

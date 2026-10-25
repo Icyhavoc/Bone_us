@@ -47,6 +47,7 @@ FORM_ALIASES = {
 FORM_ORDER = ("mean_std", "raw50", "max1", "top3_mean")
 PREPROCESSING_TAG = "headsim_cubic"
 PREPROCESSING_VERSION = "head_similarity_cubic_tail600_v1"
+CHANNEL3_FRAME_SELECTION = "independent_beam_peak_v1"
 
 
 def canonical_form(name: str) -> str:
@@ -946,7 +947,7 @@ def prepare_frame_input(
     point_id: str | None = None,
     dynamic_config: DynamicEnvelopeConfig | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None, dict[str, Any] | None]:
-    """Share one locator result across frame ranking and dynamic branches."""
+    """Share one locator; channel 3 returns ranked IDs as [channel, rank]."""
     form = canonical_form(form)
     span = None
     if form in ("max1", "top3_mean") or dynamic_config is not None:
@@ -955,6 +956,27 @@ def prepare_frame_input(
     physical = channel_physical_indices(channel_mode)
     starts = None if span is None else span["starts"][list(physical)]
     ends = None if span is None else span["ends"][list(physical)]
+    if channel_mode == 3 and form in ("max1", "top3_mean"):
+        assert starts is not None and ends is not None and span is not None
+        # Each beam uses its own window and its own frame IDs.  Calling the
+        # single-channel ranker preserves peak ordering and stable tie breaks.
+        per_channel = [
+            process_frames(selected[:, channel:channel + 1], form,
+                           [starts[channel]], [ends[channel]])
+            for channel in range(2)
+        ]
+        processed = np.concatenate([block for block, _ in per_channel], axis=1)
+        chosen = np.stack([indices for _, indices in per_channel])
+        span["channel3_selection"] = {
+            "algorithm": CHANNEL3_FRAME_SELECTION,
+            "selected_frames_by_channel": chosen.astype(int).tolist(),
+            "selected_peak_abs_by_channel": [
+                np.max(np.abs(selected[chosen[channel], channel,
+                                      int(starts[channel]):int(ends[channel])]), axis=1).astype(float).tolist()
+                for channel in range(2)
+            ],
+        }
+        return processed, chosen, span
     if channel_mode == 4 and form in ("max1", "top3_mean"):
         assert starts is not None and ends is not None and span is not None
         overlap, selection = channel4_overlap_order(selected, starts, ends)
@@ -1361,6 +1383,7 @@ def sample_feature_vector(
         "form": canonical_form(form),
         "channel_mode": channel_mode,
         "selected_frames": None if selected_frames is None else selected_frames.tolist(),
+        "channel3_selection": None if span is None else span.get("channel3_selection"),
         "channel4_selection": None if span is None else span.get("channel4_selection"),
         "selection_main_start_index_by_channel": None if span is None else span["starts"].astype(int).tolist(),
         "selection_main_end_exclusive_by_channel": None if span is None else span["ends"].astype(int).tolist(),

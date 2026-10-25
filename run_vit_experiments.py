@@ -19,6 +19,7 @@ import numpy as np
 from dyn_cli import add_dyn_arguments, dyn_config_from_args
 from emd_pipeline import (
     ADC_DC_MAGNITUDE,
+    CHANNEL3_FRAME_SELECTION,
     PREPROCESSING_TAG,
     PREPROCESSING_VERSION,
     DepthMapper,
@@ -320,6 +321,8 @@ def _experiment_name(
 ) -> str:
     model_token = "vit_cross_vote" if model_variant == "cross_vote" else "vit"
     name = f"form_{form}__regions_{region}__channels_{channel}__{model_token}__{PREPROCESSING_TAG}"
+    if channel == 3:
+        name = f"{name}__sel_{CHANNEL3_FRAME_SELECTION}"
     if tag is not None:
         name = f"{name}__{tag}"
     return name if decision_tag is None else f"{name}__{decision_tag}"
@@ -370,6 +373,8 @@ def run_one(
     }
     if args.model_variant == "cross_vote":
         config["model_variant"] = "cross_vote"
+    if args.channel_mode == 3:
+        config["frame_selection"] = CHANNEL3_FRAME_SELECTION
     if args.channel_mode == 4:
         config["frame_selection"] = "independent_top10_overlap_beam1_v1"
     if num_classes == 2:

@@ -87,6 +87,7 @@ def prepare_vit_sample(
         "form": canonical_form(form),
         "channel_mode": channel_mode,
         "selected_frames": None if selected_frames is None else selected_frames.tolist(),
+        "channel3_selection": None if span is None else span.get("channel3_selection"),
         "channel4_selection": None if span is None else span.get("channel4_selection"),
         "selection_main_start_index_by_channel": None if span is None else span["starts"].astype(int).tolist(),
         "selection_main_end_exclusive_by_channel": None if span is None else span["ends"].astype(int).tolist(),
