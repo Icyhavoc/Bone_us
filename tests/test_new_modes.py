@@ -13,7 +13,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from emd_pipeline import classification_metrics, prepare_frame_input, process_frames
-from experiment_setup import CROSS_VOTE_REGION_NAME, region_experiments
+from experiment_setup import CROSS_VOTE_REGION_NAME, DYNAMIC_REGION_NAME, region_experiments
 from vit_model import RegionChannelCrossVoteViT, ViTConfig
 
 
@@ -112,25 +112,32 @@ class Channel3Tests(unittest.TestCase):
 
 
 class CrossVoteTests(unittest.TestCase):
+    def test_two_dynamic_regions_without_full_signal(self) -> None:
+        name, regions = region_experiments(DYNAMIC_REGION_NAME)[0]
+        self.assertEqual(name, "dyn_envelope")
+        self.assertEqual(regions, [])
+
     def test_three_regions_per_physical_channel(self) -> None:
         name, regions = region_experiments(CROSS_VOTE_REGION_NAME)[0]
         self.assertEqual(name, CROSS_VOTE_REGION_NAME)
         self.assertEqual([(region.start_mm, region.end_mm) for region in regions], [(0.0, 5.0)])
 
     def test_log_probability_matches_branch_vote(self) -> None:
-        torch.manual_seed(7)
-        config = ViTConfig(
-            branches=6, streams=1, length=16, num_classes=2,
-            patch_size=4, dim=8, depth=1, heads=2, mlp_dim=16, dropout=0.0,
-        )
-        model = RegionChannelCrossVoteViT(config).eval()
-        signals = torch.randn(2, 6, 1, 16)
-        with torch.no_grad():
-            per_branch = model.branch_probabilities(signals)
-            combined = model(signals).exp()
-        torch.testing.assert_close(combined, per_branch.mean(dim=1))
-        torch.testing.assert_close(per_branch.sum(dim=1), combined * 6)
-        self.assertEqual(tuple(per_branch.shape), (2, 6, 2))
+        for branches in (4, 6):
+            with self.subTest(branches=branches):
+                torch.manual_seed(7)
+                config = ViTConfig(
+                    branches=branches, streams=1, length=16, num_classes=2,
+                    patch_size=4, dim=8, depth=1, heads=2, mlp_dim=16, dropout=0.0,
+                )
+                model = RegionChannelCrossVoteViT(config).eval()
+                signals = torch.randn(2, branches, 1, 16)
+                with torch.no_grad():
+                    per_branch = model.branch_probabilities(signals)
+                    combined = model(signals).exp()
+                torch.testing.assert_close(combined, per_branch.mean(dim=1))
+                torch.testing.assert_close(per_branch.sum(dim=1), combined * branches)
+                self.assertEqual(tuple(per_branch.shape), (2, branches, 2))
 
     def test_binary_vote_tie_uses_argmax(self) -> None:
         metrics = classification_metrics(

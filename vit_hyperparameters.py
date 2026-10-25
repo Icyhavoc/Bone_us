@@ -26,6 +26,13 @@ PRESETS: dict[str, dict[str, Any]] = {
         "reference": {"file": "03_six_channel_top15.json", "method": "six_channel",
                       "id": "random_0048", "position": 1},
     },
+    "beam_vote_top1": {
+        "parameters": {**LEGACY_PARAMETERS, "depth": 4, "heads": 4,
+                       "learning_rate": 1e-3, "dropout": 0.25,
+                       "weight_decay": 0.01, "batch_size": 4},
+        "reference": {"file": "04_beam_vote_top15.json", "method": "beam_vote",
+                      "id": "random_0096", "position": 1},
+    },
     "six_channel_beam_vote_top1": {
         "parameters": {**LEGACY_PARAMETERS, "depth": 2, "heads": 4,
                        "mlp_dim": 1024, "dropout": 0.4,
@@ -42,11 +49,11 @@ def resolve_hyperparameters(args: Any) -> None:
     """Fill unspecified CLI options; explicit options always take precedence."""
     preset = args.hyperparameter_preset
     if preset == "auto":
-        preset = (
-            "six_channel_beam_vote_top1" if args.model_variant == "cross_vote" else
-            "six_channel_top1" if args.region_set == "dyn_envelope_full" else
-            "baseline_top1"
-        )
+        if args.model_variant == "cross_vote":
+            preset = ("six_channel_beam_vote_top1" if args.region_set == "dyn_envelope_full"
+                      else "beam_vote_top1")
+        else:
+            preset = "six_channel_top1" if args.region_set == "dyn_envelope_full" else "baseline_top1"
     args.hyperparameter_preset = preset
     for key, value in PRESETS[preset]["parameters"].items():
         if getattr(args, key) is None:

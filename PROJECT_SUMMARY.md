@@ -21,8 +21,8 @@
 3. 每个分区按通道独立切片、用 SciPy 三次样条重采样到默认 512 点、加 Tukey 窗。通道模式 3 不做通道相加。
 4. ViT 输入保留 `[分区×通道, 流, 长度]`：每个分区和物理通道用独立的 patch/Transformer 编码器，拼接后由一个 k 类头分类。训练按 val loss 早停；二分类仅用 val 按 `TN/(TN+FP) + w×TP/(TP+FN)` 选择正类概率阈值（默认 w=2），也可关闭 reward 固定使用 0.5；多分类仍为 argmax。普通 accuracy 与加权双类召回率、正类召回率和阈值一起保存。`input_audit_*.json` 保存选中帧、动态边界及尾窗补零。
 5. EMD+MLP 对每通道每分区提取 8 个统计量，训练集拟合标准化器，再由单个 `64 → 32 → k` MLP 分类；原入口保持可运行。
-6. `dyn_envelope_full` 在动态主体和尾窗之后追加 [0,5] mm 全段，双通道共六路。ViT+cross-vote 的每路编码向量经独立分类头得到概率，逐类求和后 argmax；训练对平均概率使用负对数损失，按 val loss 早停。此模型二分类也不用 reward 或阈值搜索，结果另存 `__vit_cross_vote__` 目录，并保存每路概率、平均概率及求和得分。GUI 左侧混淆矩阵按当前模型筛选，右侧只列仍在当前 `experiments/` 中的实验，并允许跨 ViT、ViT+cross-vote、EMD+MLP 选图比较；旧 PNG 不再产生孤立选项。
-7. 三条训练路径共用逐轮学习率策略：默认预热 5 轮后余弦衰减，下限 `5e-6`。ViT 的 auto preset 按对应结构使用 top15 第一组：普通拼接 `baseline/random_0047`、三分区拼接 `six_channel/random_0048`、cross-vote `six_channel_beam_vote/random_0086`；峰值分别 `3e-4/1e-3/3e-4`，MLP 仍为 `1e-3`。参数集中在 `vit_hyperparameters.py`，CLI 显式值优先，legacy preset 可恢复原值；每次配置保存来源和实际取值，实验及 summary 增加 `__hp_<preset>`。原参数与完整对照见 `docs/ViT_HYPERPARAMETERS.md`。参考排名已查看测试集，只用于探索性参数迁移；本项目前处理、损失、验证及判定规则继续沿用。
+6. ViT+cross-vote 支持 dyn_envelope（主体/尾窗×双 Beam，四分支）与 dyn_envelope_full（追加全段，六分支），不再将显式 dyn_envelope 改为 full。每分支编码后独立分类，对平均概率的负对数训练，逐类求和 argmax 推理；按 val loss 早停、不用 reward。保存逐路概率、平均概率、求和得分，目录以实际区域隔离。CLI 未指定区域时继续默认 full，GUI 允许选择这两种组合。
+7. 三条训练路径共用预热 5 轮、余弦衰减、下限 5e-6。ViT auto preset：普通拼接 baseline/random_0047、三分区拼接 six_channel/random_0048；cross-vote 两分区用 beam_vote/random_0096、三分区用 six_channel_beam_vote/random_0086。参数集中在 vit_hyperparameters.py，显式 CLI 参数优先，legacy 可恢复旧值；配置及目录记录参考和实际取值。结构比较时显式锁定同一组参数。参考软投票为同 Beam 各区域融合后两头分类，本项目仍为区域×Beam 各自分类；此次只扩展可选区域。参数记录见 docs/ViT_HYPERPARAMETERS.md。
 
 代码入口为 `emd_pipeline.py`、`vit_pipeline.py`、`vit_model.py`、`run_vit_experiments.py`、`run_emd_experiments.py` 和 `gui_app.py`。ViT 二分类新规则产物带 `__vit__headsim_cubic...__norm_w1_2p0`，关闭 reward 的固定阈值产物带 `__fixed0p5`；旧 ViT 产物保留原名，先前按计数加权的产物仍带 `__w1_...`。cross-vote 产物带 `__vit_cross_vote__headsim_cubic`，EMD+MLP 产物带 `__core__headsim_cubic`。GUI 按模型和数据集筛选，标准 ViT 可启停二分类 reward 并调整权重。预处理、训练曲线和混淆矩阵用于三条路径，EMD 分量图只用于 EMD+MLP。
 

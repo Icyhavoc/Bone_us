@@ -29,7 +29,7 @@ from typing import Any, Iterable, Sequence
 
 from PIL import Image, ImageTk
 
-from experiment_setup import confusion_image_name
+from experiment_setup import DYNAMIC_REGION_NAMES, confusion_image_name
 from emd_pipeline import (
     PREPROCESSING_TAG,
     class_display_names,
@@ -1236,8 +1236,8 @@ class EMDViewerApp(tk.Tk):
             state="normal" if reward_available and self.reward_enabled_var.get() else "disabled"
         )
         self.region_combo.configure(
-            state="disabled" if self.training_active or self._model_family() == "vit_cross_vote"
-            else "readonly"
+            values=list(DYNAMIC_REGION_NAMES) if self._model_family() == "vit_cross_vote" else list(REGION_LABELS),
+            state="disabled" if self.training_active else "readonly"
         )
         if self.training_active:
             self.train_button.configure(state="disabled")
@@ -1269,8 +1269,8 @@ class EMDViewerApp(tk.Tk):
         }[self.model_var.get()]
 
     def _on_model_change(self) -> None:
-        if self._model_family() == "vit_cross_vote":
-            self.region_var.set("dyn_envelope_full")
+        if self._model_family() == "vit_cross_vote" and self.region_var.get() not in DYNAMIC_REGION_NAMES:
+            self.region_var.set("dyn_envelope")
         self.refresh()
 
     def _build_training_commands(self, channel: str | None = None) -> list[list[str]]:

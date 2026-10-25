@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -102,6 +104,23 @@ class HyperparameterTests(unittest.TestCase):
         config = ViTConfig(branches=4, streams=1, length=512, num_classes=2)
         self.assertEqual((config.patch_size, config.dim, config.heads),
                          (standard.patch_size, standard.dim, standard.heads))
+
+    def test_cross_vote_respects_two_region_selection(self) -> None:
+        two = self.parse("--model-variant", "cross_vote", "--region-set", "dyn_envelope")
+        self.assertEqual(two.region_set, "dyn_envelope")
+        self.assertTrue(two.no_reward)
+        self.assertEqual((two.hyperparameter_preset, two.depth, two.dropout, two.learning_rate),
+                         ("beam_vote_top1", 4, 0.25, 1e-3))
+        three = self.parse("--model-variant", "cross_vote", "--region-set", "dyn_envelope_full")
+        self.assertEqual(three.region_set, "dyn_envelope_full")
+        self.assertEqual(three.hyperparameter_preset, "six_channel_beam_vote_top1")
+
+    def test_cross_vote_rejects_unsupported_and_custom_regions(self) -> None:
+        for options in [("--region-set", "full"), ("--region-set", "all"),
+                        ("--regions-json", "[[0,5]]")]:
+            with self.subTest(options=options), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    self.parse("--model-variant", "cross_vote", *options)
 
     def test_legacy_and_explicit_overrides_including_zero(self) -> None:
         legacy = self.parse("--hyperparameter-preset", "legacy")

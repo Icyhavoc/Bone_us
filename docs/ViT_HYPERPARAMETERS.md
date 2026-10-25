@@ -53,7 +53,7 @@
 | warmup_epochs | 5 | 5 | 5 |
 | label_smoothing | 0 | 0 | 0 |
 
-`--hyperparameter-preset auto` 为 CLI/GUI 默认：cross-vote 选 `six_channel_beam_vote_top1`；拼接且 `--region-set dyn_envelope_full` 选 `six_channel_top1`；其他拼接选 `baseline_top1`。`--region-set all` 遍历原四个区域，不含 dyn_envelope_full，统一用 baseline_top1。单通道、自定义区域或其他帧方式沿用所选 preset 参数，不表示严格复现参考模型。
+`--hyperparameter-preset auto` 为 CLI/GUI 默认：拼接且 `--region-set dyn_envelope_full` 选 `six_channel_top1`，其他拼接选 `baseline_top1`；cross-vote 在 `dyn_envelope_full` 选 `six_channel_beam_vote_top1`，在新增支持的 `dyn_envelope` 选 `beam_vote_top1`（来自 04_beam_vote_top15.json 的 random_0096：patch=8、dim=256、depth=4、heads=4、mlp_dim=512、lr=0.001、dropout=0.25、weight_decay=0.01、batch=4、warmup=5）。cross-vote 未传区域时 CLI 仍默认 full，GUI 可选择两种动态组合。结构对比需要显式传完整参数或 preset 以锁定超参。`--region-set all` 对拼接遍历原四个区域，不含 dyn_envelope_full，统一用 baseline_top1。
 
 参数集中在 `vit_hyperparameters.py`；直接构造 `ViTConfig` 默认与 baseline_top1 一致。显式 CLI 参数优先，包括 0 值；`--hyperparameter-preset legacy` 恢复修改前参数。`config.json` 保存 preset、参考 ID 和实际模型/训练参数，实验目录与 summary 增加 `__hp_<preset>` 以区分历史结果。
 

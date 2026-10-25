@@ -67,7 +67,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--data-dir", type=Path, default=Path("raw_data"))
     parser.add_argument("--output-dir", type=Path, default=Path("experiments"))
     parser.add_argument("--forms", default="max1", help="all or comma-separated frame forms")
-    parser.add_argument("--region-set", choices=REGION_CHOICES, default=DYNAMIC_REGION_NAME)
+    parser.add_argument("--region-set", choices=REGION_CHOICES, default=None)
     parser.add_argument("--model-variant", choices=["concat", "cross_vote"], default="concat")
     parser.add_argument("--regions-json", default=None)
     parser.add_argument("--channel-mode", type=int, choices=[1, 2, 3, 4], default=3)
@@ -103,6 +103,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-samples", type=int, default=None,
                         help="limit each split for a short smoke run")
     args = parser.parse_args()
+    if args.region_set is None:
+        # Preserve the previous implicit three-region cross-vote default,
+        # while respecting an explicit two-region request.
+        args.region_set = (CROSS_VOTE_REGION_NAME if args.model_variant == "cross_vote"
+                           else DYNAMIC_REGION_NAME)
+    if args.model_variant == "cross_vote":
+        if args.regions_json is not None or args.region_set not in DYNAMIC_REGION_NAMES:
+            parser.error("cross_vote requires dyn_envelope or dyn_envelope_full without custom regions")
+        args.no_reward = True
     resolve_hyperparameters(args)
     if min(args.epochs, args.patience, args.batch_size, args.target_length) < 1:
         parser.error("epochs, patience, batch size and target length must be positive")
@@ -539,13 +548,6 @@ def main() -> None:
     num_classes = max(inferred, recorded) if args.num_classes is None else args.num_classes
     if num_classes < max(inferred, recorded):
         raise ValueError("--num-classes is smaller than the dataset label scheme")
-    if args.model_variant == "cross_vote":
-        if args.regions_json is not None or args.region_set not in (
-            DYNAMIC_REGION_NAME, CROSS_VOTE_REGION_NAME,
-        ):
-            raise ValueError("cross_vote requires the dynamic head, tail and full region set")
-        args.region_set = CROSS_VOTE_REGION_NAME
-        args.no_reward = True
     decision_tag = (
         ("fixed0p5" if args.no_reward else
          "norm_w1_" + str(args.positive_reward).replace(".", "p").replace("+", ""))

@@ -51,7 +51,7 @@ python create_unified_dataset.py
 
 ViT 输入为 `[样本, 分区×物理通道, 流, 512]`。`mean_std` 有 2 条流，`raw50` 有 50 条流，`max1` / `top3_mean` 各有 1 条流；这些流属于同一个样本。每路独立进行 1D patch embedding、位置编码、Transformer 和池化，拼接后由一个 k 类分类头输出。训练使用所选数据集的 train/val/test，按 val loss 早停，冻结权重后才处理 test 信号。
 
-ViT 默认 `--hyperparameter-preset auto`，从参考 `top15_hyperparameters_test_accuracy_20261024` 的对应方法第一组取值：普通拼接 `baseline/random_0047`（patch=16、dim=64、depth=4、heads=8、mlp=256、batch=4）；三分区拼接 `six_channel/random_0048`；cross-vote 用 `six_channel_beam_vote/random_0086`。显式 CLI 参数优先，`--hyperparameter-preset legacy` 恢复旧参数。配置保存来源及实际取值，实验名增加 `__hp_<preset>`。参考排名来自已查看的测试集，只用于参数迁移；本项目前处理与验证规则继续沿用。完整新旧对照见 [ViT_HYPERPARAMETERS.md](docs/ViT_HYPERPARAMETERS.md)。
+ViT 默认 `--hyperparameter-preset auto`，从参考 `top15_hyperparameters_test_accuracy_20261024` 迁移第一组参数：普通拼接用 `baseline/random_0047`；三分区拼接用 `six_channel/random_0048`；cross-vote 在 `dyn_envelope` 下用 `beam_vote/random_0096`，在 `dyn_envelope_full` 下用 `six_channel_beam_vote/random_0086`。显式 CLI 参数优先，`--hyperparameter-preset legacy` 恢复旧参数；比较不同结构使用同一套超参时必须显式传 preset 或完整参数，避免 auto 自动切换。配置保存来源及实际取值，实验名增加 `__hp_<preset>`。参考排名来自已查看的测试集，只用于参数迁移；当前逐分支 cross-vote 与参考按 Beam 融合的软投票结构和损失不同，参数相同不表示复现参考成绩。完整对照见 [ViT_HYPERPARAMETERS.md](docs/ViT_HYPERPARAMETERS.md)。
 
 `ViT+cross-vote` 复用同一输入和独立编码器，但每路有自己的 k 类分类头；对每路 softmax 概率逐类求和，以最大和对应的标签作为结果。训练用各路**平均概率**对正确类的负对数作为损失，平均与求和的 argmax 相同；仍按 val loss 早停。`probabilities_*.npy` 保存归一化的平均概率，`branch_probabilities_*.npy` 保存逐路概率，`vote_scores_*.npy` 保存逐类求和得分。二分类也直接 argmax，不使用 reward 或验证集调阈值。
 
@@ -72,7 +72,7 @@ python run_emd_experiments.py --data-dir raw_data_relabeled/cls3_thr0.8_1.2 --fo
 python gui_app.py
 ```
 
-ViT 默认运行 `max1 + dyn_envelope + 通道 3`；显式指定 `--forms all --region-set all` 可运行原有全部 16 个方式/区域组合。ViT 二分类实验写入 `experiments/form_<方式>__regions_<区域>__channels_<通道>__vit__headsim_cubic[__数据集tag]__norm_w1_2p0/`；关闭 reward 时后缀为 `__fixed0p5`。cross-vote 目录独立使用 `__vit_cross_vote__headsim_cubic`，固定使用 `dyn_envelope_full`，即使 CLI 未显式传 `--region-set` 也会选择它；其他区域和自定义区域不适用于此模型。两种 ViT 均保存配置、分支次序、逐样本分段审计、权重、训练历史、概率和指标。EMD+MLP 保持 `__core__headsim_cubic` 目录及产物。已有目录配置不一致时拒绝混写，换设置请指定新的 `--output-dir`；小样本 `--max-samples` 仅用于链路验证，指标不可引用为模型性能。
+ViT 默认运行 `max1 + dyn_envelope + 通道 3`；`--forms all --region-set all` 可运行原有 16 个方式/区域组合。ViT 二分类开启 reward 的产物带 `__norm_w1_2p0`，关闭时带 `__fixed0p5`。cross-vote 目录用独立的 `__vit_cross_vote__headsim_cubic`，支持 `--region-set dyn_envelope`（主体＋尾窗，双 Beam 共四分支）和 `dyn_envelope_full`（追加全段，共六分支）；未显式传区域时保留原 CLI 默认 dyn_envelope_full。其余区域、自定义区域会明确报错。各分支独立分类，平均概率的负对数用于训练，逐类投票 argmax 用于推理，不启用 reward。两种 ViT 保存配置、分支次序、样本审计、权重、历史、概率及指标；channel3 增加选择版本后缀。EMD+MLP 保持独立 core 产物。已有目录配置不一致时拒绝混写，短样本检查指标仅用于链路验证。
 
 三种 GUI 模型（ViT、ViT+cross-vote、EMD+MLP）共用逐轮学习率规则：默认预热 5 轮，再按余弦曲线降到 `5e-6`；ViT 峰值由 preset 决定（普通拼接和 cross-vote 为 `3e-4`，三分区拼接为 `1e-3`），EMD+MLP 峰值为 `1e-3`。两个入口支持 `--learning-rate`、`--min-learning-rate`、`--warmup-epochs`、`--lr-schedule {warmup_cosine,constant}`。实际学习率写入 `history.json`，配置写入 `config.json`，实验目录带学习率及 ViT 参数 preset 后缀，保留历史结果。按验证集早停时，实际训练可能尚未降到下限。
 
@@ -95,6 +95,6 @@ ViT 默认运行 `max1 + dyn_envelope + 通道 3`；显式指定 `--forms all --
 | `visualize_training_curves.py`、`visualize_confusion_matrix.py` | 当前主流程的训练曲线和混淆矩阵 |
 | `verify_dyn_envelope.py` | 动态分区校验 |
 
-GUI 默认选择 ViT 和 1.3 mm 数据集，可切换到 ViT+cross-vote 或 EMD+MLP。cross-vote 固定选择“动态头部＋尾部＋全段”，reward 控件不可用。Summary 表格点击任一列标题可按该列升序或降序排列，刷新后保留所选排序。ViT 自动生成预处理、训练曲线和混淆矩阵图；EMD+MLP 另生成 EMD 分量图。训练曲线只绘制 Train/Validation loss，不显示 Test loss。Confusion Matrix 左侧遵从顶部模型和组合筛选；右侧下拉框可跨 ViT、ViT+cross-vote、EMD+MLP 比较，显示模型、方式、区域、通道和实验变体，只列当前 `experiments/` 中仍有完整配置与指标且已有对应图像的实验。混淆矩阵图名包含完整实验目录标识，旧图像即使留在 `visualizations/` 也不会被误列为当前实验。通道 `all` 会依次运行模式 1、2、3、4；旧探索脚本不属于现行入口。
+GUI 默认选择 ViT 和统一数据集。cross-vote 的区域下拉框可选择 `dyn_envelope` 或 `dyn_envelope_full`，切换模型时保留有效选项，否则初始选择 dyn_envelope；reward 控件不可用。Summary 表格支持按列排序。ViT 自动生成预处理、训练曲线和混淆矩阵，EMD+MLP 另生成分量图；曲线只显示 Train/Validation loss。混淆矩阵左侧按当前模型筛选，右侧允许跨模型比较，只显示当前 experiments 中仍有完整配置、指标和图像的实验；图名包含完整实验目录标识。通道 all 依次运行 1、2、3、4，历史产物继续保留。
 
 项目目标与实现约束见工作区的 `../.codex/skills/bmu-emd-project/SKILL.md`，当前代码范围及历史产物说明见 `PROJECT_SUMMARY.md`。
