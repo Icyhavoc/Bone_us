@@ -1,0 +1,1149 @@
+{
+  "scope": "current source + unified tasks1-7 versus code_reference frozen four methods",
+  "no_training": true,
+  "dataset": {
+    "train": {
+      "n": 161,
+      "thin_thick_counts": [
+        100,
+        61
+      ],
+      "id_order_equals_old_reference": true,
+      "labels_equal_source_labels": true,
+      "thickness_equal": true,
+      "adc_cleaned_signal_equal_old_reference": true,
+      "stored_raw_unequal_elements": 11727585,
+      "reference_regions_exact_source_slices": true
+    },
+    "val": {
+      "n": 40,
+      "thin_thick_counts": [
+        25,
+        15
+      ],
+      "id_order_equals_old_reference": true,
+      "labels_equal_source_labels": true,
+      "thickness_equal": true,
+      "adc_cleaned_signal_equal_old_reference": true,
+      "stored_raw_unequal_elements": 2857820,
+      "reference_regions_exact_source_slices": true
+    },
+    "test": {
+      "n": 67,
+      "thin_thick_counts": [
+        41,
+        26
+      ],
+      "id_order_equals_old_reference": true,
+      "labels_equal_source_labels": true,
+      "thickness_equal": true,
+      "adc_cleaned_signal_equal_old_reference": true,
+      "stored_raw_unequal_elements": 4773071,
+      "reference_regions_exact_source_slices": true
+    },
+    "old_vs_package_metadata_hashes": {
+      "source_metadata.json": true,
+      "split_indices.npz": true
+    },
+    "other_dataset_split_comparison": {
+      "raw_data": {
+        "train": {
+          "n": 161,
+          "overlap_with_unified_same_split": 98,
+          "class_counts": [
+            73,
+            88
+          ],
+          "label_disagreements_at_same_point": 24
+        },
+        "val": {
+          "n": 40,
+          "overlap_with_unified_same_split": 4,
+          "class_counts": [
+            18,
+            22
+          ],
+          "label_disagreements_at_same_point": 9
+        },
+        "test": {
+          "n": 67,
+          "overlap_with_unified_same_split": 14,
+          "class_counts": [
+            31,
+            36
+          ],
+          "label_disagreements_at_same_point": 11
+        }
+      },
+      "cls2_thr1.3": {
+        "train": {
+          "n": 161,
+          "overlap_with_unified_same_split": 104,
+          "class_counts": [
+            100,
+            61
+          ],
+          "label_disagreements_at_same_point": 0
+        },
+        "val": {
+          "n": 40,
+          "overlap_with_unified_same_split": 5,
+          "class_counts": [
+            25,
+            15
+          ],
+          "label_disagreements_at_same_point": 0
+        },
+        "test": {
+          "n": 67,
+          "overlap_with_unified_same_split": 23,
+          "class_counts": [
+            41,
+            26
+          ],
+          "label_disagreements_at_same_point": 0
+        }
+      }
+    },
+    "shared_bones": {
+      "train_test": 37,
+      "development_test": 45,
+      "test_bones": 49
+    },
+    "reference_folds": [
+      {
+        "fold": 1,
+        "train_n": 160,
+        "val_n": 41,
+        "val_overlap_current_val": 4
+      },
+      {
+        "fold": 2,
+        "train_n": 161,
+        "val_n": 40,
+        "val_overlap_current_val": 7
+      },
+      {
+        "fold": 3,
+        "train_n": 161,
+        "val_n": 40,
+        "val_overlap_current_val": 11
+      },
+      {
+        "fold": 4,
+        "train_n": 161,
+        "val_n": 40,
+        "val_overlap_current_val": 10
+      },
+      {
+        "fold": 5,
+        "train_n": 161,
+        "val_n": 40,
+        "val_overlap_current_val": 8
+      }
+    ]
+  },
+  "preprocessing": {
+    "frames": {
+      "train": {
+        "n": 161,
+        "different_between_current_beams": 144,
+        "both_equal_reference_peak": 17,
+        "beam1_diff_reference_peak": 47,
+        "beam2_diff_reference_peak": 97,
+        "channel4_diff_reference_energy": 134,
+        "channel4_fallback": 37,
+        "different_boundary_channels": 0,
+        "different_tail_padding_channels": 0
+      },
+      "val": {
+        "n": 40,
+        "different_between_current_beams": 35,
+        "both_equal_reference_peak": 5,
+        "beam1_diff_reference_peak": 10,
+        "beam2_diff_reference_peak": 25,
+        "channel4_diff_reference_energy": 35,
+        "channel4_fallback": 6,
+        "different_boundary_channels": 0,
+        "different_tail_padding_channels": 0
+      },
+      "test": {
+        "n": 67,
+        "different_between_current_beams": 54,
+        "both_equal_reference_peak": 13,
+        "beam1_diff_reference_peak": 19,
+        "beam2_diff_reference_peak": 35,
+        "channel4_diff_reference_energy": 56,
+        "channel4_fallback": 11,
+        "different_boundary_channels": 0,
+        "different_tail_padding_channels": 0
+      },
+      "all": {
+        "n": 268,
+        "different_between_current_beams": 233,
+        "both_equal_reference_peak": 35,
+        "beam1_diff_reference_peak": 76,
+        "beam2_diff_reference_peak": 157,
+        "channel4_diff_reference_energy": 225,
+        "channel4_fallback": 54,
+        "different_boundary_channels": 0,
+        "different_tail_padding_channels": 0
+      }
+    },
+    "input_differences": {
+      "current_vs_reference_peak": {
+        "main": {
+          "equal": false,
+          "max_abs": 1.6143624186515808,
+          "rmse": 0.0849092342967176,
+          "relative_l2": 0.6925422929540259,
+          "sample_corr_median": 0.8165577053295916,
+          "sample_corr_p10": 0.4733140491116002
+        },
+        "tail": {
+          "equal": false,
+          "max_abs": 0.17842353135347366,
+          "rmse": 0.005319449676839707,
+          "relative_l2": 0.5857458719445646,
+          "sample_corr_median": 0.8418956128788269,
+          "sample_corr_p10": 0.1730466309357843
+        },
+        "whole": {
+          "equal": false,
+          "max_abs": 1.4829510152339935,
+          "rmse": 0.036231215027924306,
+          "relative_l2": 0.6874140605085474,
+          "sample_corr_median": 0.8185153213633127,
+          "sample_corr_p10": 0.4673717976709952
+        }
+      },
+      "cubic_vs_linear_same_current_frames": {
+        "main": {
+          "equal": false,
+          "max_abs": 0.12198340892791748,
+          "rmse": 0.006437302413021562,
+          "relative_l2": 0.04938624148259556,
+          "sample_corr_median": 0.9996754407894309,
+          "sample_corr_p10": 0.9995663250058785
+        },
+        "tail": {
+          "equal": false,
+          "max_abs": 0.017559558153152466,
+          "rmse": 0.000501620929153719,
+          "relative_l2": 0.05298847742186416,
+          "sample_corr_median": 0.9991260574768474,
+          "sample_corr_p10": 0.9917034543941756
+        },
+        "whole": {
+          "equal": false,
+          "max_abs": 0.10546821355819702,
+          "rmse": 0.0027618123687575963,
+          "relative_l2": 0.04942634759243374,
+          "sample_corr_median": 0.9997485366383569,
+          "sample_corr_p10": 0.9995539944443631
+        }
+      },
+      "current_frames_vs_reference_peak_both_linear": {
+        "main": {
+          "equal": false,
+          "max_abs": 1.565143346786499,
+          "rmse": 0.08258150995332501,
+          "relative_l2": 0.6735567542491937,
+          "sample_corr_median": 0.8172858766564637,
+          "sample_corr_p10": 0.47516475939505926
+        },
+        "tail": {
+          "equal": false,
+          "max_abs": 0.1725490242242813,
+          "rmse": 0.005162932892872072,
+          "relative_l2": 0.5685111830822484,
+          "sample_corr_median": 0.8421048217946829,
+          "sample_corr_p10": 0.17195851851548002
+        },
+        "whole": {
+          "equal": false,
+          "max_abs": 1.465145617723465,
+          "rmse": 0.03519002872581443,
+          "relative_l2": 0.6676596552773787,
+          "sample_corr_median": 0.8186067501702772,
+          "sample_corr_p10": 0.4683442495511215
+        }
+      }
+    },
+    "tukey_max_error": 0.0
+  },
+  "model": {
+    "4": {
+      "concat_weights_strictly_mappable": true,
+      "concat_forward_max_abs": 0.0,
+      "same_seed_initial_state_equal": true,
+      "concat_parameters": 1852322,
+      "reference_concat_parameters": 1852322,
+      "current_vote_parameters": 1853192,
+      "reference_vote_parameters": 1852612,
+      "current_vote_heads": 4,
+      "reference_vote_heads": 2,
+      "consistently_flipped_label_and_logit_ce_delta": 0.0
+    },
+    "6": {
+      "concat_weights_strictly_mappable": true,
+      "concat_forward_max_abs": 0.0,
+      "same_seed_initial_state_equal": true,
+      "concat_parameters": 2778338,
+      "reference_concat_parameters": 2778338,
+      "current_vote_parameters": 2779788,
+      "reference_vote_parameters": 2778628,
+      "current_vote_heads": 6,
+      "reference_vote_heads": 2,
+      "consistently_flipped_label_and_logit_ce_delta": 0.0
+    },
+    "loss_example_correct_class_probs_0.9_0.1": {
+      "nll_of_mean": 0.6931471805599453,
+      "mean_of_ce": 1.203972804325936
+    }
+  },
+  "cache_reconstruction": {
+    "energy_top10": {
+      "development": {
+        "n": 201,
+        "ids_match_set": true,
+        "labels_semantically_equal": true,
+        "selection_indices_exact": true,
+        "frame_ids_exact": true,
+        "regions": {
+          "main": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999998
+          },
+          "tail": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999998
+          }
+        }
+      },
+      "test": {
+        "n": 67,
+        "ids_match_set": true,
+        "labels_semantically_equal": true,
+        "selection_indices_exact": true,
+        "frame_ids_exact": true,
+        "regions": {
+          "main": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999999
+          },
+          "tail": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999998
+          }
+        }
+      }
+    },
+    "six_channel": {
+      "development": {
+        "n": 201,
+        "ids_match_set": true,
+        "labels_semantically_equal": true,
+        "selection_indices_exact": true,
+        "frame_ids_exact": true,
+        "regions": {
+          "main": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999998
+          },
+          "tail": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999998
+          },
+          "whole": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999998
+          }
+        }
+      },
+      "test": {
+        "n": 67,
+        "ids_match_set": true,
+        "labels_semantically_equal": true,
+        "selection_indices_exact": true,
+        "frame_ids_exact": true,
+        "regions": {
+          "main": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999999
+          },
+          "tail": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999999
+          },
+          "whole": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999999
+          }
+        }
+      }
+    },
+    "beam_vote": {
+      "development": {
+        "n": 201,
+        "ids_match_set": true,
+        "labels_semantically_equal": true,
+        "selection_indices_exact": true,
+        "frame_ids_exact": true,
+        "regions": {
+          "main": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999998
+          },
+          "tail": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999998
+          }
+        }
+      },
+      "test": {
+        "n": 67,
+        "ids_match_set": true,
+        "labels_semantically_equal": true,
+        "selection_indices_exact": true,
+        "frame_ids_exact": true,
+        "regions": {
+          "main": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999999
+          },
+          "tail": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999999
+          }
+        }
+      }
+    },
+    "six_channel_beam_vote": {
+      "development": {
+        "n": 201,
+        "ids_match_set": true,
+        "labels_semantically_equal": true,
+        "selection_indices_exact": true,
+        "frame_ids_exact": true,
+        "regions": {
+          "main": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999998
+          },
+          "tail": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999998
+          },
+          "whole": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999998
+          }
+        }
+      },
+      "test": {
+        "n": 67,
+        "ids_match_set": true,
+        "labels_semantically_equal": true,
+        "selection_indices_exact": true,
+        "frame_ids_exact": true,
+        "regions": {
+          "main": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999999
+          },
+          "tail": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999999
+          },
+          "whole": {
+            "equal": true,
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_l2": 0.0,
+            "sample_corr_median": 1.0,
+            "sample_corr_p10": 0.9999999999999999
+          }
+        }
+      }
+    }
+  },
+  "runtime": {
+    "python": "3.12.14 | packaged by Anaconda, Inc. | (main, Aug 27 2026, 14:37:13) [MSC v.1942 64 bit (AMD64)]",
+    "numpy": "2.4.6",
+    "scipy": "1.17.1",
+    "torch": "2.5.1+cu121"
+  },
+  "current_results": [
+    {
+      "task": 1,
+      "candidate": {
+        "id": "random_0131",
+        "parameters": {
+          "patch_size": 64,
+          "dim": 96,
+          "depth": 4,
+          "heads": 8,
+          "mlp_dim": 384,
+          "lr": 0.0001,
+          "dropout": 0,
+          "weight_decay": 0,
+          "batch_size": 24,
+          "label_smoothing": 0.0,
+          "warmup": 5
+        },
+        "references": [
+          {
+            "file": "04_beam_vote_top15.json",
+            "method": "beam_vote",
+            "id": "random_0131"
+          },
+          {
+            "file": "05_six_channel_beam_vote_top15.json",
+            "method": "six_channel_beam_vote",
+            "id": "random_0131"
+          }
+        ]
+      },
+      "directory": "D:\\Ultrasound\\骨分层\\经验小波分解\\experiments\\unified_tasks123_20261025\\task1_baseline_search\\random_0131",
+      "region": "dyn_envelope",
+      "val_accuracy": 0.85,
+      "val_loss": 0.45262908935546875,
+      "best_epoch": 16,
+      "trained_epochs": 28,
+      "test": {
+        "accuracy": 0.7761194029850746,
+        "precision": 0.7391304347826086,
+        "f1_score": 0.693877551020408,
+        "sensitivity": 0.6538461538461539,
+        "specificity": 0.8536585365853658,
+        "auc": 0.8123827392120075,
+        "tn": 35,
+        "fp": 6,
+        "fn": 9,
+        "tp": 17,
+        "weighted_balanced_accuracy": 0.7537523452157598,
+        "decision_threshold": 0.5,
+        "positive_reward": null,
+        "decision_mode": "fixed_0.5",
+        "confusion_matrix": [
+          [
+            35,
+            6
+          ],
+          [
+            9,
+            17
+          ]
+        ]
+      }
+    },
+    {
+      "task": 2,
+      "candidate": {
+        "id": "random_0131",
+        "parameters": {
+          "patch_size": 64,
+          "dim": 96,
+          "depth": 4,
+          "heads": 8,
+          "mlp_dim": 384,
+          "lr": 0.0001,
+          "dropout": 0,
+          "weight_decay": 0,
+          "batch_size": 24,
+          "label_smoothing": 0.0,
+          "warmup": 5
+        },
+        "references": [
+          {
+            "file": "04_beam_vote_top15.json",
+            "method": "beam_vote",
+            "id": "random_0131"
+          },
+          {
+            "file": "05_six_channel_beam_vote_top15.json",
+            "method": "six_channel_beam_vote",
+            "id": "random_0131"
+          }
+        ]
+      },
+      "directory": "D:\\Ultrasound\\骨分层\\经验小波分解\\experiments\\unified_tasks123_20261025\\task2_baseline_parameters",
+      "region": "dyn_envelope_full",
+      "val_accuracy": 0.825,
+      "val_loss": 0.44002912044525144,
+      "best_epoch": 18,
+      "trained_epochs": 30,
+      "test": {
+        "accuracy": 0.7761194029850746,
+        "precision": 0.6774193548387096,
+        "f1_score": 0.7368421052631579,
+        "sensitivity": 0.8076923076923077,
+        "specificity": 0.7560975609756098,
+        "auc": 0.8198874296435272,
+        "tn": 31,
+        "fp": 10,
+        "fn": 5,
+        "tp": 21,
+        "weighted_balanced_accuracy": 0.7818949343339587,
+        "decision_threshold": 0.5,
+        "positive_reward": null,
+        "decision_mode": "fixed_0.5",
+        "confusion_matrix": [
+          [
+            31,
+            10
+          ],
+          [
+            5,
+            21
+          ]
+        ]
+      }
+    },
+    {
+      "task": 3,
+      "candidate": {
+        "id": "random_0201",
+        "parameters": {
+          "patch_size": 16,
+          "dim": 256,
+          "depth": 2,
+          "heads": 8,
+          "mlp_dim": 1024,
+          "lr": 0.001,
+          "dropout": 0.2,
+          "weight_decay": 0.02,
+          "batch_size": 4,
+          "label_smoothing": 0.0,
+          "warmup": 5
+        },
+        "references": [
+          {
+            "file": "02_energy_top10_top15.json",
+            "method": "energy_top10",
+            "id": "random_0201"
+          }
+        ]
+      },
+      "directory": "D:\\Ultrasound\\骨分层\\经验小波分解\\experiments\\unified_tasks123_20261025\\task3_six_channel_search\\random_0201",
+      "region": "dyn_envelope_full",
+      "val_accuracy": 0.85,
+      "val_loss": 0.43528555035591127,
+      "best_epoch": 33,
+      "trained_epochs": 40,
+      "test": {
+        "accuracy": 0.835820895522388,
+        "precision": 0.8260869565217391,
+        "f1_score": 0.7755102040816326,
+        "sensitivity": 0.7307692307692307,
+        "specificity": 0.9024390243902439,
+        "auc": 0.8893058161350844,
+        "tn": 37,
+        "fp": 4,
+        "fn": 7,
+        "tp": 19,
+        "weighted_balanced_accuracy": 0.8166041275797373,
+        "decision_threshold": 0.5,
+        "positive_reward": null,
+        "decision_mode": "fixed_0.5",
+        "confusion_matrix": [
+          [
+            37,
+            4
+          ],
+          [
+            7,
+            19
+          ]
+        ]
+      }
+    },
+    {
+      "task": 4,
+      "candidate": {
+        "id": "random_0131",
+        "parameters": {
+          "patch_size": 64,
+          "dim": 96,
+          "depth": 4,
+          "heads": 8,
+          "mlp_dim": 384,
+          "lr": 0.0001,
+          "dropout": 0,
+          "weight_decay": 0,
+          "batch_size": 24,
+          "label_smoothing": 0.0,
+          "warmup": 5
+        },
+        "references": [
+          {
+            "file": "04_beam_vote_top15.json",
+            "method": "beam_vote",
+            "id": "random_0131"
+          },
+          {
+            "file": "05_six_channel_beam_vote_top15.json",
+            "method": "six_channel_beam_vote",
+            "id": "random_0131"
+          }
+        ]
+      },
+      "directory": "D:\\Ultrasound\\骨分层\\经验小波分解\\experiments\\unified_tasks4567_20261026\\task4_baseline_parameters",
+      "region": "dyn_envelope",
+      "channel_mode": 4,
+      "model_variant": "concat",
+      "val_accuracy": 0.825,
+      "val_loss": 0.4537991940975189,
+      "best_epoch": 30,
+      "trained_epochs": 40,
+      "test": {
+        "accuracy": 0.7761194029850746,
+        "precision": 0.7619047619047619,
+        "f1_score": 0.6808510638297872,
+        "sensitivity": 0.6153846153846154,
+        "specificity": 0.8780487804878049,
+        "auc": 0.8442776735459663,
+        "tn": 36,
+        "fp": 5,
+        "fn": 10,
+        "tp": 16,
+        "weighted_balanced_accuracy": 0.7467166979362101,
+        "decision_threshold": 0.5,
+        "positive_reward": null,
+        "decision_mode": "fixed_0.5",
+        "confusion_matrix": [
+          [
+            36,
+            5
+          ],
+          [
+            10,
+            16
+          ]
+        ]
+      }
+    },
+    {
+      "task": 5,
+      "candidate": {
+        "id": "random_0078",
+        "parameters": {
+          "patch_size": 16,
+          "dim": 128,
+          "depth": 3,
+          "heads": 8,
+          "mlp_dim": 256,
+          "lr": 0.0003,
+          "dropout": 0.25,
+          "weight_decay": 0.001,
+          "batch_size": 4,
+          "label_smoothing": 0.0,
+          "warmup": 5
+        },
+        "references": [
+          {
+            "file": "02_energy_top10_top15.json",
+            "method": "energy_top10",
+            "id": "random_0078"
+          }
+        ]
+      },
+      "directory": "D:\\Ultrasound\\骨分层\\经验小波分解\\experiments\\unified_tasks4567_20261026\\task5_channel4_search\\random_0078",
+      "region": "dyn_envelope",
+      "channel_mode": 4,
+      "model_variant": "concat",
+      "val_accuracy": 0.9,
+      "val_loss": 0.4303505450487137,
+      "best_epoch": 27,
+      "trained_epochs": 39,
+      "test": {
+        "accuracy": 0.7611940298507462,
+        "precision": 0.75,
+        "f1_score": 0.6521739130434783,
+        "sensitivity": 0.5769230769230769,
+        "specificity": 0.8780487804878049,
+        "auc": 0.8264540337711069,
+        "tn": 36,
+        "fp": 5,
+        "fn": 11,
+        "tp": 15,
+        "weighted_balanced_accuracy": 0.7274859287054409,
+        "decision_threshold": 0.5,
+        "positive_reward": null,
+        "decision_mode": "fixed_0.5",
+        "confusion_matrix": [
+          [
+            36,
+            5
+          ],
+          [
+            11,
+            15
+          ]
+        ]
+      }
+    },
+    {
+      "task": 6,
+      "candidate": {
+        "id": "random_0131",
+        "parameters": {
+          "patch_size": 64,
+          "dim": 96,
+          "depth": 4,
+          "heads": 8,
+          "mlp_dim": 384,
+          "lr": 0.0001,
+          "dropout": 0,
+          "weight_decay": 0,
+          "batch_size": 24,
+          "label_smoothing": 0.0,
+          "warmup": 5
+        },
+        "references": [
+          {
+            "file": "04_beam_vote_top15.json",
+            "method": "beam_vote",
+            "id": "random_0131"
+          },
+          {
+            "file": "05_six_channel_beam_vote_top15.json",
+            "method": "six_channel_beam_vote",
+            "id": "random_0131"
+          }
+        ]
+      },
+      "directory": "D:\\Ultrasound\\骨分层\\经验小波分解\\experiments\\unified_tasks4567_20261026\\task6_baseline_parameters",
+      "region": "dyn_envelope",
+      "channel_mode": 3,
+      "model_variant": "cross_vote",
+      "val_accuracy": 0.75,
+      "val_loss": 0.544045090675354,
+      "best_epoch": 22,
+      "trained_epochs": 34,
+      "test": {
+        "accuracy": 0.7761194029850746,
+        "precision": 0.7619047619047619,
+        "f1_score": 0.6808510638297872,
+        "sensitivity": 0.6153846153846154,
+        "specificity": 0.8780487804878049,
+        "auc": 0.8039399624765479,
+        "tn": 36,
+        "fp": 5,
+        "fn": 10,
+        "tp": 16,
+        "decision_mode": "vote_argmax",
+        "weighted_balanced_accuracy": 0.7467166979362101,
+        "confusion_matrix": [
+          [
+            36,
+            5
+          ],
+          [
+            10,
+            16
+          ]
+        ]
+      }
+    },
+    {
+      "task": 7,
+      "candidate": {
+        "id": "random_0226",
+        "parameters": {
+          "patch_size": 16,
+          "dim": 128,
+          "depth": 1,
+          "heads": 4,
+          "mlp_dim": 512,
+          "lr": 0.0003,
+          "dropout": 0,
+          "weight_decay": 0,
+          "batch_size": 4,
+          "label_smoothing": 0.0,
+          "warmup": 5
+        },
+        "references": [
+          {
+            "file": "01_baseline_top15.json",
+            "method": "baseline",
+            "id": "random_0226"
+          }
+        ]
+      },
+      "directory": "D:\\Ultrasound\\骨分层\\经验小波分解\\experiments\\unified_tasks4567_20261026\\task7_cross_vote_search\\random_0226",
+      "region": "dyn_envelope",
+      "channel_mode": 3,
+      "model_variant": "cross_vote",
+      "val_accuracy": 0.85,
+      "val_loss": 0.447057256102562,
+      "best_epoch": 22,
+      "trained_epochs": 34,
+      "test": {
+        "accuracy": 0.8059701492537313,
+        "precision": 0.9333333333333333,
+        "f1_score": 0.6829268292682926,
+        "sensitivity": 0.5384615384615384,
+        "specificity": 0.975609756097561,
+        "auc": 0.8883677298311444,
+        "tn": 40,
+        "fp": 1,
+        "fn": 12,
+        "tp": 14,
+        "decision_mode": "vote_argmax",
+        "weighted_balanced_accuracy": 0.7570356472795496,
+        "confusion_matrix": [
+          [
+            40,
+            1
+          ],
+          [
+            12,
+            14
+          ]
+        ]
+      }
+    }
+  ],
+  "checkpoint_selection_examples": [
+    {
+      "task": 1,
+      "chosen_by_val_loss_epoch": 16,
+      "epochs_run": 28,
+      "best_observed_val_auc_epoch": 17,
+      "best_observed_val_auc": 0.896,
+      "accuracy_at_best_auc": 0.75
+    },
+    {
+      "task": 2,
+      "chosen_by_val_loss_epoch": 18,
+      "epochs_run": 30,
+      "best_observed_val_auc_epoch": 16,
+      "best_observed_val_auc": 0.88,
+      "accuracy_at_best_auc": 0.85
+    },
+    {
+      "task": 3,
+      "chosen_by_val_loss_epoch": 33,
+      "epochs_run": 40,
+      "best_observed_val_auc_epoch": 3,
+      "best_observed_val_auc": 0.864,
+      "accuracy_at_best_auc": 0.375
+    },
+    {
+      "task": 4,
+      "chosen_by_val_loss_epoch": 30,
+      "epochs_run": 40,
+      "best_observed_val_auc_epoch": 24,
+      "best_observed_val_auc": 0.872,
+      "accuracy_at_best_auc": 0.8
+    },
+    {
+      "task": 5,
+      "chosen_by_val_loss_epoch": 27,
+      "epochs_run": 39,
+      "best_observed_val_auc_epoch": 29,
+      "best_observed_val_auc": 0.8853333333333333,
+      "accuracy_at_best_auc": 0.85
+    },
+    {
+      "task": 6,
+      "chosen_by_val_loss_epoch": 22,
+      "epochs_run": 34,
+      "best_observed_val_auc_epoch": 24,
+      "best_observed_val_auc": 0.8293333333333334,
+      "accuracy_at_best_auc": 0.75
+    },
+    {
+      "task": 7,
+      "chosen_by_val_loss_epoch": 22,
+      "epochs_run": 34,
+      "best_observed_val_auc_epoch": 16,
+      "best_observed_val_auc": 0.8746666666666667,
+      "accuracy_at_best_auc": 0.825
+    }
+  ],
+  "frozen_source_comparison": {
+    "unified_tasks123_20261025": {
+      "dyn_cli.py": true,
+      "emd_pipeline.py": true,
+      "experiment_setup.py": true,
+      "learning_rate_schedule.py": true,
+      "run_unified_tasks123.py": false,
+      "run_vit_experiments.py": true,
+      "vit_hyperparameters.py": true,
+      "vit_model.py": true,
+      "vit_pipeline.py": true
+    },
+    "unified_tasks4567_20261026": {
+      "dyn_cli.py": true,
+      "emd_pipeline.py": true,
+      "experiment_setup.py": true,
+      "learning_rate_schedule.py": true,
+      "run_unified_tasks123.py": true,
+      "run_unified_tasks4567.py": true,
+      "run_vit_experiments.py": true,
+      "vit_hyperparameters.py": true,
+      "vit_model.py": true,
+      "vit_pipeline.py": true
+    }
+  },
+  "reference_results": {
+    "created_at": "2026-10-26T15:16:34.156914+08:00",
+    "run": "D:\\BMU\\骨分层\\肩胛骨最终数据集\\transformer\\results\\variant_long_testtop15_20261026",
+    "methods": {
+      "energy_top10": {
+        "best_correct": 59,
+        "best_accuracy": 0.8805970149253731,
+        "best_ids": [
+          "random_0201"
+        ],
+        "mean_accuracy": 0.8199004975124378,
+        "mean_screening_accuracy": 0.8616915422885573,
+        "mean_baseline_accuracy": 0.7781094527363184,
+        "mean_change_pp_vs_screening": -4.17910447761194,
+        "improved": 1,
+        "tied": 1,
+        "declined": 13
+      },
+      "six_channel": {
+        "best_correct": 59,
+        "best_accuracy": 0.8805970149253731,
+        "best_ids": [
+          "random_0017",
+          "random_0040"
+        ],
+        "mean_accuracy": 0.7970149253731342,
+        "mean_screening_accuracy": 0.8437810945273632,
+        "mean_baseline_accuracy": 0.7930348258706468,
+        "mean_change_pp_vs_screening": -4.676616915422885,
+        "improved": 2,
+        "tied": 1,
+        "declined": 12
+      },
+      "beam_vote": {
+        "best_correct": 58,
+        "best_accuracy": 0.8656716417910447,
+        "best_ids": [
+          "random_0032"
+        ],
+        "mean_accuracy": 0.8199004975124378,
+        "mean_screening_accuracy": 0.8407960199004976,
+        "mean_baseline_accuracy": 0.7741293532338308,
+        "mean_change_pp_vs_screening": -2.08955223880597,
+        "improved": 1,
+        "tied": 4,
+        "declined": 10
+      },
+      "six_channel_beam_vote": {
+        "best_correct": 61,
+        "best_accuracy": 0.9104477611940298,
+        "best_ids": [
+          "random_0086"
+        ],
+        "mean_accuracy": 0.8238805970149253,
+        "mean_screening_accuracy": 0.8477611940298507,
+        "mean_baseline_accuracy": 0.7631840796019901,
+        "mean_change_pp_vs_screening": -2.388059701492537,
+        "improved": 2,
+        "tied": 0,
+        "declined": 13
+      }
+    },
+    "training_audit_passed": true,
+    "result_audit_passed": true,
+    "new_models": 300,
+    "baseline_models_newly_trained": 0,
+    "interpretation": "Exploratory test-selected comparison; baseline is the existing screening model, not newly long-trained"
+  },
+  "source_sha256": {
+    "经验小波分解\\emd_pipeline.py": "ab570ff8677a031e1a2cd61b4ca0e02fc8a6975f698e5243dfc24e13b2e25d82",
+    "经验小波分解\\vit_pipeline.py": "50b39c94cade46fb3ecdff5d6a035b5fba0832cf869864324c05e2c421834b15",
+    "经验小波分解\\vit_model.py": "a92b5cce44372dd25bdde043c3d2d456ce60d68dac78d9b250ddbc15c6bd85df",
+    "经验小波分解\\run_vit_experiments.py": "c1b77a6e8f8b8db96ee1a4854558b5ead50df128cc69ca934960a1b2284cd59c",
+    "经验小波分解\\learning_rate_schedule.py": "6aa7ac3d664db4551ff01034311afc827a69a5930b0b73b815147e2787c13169",
+    "code_reference\\methods\\six_channel\\code_snapshot\\experiment_prepare_data.py": "cd7129d48d5a9c09bbfb783dcf0bb7372f3d261b10d919e017aba9bc586d997b",
+    "code_reference\\methods\\energy_top10\\code_snapshot\\experiment_prepare_data.py": "5130234af0763da97321f8c4d4760ba3c7f38caa86c782a4712b80b119adfe4c",
+    "code_reference\\methods\\six_channel_beam_vote\\code_snapshot\\experiment_models.py": "d32f629947ece38af880614ff350135f3e971a35209093974988aba7c162d50e",
+    "code_reference\\methods\\six_channel_beam_vote\\code_snapshot\\controlled_driver.py": "4f2f2e09854665f88780eff69a8710593dca6c6cd798ac112f795f48a0768044",
+    "code_reference\\methods\\six_channel_beam_vote\\code_snapshot\\fit_fold_extensions.py": "5515faffa5264e2c486a1e61cf0d4cff52cad20c9c526e66cc3bf5711ab1e799"
+  },
+  "verification_assertions_passed": true
+}

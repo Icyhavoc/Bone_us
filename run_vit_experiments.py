@@ -102,6 +102,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--max-samples", type=int, default=None,
                         help="limit each split for a short smoke run")
+    parser.add_argument("--defer-test", action="store_true",
+                        help="save the validation-selected model without loading the test split")
     args = parser.parse_args()
     if args.region_set is None:
         # Preserve the previous implicit three-region cross-vote default,
@@ -275,6 +277,9 @@ def _fit(
             best_loss, best_epoch = val_loss, epoch
             best_state = {name: value.detach().cpu().clone()
                           for name, value in model.state_dict().items()}
+        callback = getattr(args, "epoch_callback", None)
+        if callback is not None:
+            callback(history[-1], best_epoch)
         if epoch - best_epoch >= args.patience:
             break
     if best_state is None:
@@ -347,6 +352,7 @@ def run_one(
     num_classes: int,
     label_scheme: dict[str, Any] | None,
     decision_tag: str | None,
+    prepared_splits: dict[str, tuple] | None = None,
 ) -> dict[str, Any]:
     mapper = DepthMapper(args.max_depth_mm, args.signal_length, args.rounding)
     dynamic_config = dyn_config_from_args(args) if region_name in DYNAMIC_REGION_NAMES else None
@@ -382,6 +388,10 @@ def run_one(
     }
     if args.model_variant == "cross_vote":
         config["model_variant"] = "cross_vote"
+    if getattr(args, "defer_test", False):
+        config["test_evaluation"] = "deferred"
+    if getattr(args, "search_candidate", None) is not None:
+        config["search_candidate"] = args.search_candidate
     if args.channel_mode == 3:
         config["frame_selection"] = CHANNEL3_FRAME_SELECTION
     if args.channel_mode == 4:
@@ -406,12 +416,12 @@ def run_one(
     data: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     first_audit: list[dict[str, Any]] | None = None
     for split in ("train", "val"):
-        inputs, labels, records, audit = _load_prepared_split(
+        inputs, labels, records, audit = (prepared_splits[split] if prepared_splits is not None else _load_prepared_split(
             data_dir, split, form=form, regions=regions,
             channel_mode=args.channel_mode, mapper=mapper,
             target_length=args.target_length, tukey_alpha=args.tukey_alpha,
             dynamic_config=dynamic_config, max_samples=args.max_samples,
-        )
+        ))
         if inputs.shape[1:] != (branches, streams, args.target_length):
             raise ValueError(f"unexpected {split} ViT input shape: {inputs.shape}")
         data[split] = inputs, labels
@@ -462,17 +472,18 @@ def run_one(
     model.to(device)
     write_json(output_dir / "history.json", history)
     # The holdout is read only after validation has frozen the model weights.
-    test_x, test_y, test_records, test_audit = _load_prepared_split(
-        data_dir, "test", form=form, regions=regions, channel_mode=args.channel_mode,
-        mapper=mapper, target_length=args.target_length, tukey_alpha=args.tukey_alpha,
-        dynamic_config=dynamic_config, max_samples=args.max_samples,
-    )
-    if test_x.shape[1:] != train_x.shape[1:]:
-        raise ValueError(f"unexpected test ViT input shape: {test_x.shape}")
-    data["test"] = test_x, test_y
-    np.save(output_dir / "labels_test.npy", test_y)
-    write_json(output_dir / "samples_test.json", test_records)
-    write_json(output_dir / "input_audit_test.json", test_audit)
+    if not getattr(args, "defer_test", False):
+        test_x, test_y, test_records, test_audit = _load_prepared_split(
+            data_dir, "test", form=form, regions=regions, channel_mode=args.channel_mode,
+            mapper=mapper, target_length=args.target_length, tukey_alpha=args.tukey_alpha,
+            dynamic_config=dynamic_config, max_samples=args.max_samples,
+        )
+        if test_x.shape[1:] != train_x.shape[1:]:
+            raise ValueError(f"unexpected test ViT input shape: {test_x.shape}")
+        data["test"] = test_x, test_y
+        np.save(output_dir / "labels_test.npy", test_y)
+        write_json(output_dir / "samples_test.json", test_records)
+        write_json(output_dir / "input_audit_test.json", test_audit)
     split_metrics: dict[str, Any] = {}
     for split, (inputs, labels) in data.items():
         probabilities = val_probabilities if split == "val" and val_probabilities is not None else None
@@ -526,8 +537,9 @@ def run_one(
         "metrics": split_metrics,
     }
     write_json(output_dir / "metrics.json", metrics)
-    test_metrics = split_metrics["test"]
-    report = f"[{form}/{region_name}] ViT test_accuracy={test_metrics['accuracy']:.4f}"
+    report_split = "test" if "test" in split_metrics else "val"
+    test_metrics = split_metrics[report_split]
+    report = f"[{form}/{region_name}] ViT {report_split}_accuracy={test_metrics['accuracy']:.4f}"
     if num_classes == 2:
         balanced = test_metrics["weighted_balanced_accuracy"]
         balanced_text = "n/a" if balanced is None else f"{balanced:.4f}"
