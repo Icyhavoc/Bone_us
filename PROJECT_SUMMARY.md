@@ -23,11 +23,12 @@
 5. EMD+MLP 对每通道每分区提取 8 个统计量，训练集拟合标准化器，再由单个 `64 → 32 → k` MLP 分类；原入口保持可运行。
 6. ViT+cross-vote 支持 dyn_envelope（主体/尾窗×双 Beam，四分支）与 dyn_envelope_full（追加全段，六分支），不再将显式 dyn_envelope 改为 full。每分支编码后独立分类，对平均概率的负对数训练，逐类求和 argmax 推理；按 val loss 早停、不用 reward。保存逐路概率、平均概率、求和得分，目录以实际区域隔离。CLI 未指定区域时继续默认 full，GUI 允许选择这两种组合。
 7. 三条训练路径共用预热 5 轮、余弦衰减、下限 5e-6。ViT auto preset：普通拼接 baseline/random_0047、三分区拼接 six_channel/random_0048；cross-vote 两分区用 beam_vote/random_0096、三分区用 six_channel_beam_vote/random_0086。参数集中在 vit_hyperparameters.py，显式 CLI 参数优先，legacy 可恢复旧值；配置及目录记录参考和实际取值。结构比较时显式锁定同一组参数。参考软投票为同 Beam 各区域融合后两头分类，本项目仍为区域×Beam 各自分类；此次只扩展可选区域。参数记录见 docs/ViT_HYPERPARAMETERS.md。
+8. 独立入口 `run_reference_aligned_cv.py` 用于完整参考协议核验，不改变现行 GUI 默认路径。它按双 Beam 完整波形共享选取 max1，使用六路编码器和两个 Beam 融合头、双 Beam 平均交叉熵、参考五折、验证 AUC 选模、BF16/fused AdamW/CUDA randperm 及五折概率集成。默认保持三次样条；显式 `--resampling reference_linear` 使用参考 `np.interp` 并强制核对冻结输入。2026-10-27 三次样条为 55/67（82.09%），精确线性为 56/67（83.58%）；参考包冻结原生代码本机直跑同样为 56/67，且五折验证/测试概率逐元素一致。仍未达到历史 61/67（91.04%），故未执行成功后回退并逐模块消融。详情见 `docs/REFERENCE_ALIGNMENT_20261027.md`。
 
 代码入口为 `emd_pipeline.py`、`vit_pipeline.py`、`vit_model.py`、`run_vit_experiments.py`、`run_emd_experiments.py` 和 `gui_app.py`。ViT 二分类新规则产物带 `__vit__headsim_cubic...__norm_w1_2p0`，关闭 reward 的固定阈值产物带 `__fixed0p5`；旧 ViT 产物保留原名，先前按计数加权的产物仍带 `__w1_...`。cross-vote 产物带 `__vit_cross_vote__headsim_cubic`，EMD+MLP 产物带 `__core__headsim_cubic`。GUI 按模型和数据集筛选，标准 ViT 可启停二分类 reward 并调整权重。预处理、训练曲线和混淆矩阵用于三条路径，EMD 分量图只用于 EMD+MLP。
 
 ## 本轮收敛
 
-先前移除了为探索网络结构或提升单次指标而添加的 LOSO 入口、浅层模型/特征搜索、通道聚合与对比、跨分区比值、新特征族及错分厚度图。当前主线接入 ViT，但保留可变阈值、多分类、ADC 归零和独立物理通道。没有引入 EMD 融合、参考包五折协议或参考权重。历史指标与当前 ViT 输入及模型不可直接比较。
+先前移除了为探索网络结构或提升单次指标而添加的 LOSO 入口、浅层模型/特征搜索、通道聚合与对比、跨分区比值、新特征族及错分厚度图。当前主线接入 ViT，但保留可变阈值、多分类、ADC 归零和独立物理通道。没有引入 EMD 融合或参考权重；参考包五折协议只存在于独立核验入口，不替换现行 GUI/CLI 主流程。历史指标与当前 ViT 输入及模型不可直接比较。
 
 运行与参数见 `README.md`；长期约束见工作区 `../.codex/skills/bmu-emd-project/SKILL.md`。

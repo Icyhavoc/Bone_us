@@ -48,6 +48,9 @@ FORM_ORDER = ("mean_std", "raw50", "max1", "top3_mean")
 PREPROCESSING_TAG = "headsim_cubic"
 PREPROCESSING_VERSION = "head_similarity_cubic_tail600_v1"
 CHANNEL3_FRAME_SELECTION = "independent_beam_peak_v1"
+REFERENCE_SHARED_FRAME_SELECTION = "shared_full_trace_peak_v1"
+RESAMPLING_CUBIC = "cubic"
+RESAMPLING_REFERENCE_LINEAR = "reference_linear"
 
 
 def canonical_form(name: str) -> str:
@@ -433,18 +436,33 @@ def channel4_overlap_order(
     }
 
 
-def resample_signals(signals: np.ndarray, target_length: int) -> np.ndarray:
-    """Resample each signal with a cubic spline on endpoint-aligned coordinates."""
+def resample_signals(
+    signals: np.ndarray,
+    target_length: int,
+    method: str = RESAMPLING_CUBIC,
+) -> np.ndarray:
+    """Resample endpoint-aligned signals with cubic or frozen reference linear interpolation."""
 
     signals = np.asarray(signals, dtype=np.float32)
     if signals.ndim != 2:
         raise ValueError(f"Expected [num_signals, length], got {signals.shape}")
-    if signals.shape[1] < 4 or target_length <= 0:
-        raise ValueError("Cubic spline needs at least four source samples and a positive target length")
+    if target_length <= 0:
+        raise ValueError("target length must be positive")
+    if method not in (RESAMPLING_CUBIC, RESAMPLING_REFERENCE_LINEAR):
+        raise ValueError(f"unknown resampling method: {method}")
+    if method == RESAMPLING_CUBIC and signals.shape[1] < 4:
+        raise ValueError("Cubic spline needs at least four source samples")
+    if method == RESAMPLING_REFERENCE_LINEAR and signals.shape[1] < 1:
+        raise ValueError("Linear interpolation needs at least one source sample")
     if signals.shape[1] == target_length:
         return signals.copy()
     source = np.arange(signals.shape[1], dtype=np.float64)
     target = np.linspace(0.0, source[-1], target_length)
+    if method == RESAMPLING_REFERENCE_LINEAR:
+        result = np.empty((signals.shape[0], target_length), dtype=np.float32)
+        for source_row, target_row in zip(signals, result):
+            target_row[:] = np.interp(target, source, source_row)
+        return result
     return CubicSpline(source, signals, axis=-1, extrapolate=False)(target).astype(np.float32)
 
 
@@ -482,6 +500,7 @@ def prepare_branch_block(
     target_length: int = 512,
     tukey_alpha: float = 0.3,
     apply_tukey: bool = True,
+    resampling_method: str = RESAMPLING_CUBIC,
 ) -> np.ndarray:
     """Cut/resample one depth region, keeping the channel axis.
 
@@ -499,6 +518,7 @@ def prepare_branch_block(
         target_length=target_length,
         tukey_alpha=tukey_alpha,
         apply_tukey=apply_tukey,
+        resampling_method=resampling_method,
     )
 
 
@@ -509,6 +529,7 @@ def prepare_branch_signals(
     target_length: int = 512,
     tukey_alpha: float = 0.3,
     apply_tukey: bool = True,
+    resampling_method: str = RESAMPLING_CUBIC,
 ) -> np.ndarray:
     """Cut/resample one branch and flatten the channel axis.
 
@@ -523,6 +544,7 @@ def prepare_branch_signals(
         target_length=target_length,
         tukey_alpha=tukey_alpha,
         apply_tukey=apply_tukey,
+        resampling_method=resampling_method,
     )
     return block.reshape(-1, block.shape[-1])
 
@@ -534,6 +556,7 @@ def prepare_interval_block(
     target_length: int = 512,
     tukey_alpha: float = 0.3,
     apply_tukey: bool = True,
+    resampling_method: str = RESAMPLING_CUBIC,
 ) -> np.ndarray:
     """Cut/resample an explicit interval and optionally apply Tukey.
 
@@ -552,7 +575,7 @@ def prepare_interval_block(
     segment = processed[..., start:end]
     stream_count, channel_count = segment.shape[0], segment.shape[1]
     streams = segment.reshape(-1, segment.shape[-1])
-    resampled = resample_signals(streams, target_length)
+    resampled = resample_signals(streams, target_length, resampling_method)
     block = resampled.reshape(stream_count, channel_count, target_length)
     if not apply_tukey:
         return block
@@ -566,6 +589,7 @@ def prepare_interval_signals(
     target_length: int = 512,
     tukey_alpha: float = 0.3,
     apply_tukey: bool = True,
+    resampling_method: str = RESAMPLING_CUBIC,
 ) -> np.ndarray:
     """Cut/resample an explicit interval and flatten the channel axis."""
 
@@ -576,6 +600,7 @@ def prepare_interval_signals(
         target_length=target_length,
         tukey_alpha=tukey_alpha,
         apply_tukey=apply_tukey,
+        resampling_method=resampling_method,
     )
     return block.reshape(-1, block.shape[-1])
 
@@ -946,8 +971,9 @@ def prepare_frame_input(
     channel_mode: int,
     point_id: str | None = None,
     dynamic_config: DynamicEnvelopeConfig | None = None,
+    frame_selection: str = CHANNEL3_FRAME_SELECTION,
 ) -> tuple[np.ndarray, np.ndarray | None, dict[str, Any] | None]:
-    """Share one locator; channel 3 returns ranked IDs as [channel, rank]."""
+    """Share one locator and apply the requested model-frame ranking."""
     form = canonical_form(form)
     span = None
     if form in ("max1", "top3_mean") or dynamic_config is not None:
@@ -956,6 +982,30 @@ def prepare_frame_input(
     physical = channel_physical_indices(channel_mode)
     starts = None if span is None else span["starts"][list(physical)]
     ends = None if span is None else span["ends"][list(physical)]
+    if frame_selection == REFERENCE_SHARED_FRAME_SELECTION:
+        if channel_mode != 3 or form not in ("max1", "top3_mean"):
+            raise ValueError(
+                "reference shared peak selection requires channel_mode=3 and max1/top3_mean"
+            )
+        assert span is not None
+        count = 1 if form == "max1" else 3
+        frame_order = np.arange(selected.shape[0])
+        peaks = np.max(np.abs(selected), axis=(1, 2))
+        chosen = np.lexsort((frame_order, -peaks))[:count].astype(np.int64)
+        processed = (
+            selected[chosen[0]:chosen[0] + 1].astype(np.float32)
+            if count == 1 else
+            np.mean(selected[chosen], axis=0, dtype=np.float32)[None, ...]
+        )
+        span["shared_frame_selection"] = {
+            "algorithm": REFERENCE_SHARED_FRAME_SELECTION,
+            "ranking_domain": "both_channels_full_trace",
+            "selected_frames": chosen.astype(int).tolist(),
+            "selected_peak_abs": peaks[chosen].astype(float).tolist(),
+        }
+        return processed, chosen, span
+    if frame_selection != CHANNEL3_FRAME_SELECTION:
+        raise ValueError(f"unknown frame selection: {frame_selection}")
     if channel_mode == 3 and form in ("max1", "top3_mean"):
         assert starts is not None and ends is not None and span is not None
         # Each beam uses its own window and its own frame IDs.  Calling the
@@ -1010,6 +1060,7 @@ def prepare_dynamic_envelope_branches(
     apply_tukey: bool = True,
     point_id: str | None = None,
     physical_channels: Sequence[int] | None = None,
+    resampling_method: str = RESAMPLING_CUBIC,
 ) -> tuple[list[np.ndarray], dict[str, Any]]:
     """Create the two dynamic-envelope branches for one processed sample.
 
@@ -1044,7 +1095,7 @@ def prepare_dynamic_envelope_branches(
         flattened = block.reshape(-1, block.shape[-1])
         if pad:
             flattened = np.pad(flattened, ((0, 0), (0, pad)))
-        resampled = resample_signals(flattened, target_length)
+        resampled = resample_signals(flattened, target_length, resampling_method)
         if not apply_tukey:
             return resampled
         return resampled * tukey_window(target_length, tukey_alpha)[None, :]

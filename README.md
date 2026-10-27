@@ -74,6 +74,8 @@ python gui_app.py
 
 ViT 默认运行 `max1 + dyn_envelope + 通道 3`；`--forms all --region-set all` 可运行原有 16 个方式/区域组合。ViT 二分类开启 reward 的产物带 `__norm_w1_2p0`，关闭时带 `__fixed0p5`。cross-vote 目录用独立的 `__vit_cross_vote__headsim_cubic`，支持 `--region-set dyn_envelope`（主体＋尾窗，双 Beam 共四分支）和 `dyn_envelope_full`（追加全段，共六分支）；未显式传区域时保留原 CLI 默认 dyn_envelope_full。其余区域、自定义区域会明确报错。各分支独立分类，平均概率的负对数用于训练，逐类投票 argmax 用于推理，不启用 reward。两种 ViT 保存配置、分支次序、样本审计、权重、历史、概率及指标；channel3 增加选择版本后缀。EMD+MLP 保持独立 core 产物。已有目录配置不一致时拒绝混写，短样本检查指标仅用于链路验证。
 
+参考协议完整对齐另有独立入口 `run_reference_aligned_cv.py`：使用参考共享全段 max1、六路输入、按 Beam 融合的双头结构、双 Beam 交叉熵、验证 AUC 选模和五折等权集成。默认仍使用项目三次样条；显式 `--resampling reference_linear` 才启用参考 `np.interp`，并要求生成输入与冻结缓存逐值一致。2026-10-27 的 `random_0086` 三次样条运行得到 55/67（82.09%），精确线性运行得到 56/67（83.58%）；直接运行 `code_reference` 冻结原生代码也得到相同的 56/67，且逐折概率逐元素一致。两者均未达到参考历史长训 61/67（91.04%），因此没有触发回退后逐模块消融。运行证据与差异分析见 [REFERENCE_ALIGNMENT_20261027.md](docs/REFERENCE_ALIGNMENT_20261027.md)。
+
 三种 GUI 模型（ViT、ViT+cross-vote、EMD+MLP）共用逐轮学习率规则：默认预热 5 轮，再按余弦曲线降到 `5e-6`；ViT 峰值由 preset 决定（普通拼接和 cross-vote 为 `3e-4`，三分区拼接为 `1e-3`），EMD+MLP 峰值为 `1e-3`。两个入口支持 `--learning-rate`、`--min-learning-rate`、`--warmup-epochs`、`--lr-schedule {warmup_cosine,constant}`。实际学习率写入 `history.json`，配置写入 `config.json`，实验目录带学习率及 ViT 参数 preset 后缀，保留历史结果。按验证集早停时，实际训练可能尚未降到下限。
 
 主要入口：
@@ -83,6 +85,7 @@ ViT 默认运行 `max1 + dyn_envelope + 通道 3`；`--forms all --region-set al
 | `emd_pipeline.py` | 数据加载、ADC 归零、分区、EMD、特征、标准化和 MLP |
 | `vit_pipeline.py`、`vit_model.py` | 共用前处理后的 ViT 输入布局、拼接分类及 cross-vote 独立分类模型 |
 | `run_vit_experiments.py` | ViT 训练与保存结果（需要 PyTorch） |
+| `run_reference_aligned_cv.py` | 可选三次样条/参考线性的六路 Beam 投票五折对齐入口 |
 | `experiment_setup.py` | 两条训练路径共用的帧、区域与输出保护配置 |
 | `learning_rate_schedule.py` | 三种模型共用的预热、余弦衰减和实验标签 |
 | `vit_hyperparameters.py` | ViT 参考 preset、旧参数与自动选择 |

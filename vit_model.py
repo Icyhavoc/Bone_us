@@ -138,3 +138,69 @@ class RegionChannelCrossVoteViT(nn.Module):
         # inference.  Summing instead of averaging gives the same argmax.
         probabilities = self.branch_probabilities(signals).mean(dim=1)
         return probabilities.clamp_min(torch.finfo(probabilities.dtype).tiny).log()
+
+
+class RegionChannelBeamVoteViT(nn.Module):
+    """Fuse all regions within each physical beam, then soft-vote two heads.
+
+    Branches must be region-major and beam-minor:
+    ``main_b1, main_b2, tail_b1, tail_b2, ...``.
+    """
+
+    def __init__(self, config: ViTConfig) -> None:
+        super().__init__()
+        config.validate()
+        if config.branches < 2 or config.branches % 2:
+            raise ValueError("beam vote needs an even number of region×beam branches")
+        self.config = config
+        self.regions_per_beam = config.branches // 2
+        self.encoders = nn.ModuleList(
+            WaveformEncoder(config) for _ in range(config.branches)
+        )
+        self.heads = nn.ModuleList(
+            nn.Sequential(
+                nn.Linear(self.regions_per_beam * config.dim, config.dim),
+                nn.GELU(),
+                nn.Dropout(config.dropout),
+                nn.Linear(config.dim, config.num_classes),
+            )
+            for _ in range(2)
+        )
+
+    def _beam_logits_from_branches(self, branches: list[torch.Tensor]) -> torch.Tensor:
+        encoded = [
+            encoder(signal) for encoder, signal in zip(self.encoders, branches, strict=True)
+        ]
+        return torch.stack([
+            head(torch.cat(encoded[beam::2], dim=1))
+            for beam, head in enumerate(self.heads)
+        ], dim=1)
+
+    def beam_logits(self, signals: torch.Tensor) -> torch.Tensor:
+        expected = (self.config.branches, self.config.streams, self.config.length)
+        if signals.ndim != 4 or tuple(signals.shape[1:]) != expected:
+            raise ValueError(f"expected [batch, {expected}], got {tuple(signals.shape)}")
+        return self._beam_logits_from_branches([
+            signals[:, index] for index in range(self.config.branches)
+        ])
+
+    def beam_logits_from_regions(self, *regions: torch.Tensor) -> torch.Tensor:
+        """Match the frozen reference region tensors and strided Beam slicing exactly."""
+        if self.config.streams != 1 or len(regions) != self.regions_per_beam:
+            raise ValueError("reference region input requires one stream and one tensor per region")
+        expected = (2, self.config.length)
+        if any(region.ndim != 3 or tuple(region.shape[1:]) != expected for region in regions):
+            shapes = [tuple(region.shape) for region in regions]
+            raise ValueError(f"expected region tensors [batch, {expected}], got {shapes}")
+        return self._beam_logits_from_branches([
+            region[..., beam::2, :]
+            for region in regions
+            for beam in range(2)
+        ])
+
+    def beam_probabilities(self, signals: torch.Tensor) -> torch.Tensor:
+        return self.beam_logits(signals).softmax(dim=-1)
+
+    def forward(self, signals: torch.Tensor) -> torch.Tensor:
+        probabilities = self.beam_probabilities(signals).mean(dim=1)
+        return probabilities.clamp_min(torch.finfo(probabilities.dtype).tiny).log()
