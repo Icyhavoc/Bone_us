@@ -1,0 +1,2 @@
+experiments/reference_alignment_full_20261027/fold_*/best.pt filter=lfs diff=lfs merge=lfs -text
+experiments/reference_alignment_linear_exact_20261027/fold_*/best.pt filter=lfs diff=lfs merge=lfs -text

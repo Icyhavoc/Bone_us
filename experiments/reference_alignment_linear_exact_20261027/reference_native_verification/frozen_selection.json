@@ -1,0 +1,18 @@
+{
+  "threshold": 0.5,
+  "seeds": [
+    2023
+  ],
+  "config_sha256": "bb8fa64e0efcb910bcc84a4fd0a238b5499e3ce5d93c4a343c39dc2f0a9164c5",
+  "checkpoints": {
+    "fold_1/best.pt": "648cf503b762fa291e32bb5cee8af23c3c8895ef18a3856902b5df2c8bca3b2c",
+    "fold_2/best.pt": "6420245e93bced9ff8359923a66486f7a528b1057db243fb03ecfac99a1118ff",
+    "fold_3/best.pt": "59f73f806f68ac20340b2fc2a12e315bb9fb61e66331e4e604eb24b46dccfc72",
+    "fold_4/best.pt": "33bb3b50e96569d3d17cf73d1af1e328047006cc7a4c06dd34d1d9e938fcae68",
+    "fold_5/best.pt": "ff47b3bf3393e6ddc0c78723ab34b2a4080228da57023b19c76cc98d6753165a"
+  },
+  "fold_plan_sha256": "99c45cfc466a77dd25933ee8d666d7ac0f7000a411a9ce088b8b99155b08361e",
+  "frozen_at": "2026-10-27T14:39:00.913502+08:00",
+  "test_used_for_candidate_selection": true,
+  "test_used_for_epoch_or_threshold_selection": false
+}

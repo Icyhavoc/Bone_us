@@ -1,0 +1,806 @@
+[
+  {
+    "sample_id": "N23_P1_01",
+    "point_id": "N23_P1",
+    "depth_value": 1.95,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N23_P1_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N89_P2_01",
+    "point_id": "N89_P2",
+    "depth_value": 0.73,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N89_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N20_P3_01",
+    "point_id": "N20_P3",
+    "depth_value": 2.59,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N20_P3_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N79_P1_01",
+    "point_id": "N79_P1",
+    "depth_value": 0.74,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N79_P1_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N36_P2_01",
+    "point_id": "N36_P2",
+    "depth_value": 1.35,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N36_P2_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N3_P2_01",
+    "point_id": "N3_P2",
+    "depth_value": 1.9514,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N3_P2_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N43_P1_01",
+    "point_id": "N43_P1",
+    "depth_value": 0.78,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N43_P1_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N23_P2_01",
+    "point_id": "N23_P2",
+    "depth_value": 0.57,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N23_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N9_P1_01",
+    "point_id": "N9_P1",
+    "depth_value": 2.8047999999999997,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N9_P1_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N54_P1_01",
+    "point_id": "N54_P1",
+    "depth_value": 0.89,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N54_P1_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N6_P1_01",
+    "point_id": "N6_P1",
+    "depth_value": 2.2798,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N6_P1_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N71_P2_01",
+    "point_id": "N71_P2",
+    "depth_value": 0.85,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N71_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N45_P3_01",
+    "point_id": "N45_P3",
+    "depth_value": 0.42,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N45_P3_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N86_P1_01",
+    "point_id": "N86_P1",
+    "depth_value": 1.23,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N86_P1_01.csv",
+    "label": 0,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N88_P1_01",
+    "point_id": "N88_P1",
+    "depth_value": 0.98,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N88_P1_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N76_P2_01",
+    "point_id": "N76_P2",
+    "depth_value": 1.7,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N76_P2_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N28_P1_01",
+    "point_id": "N28_P1",
+    "depth_value": 0.6,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N28_P1_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N14_P3_01",
+    "point_id": "N14_P3",
+    "depth_value": 1.8247,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N14_P3_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N87_P1_01",
+    "point_id": "N87_P1",
+    "depth_value": 0.71,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N87_P1_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N53_P1_01",
+    "point_id": "N53_P1",
+    "depth_value": 1.01,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N53_P1_01.csv",
+    "label": 0,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N77_P2_01",
+    "point_id": "N77_P2",
+    "depth_value": 0.95,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N77_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N1_P4_01",
+    "point_id": "N1_P4",
+    "depth_value": 2.5959,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N1_P4_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N66_P2_01",
+    "point_id": "N66_P2",
+    "depth_value": 1.34,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N66_P2_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N14_P4_01",
+    "point_id": "N14_P4",
+    "depth_value": 1.7109,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N14_P4_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N49_P2_01",
+    "point_id": "N49_P2",
+    "depth_value": 0.88,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N49_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N65_P1_01",
+    "point_id": "N65_P1",
+    "depth_value": 0.82,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N65_P1_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N6_P4_01",
+    "point_id": "N6_P4",
+    "depth_value": 3.682,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N6_P4_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N41_P3_01",
+    "point_id": "N41_P3",
+    "depth_value": 0.84,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N41_P3_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N77_P1_01",
+    "point_id": "N77_P1",
+    "depth_value": 1.0,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N77_P1_01.csv",
+    "label": 0,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N95_P1_01",
+    "point_id": "N95_P1",
+    "depth_value": 0.99,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N95_P1_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N38_P1_01",
+    "point_id": "N38_P1",
+    "depth_value": 1.13,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N38_P1_01.csv",
+    "label": 0,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N11_P2_01",
+    "point_id": "N11_P2",
+    "depth_value": 2.0781,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N11_P2_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N37_P1_01",
+    "point_id": "N37_P1",
+    "depth_value": 1.43,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N37_P1_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N52_P1_01",
+    "point_id": "N52_P1",
+    "depth_value": 0.84,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N52_P1_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N29_P1_01",
+    "point_id": "N29_P1",
+    "depth_value": 0.88,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N29_P1_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N67_P7_01",
+    "point_id": "N67_P7",
+    "depth_value": 1.97,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N67_P7_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N87_P2_01",
+    "point_id": "N87_P2",
+    "depth_value": 0.77,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N87_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N93_P1_01",
+    "point_id": "N93_P1",
+    "depth_value": 1.03,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N93_P1_01.csv",
+    "label": 0,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N22_P3_01",
+    "point_id": "N22_P3",
+    "depth_value": 1.49,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N22_P3_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N43_P2_01",
+    "point_id": "N43_P2",
+    "depth_value": 0.73,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N43_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N92_P3_01",
+    "point_id": "N92_P3",
+    "depth_value": 1.44,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N92_P3_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N48_P2_01",
+    "point_id": "N48_P2",
+    "depth_value": 0.94,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N48_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N19_P2_01",
+    "point_id": "N19_P2",
+    "depth_value": 3.59,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N19_P2_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N55_P2_01",
+    "point_id": "N55_P2",
+    "depth_value": 0.47,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N55_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N28_P3_01",
+    "point_id": "N28_P3",
+    "depth_value": 0.74,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N28_P3_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N46_P2_01",
+    "point_id": "N46_P2",
+    "depth_value": 0.82,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N46_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N31_P2_01",
+    "point_id": "N31_P2",
+    "depth_value": 1.7,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N31_P2_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N72_P3_01",
+    "point_id": "N72_P3",
+    "depth_value": 1.64,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N72_P3_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N16_P4_01",
+    "point_id": "N16_P4",
+    "depth_value": 1.802,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N16_P4_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N61_P2_01",
+    "point_id": "N61_P2",
+    "depth_value": 0.87,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N61_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N64_P2_01",
+    "point_id": "N64_P2",
+    "depth_value": 0.77,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N64_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N26_P3_01",
+    "point_id": "N26_P3",
+    "depth_value": 3.16,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N26_P3_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N32_P1_01",
+    "point_id": "N32_P1",
+    "depth_value": 1.15,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N32_P1_01.csv",
+    "label": 0,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N7_P2_01",
+    "point_id": "N7_P2",
+    "depth_value": 2.0587,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N7_P2_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N88_P3_01",
+    "point_id": "N88_P3",
+    "depth_value": 1.0,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N88_P3_01.csv",
+    "label": 0,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N90_P4_01",
+    "point_id": "N90_P4",
+    "depth_value": 1.78,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N90_P4_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N43_P3_01",
+    "point_id": "N43_P3",
+    "depth_value": 0.69,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N43_P3_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N88_P2_01",
+    "point_id": "N88_P2",
+    "depth_value": 0.59,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N88_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N29_P3_01",
+    "point_id": "N29_P3",
+    "depth_value": 1.47,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N29_P3_01.csv",
+    "label": 1,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N46_P3_01",
+    "point_id": "N46_P3",
+    "depth_value": 0.7,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N46_P3_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N74_P1_01",
+    "point_id": "N74_P1",
+    "depth_value": 0.54,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N74_P1_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N95_P2_01",
+    "point_id": "N95_P2",
+    "depth_value": 0.93,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N95_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N37_P3_01",
+    "point_id": "N37_P3",
+    "depth_value": 0.66,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N37_P3_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N54_P2_01",
+    "point_id": "N54_P2",
+    "depth_value": 0.76,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N54_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N41_P2_01",
+    "point_id": "N41_P2",
+    "depth_value": 0.94,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N41_P2_01.csv",
+    "label": 0,
+    "source_label": 0
+  },
+  {
+    "sample_id": "N93_P2_01",
+    "point_id": "N93_P2",
+    "depth_value": 1.15,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N93_P2_01.csv",
+    "label": 0,
+    "source_label": 1
+  },
+  {
+    "sample_id": "N16_P3_01",
+    "point_id": "N16_P3",
+    "depth_value": 2.651,
+    "channel_ids": [
+      "1",
+      "2"
+    ],
+    "source_csv": "N16_P3_01.csv",
+    "label": 1,
+    "source_label": 1
+  }
+]

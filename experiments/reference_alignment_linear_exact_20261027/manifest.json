@@ -1,0 +1,58 @@
+{
+  "created_for": "full reference alignment with reference_linear resampling",
+  "data_dir": "D:\\Ultrasound\\骨分层\\经验小波分解\\raw_data_relabeled\\统一_cls2_thr1.3",
+  "reference_root": "D:\\Ultrasound\\骨分层\\code_reference",
+  "reference_config": "D:\\Ultrasound\\骨分层\\code_reference\\reference\\configs\\six_channel_beam_vote\\random_0086.json",
+  "reference_config_sha256": "1e5b06d77cb8028ac8315d0fda92ccbdf193d30459cf036b69bba8373afe893d",
+  "parameters": {
+    "patch_size": 8,
+    "dim": 256,
+    "depth": 2,
+    "heads": 4,
+    "mlp_dim": 1024,
+    "dropout": 0.4,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.0,
+    "batch_size": 4,
+    "warmup_epochs": 5,
+    "epochs": 120,
+    "patience": 20,
+    "seed": 2023
+  },
+  "folds": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "preprocessing": {
+    "frame_selection": "shared_full_trace_peak_v1",
+    "regions": [
+      "dynamic_main",
+      "dynamic_tail",
+      "full"
+    ],
+    "resampling": "reference_linear",
+    "target_length": 512,
+    "tukey_alpha": 0.3
+  },
+  "model": "six_region_beam_vit_two_mlp_soft_vote",
+  "loss": "mean_of_two_beam_cross_entropies",
+  "checkpoint_selection": "fold_validation_auc",
+  "ensemble": "equal_probability_mean_across_two_beams_and_five_folds",
+  "model_labels": {
+    "0": "thick >=1.3mm",
+    "1": "thin <1.3mm"
+  },
+  "project_labels": {
+    "0": "thin <1.3mm",
+    "1": "thick >=1.3mm"
+  },
+  "source_sha256": {
+    "run_reference_aligned_cv.py": "955913bb06c4150edbbb7e733242f4801a3be9bf2c697bff7e3e965fe723e2dc",
+    "emd_pipeline.py": "568cbeff4d1dd347eb170ddcb532e8264389c06502c3124f2547ef8f7fe660c9",
+    "vit_pipeline.py": "32d5083c07248a5bb9797741bd6ade0d66ed6100b35653fbd892b376d5556e0a",
+    "vit_model.py": "f5d9489bf59a7c75f7fd3daa292b30c71375007de518ff0903140805404427a0"
+  }
+}

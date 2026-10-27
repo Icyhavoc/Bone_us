@@ -1,0 +1,19 @@
+{
+  "passed": true,
+  "kind": "portable_cached_input_preflight",
+  "fit_ast_exact": true,
+  "numerical_configuration_matches_parent": true,
+  "cache_hashes_verified": true,
+  "raw_preprocessing_recomputed": false,
+  "finite_forward": true,
+  "equal_soft_vote_verified": true,
+  "branches": 6,
+  "epochs": 120,
+  "patience": 20,
+  "training_steps": 0,
+  "test_inference_performed": false,
+  "checked_at": "2026-10-27T14:22:33.526749+08:00",
+  "torch_version": "2.5.1+cu121",
+  "cuda_version": "12.1",
+  "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU"
+}

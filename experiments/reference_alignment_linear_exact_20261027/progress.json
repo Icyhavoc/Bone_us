@@ -1,0 +1,270 @@
+{
+  "status": "complete",
+  "pid": 35460,
+  "started_at": "2026-10-27T13:55:01+08:00",
+  "fold": null,
+  "epoch": 0,
+  "epochs": 120,
+  "updated_at": "2026-10-27T14:12:10+08:00",
+  "best_epoch": 32,
+  "best_validation_auc": 0.8826666666666667,
+  "stale": 20,
+  "result": {
+    "status": "complete",
+    "finished_at": "2026-10-27T14:12:10+08:00",
+    "folds": [
+      {
+        "fold": 1,
+        "best_epoch": 4,
+        "epochs_run": 24,
+        "validation": {
+          "accuracy": 0.6097560975609756,
+          "precision": 0.6097560975609756,
+          "f1_score": 0.7575757575757575,
+          "sensitivity": 1.0,
+          "specificity": 0.0,
+          "auc": 0.87375,
+          "tn": 0,
+          "fp": 16,
+          "fn": 0,
+          "tp": 25,
+          "correct": 25,
+          "n": 41,
+          "threshold": 0.5,
+          "confusion_matrix": [
+            [
+              0,
+              16
+            ],
+            [
+              0,
+              25
+            ]
+          ]
+        },
+        "parameter_count": 9888772,
+        "peak_allocated_mb": 295.37353515625,
+        "seconds": 133.95300000000043,
+        "checkpoint_sha256": "6a23062158a2e3da4036ce5c729614d17cca681ab4112ce5a28933a912b3e9ba"
+      },
+      {
+        "fold": 2,
+        "best_epoch": 11,
+        "epochs_run": 31,
+        "validation": {
+          "accuracy": 0.7,
+          "precision": 0.7241379310344828,
+          "f1_score": 0.7777777777777777,
+          "sensitivity": 0.84,
+          "specificity": 0.4666666666666667,
+          "auc": 0.808,
+          "tn": 7,
+          "fp": 8,
+          "fn": 4,
+          "tp": 21,
+          "correct": 28,
+          "n": 40,
+          "threshold": 0.5,
+          "confusion_matrix": [
+            [
+              7,
+              8
+            ],
+            [
+              4,
+              21
+            ]
+          ]
+        },
+        "parameter_count": 9888772,
+        "peak_allocated_mb": 294.83740234375,
+        "seconds": 173.98400000000038,
+        "checkpoint_sha256": "614a6e1b39cf50e7473149d27bf0dd69d28b7eb4245c3b0342fcbfc77e24115e"
+      },
+      {
+        "fold": 3,
+        "best_epoch": 3,
+        "epochs_run": 23,
+        "validation": {
+          "accuracy": 0.625,
+          "precision": 0.625,
+          "f1_score": 0.7692307692307693,
+          "sensitivity": 1.0,
+          "specificity": 0.0,
+          "auc": 0.856,
+          "tn": 0,
+          "fp": 15,
+          "fn": 0,
+          "tp": 25,
+          "correct": 25,
+          "n": 40,
+          "threshold": 0.5,
+          "confusion_matrix": [
+            [
+              0,
+              15
+            ],
+            [
+              0,
+              25
+            ]
+          ]
+        },
+        "parameter_count": 9888772,
+        "peak_allocated_mb": 294.83740234375,
+        "seconds": 129.125,
+        "checkpoint_sha256": "0285bce6ea5da6d81bb13041bf50e9e5555e042f8b6769f73071f2fc1636be45"
+      },
+      {
+        "fold": 4,
+        "best_epoch": 32,
+        "epochs_run": 52,
+        "validation": {
+          "accuracy": 0.675,
+          "precision": 0.6875,
+          "f1_score": 0.7719298245614036,
+          "sensitivity": 0.88,
+          "specificity": 0.3333333333333333,
+          "auc": 0.8186666666666667,
+          "tn": 5,
+          "fp": 10,
+          "fn": 3,
+          "tp": 22,
+          "correct": 27,
+          "n": 40,
+          "threshold": 0.5,
+          "confusion_matrix": [
+            [
+              5,
+              10
+            ],
+            [
+              3,
+              22
+            ]
+          ]
+        },
+        "parameter_count": 9888772,
+        "peak_allocated_mb": 294.83740234375,
+        "seconds": 292.7349999999997,
+        "checkpoint_sha256": "81983b24b85ef2ad95c5d1e67ccd8b336e37249a8bbef036344de2166920cee6"
+      },
+      {
+        "fold": 5,
+        "best_epoch": 32,
+        "epochs_run": 52,
+        "validation": {
+          "accuracy": 0.775,
+          "precision": 0.8636363636363636,
+          "f1_score": 0.8085106382978724,
+          "sensitivity": 0.76,
+          "specificity": 0.8,
+          "auc": 0.8826666666666667,
+          "tn": 12,
+          "fp": 3,
+          "fn": 6,
+          "tp": 19,
+          "correct": 31,
+          "n": 40,
+          "threshold": 0.5,
+          "confusion_matrix": [
+            [
+              12,
+              3
+            ],
+            [
+              6,
+              19
+            ]
+          ]
+        },
+        "parameter_count": 9888772,
+        "peak_allocated_mb": 294.83740234375,
+        "seconds": 292.3130000000001,
+        "checkpoint_sha256": "b2e01e3ee03b08d30f73451ed1fbc2d2fdb5a40a004143953e22b0b269825f89"
+      }
+    ],
+    "oof_metrics_reference_labels": {
+      "accuracy": 0.6766169154228856,
+      "precision": 0.6829268292682927,
+      "f1_score": 0.7750865051903115,
+      "sensitivity": 0.896,
+      "specificity": 0.3157894736842105,
+      "auc": 0.7758421052631579,
+      "tn": 24,
+      "fp": 52,
+      "fn": 13,
+      "tp": 112,
+      "correct": 136,
+      "n": 201,
+      "threshold": 0.5,
+      "confusion_matrix": [
+        [
+          24,
+          52
+        ],
+        [
+          13,
+          112
+        ]
+      ]
+    },
+    "test_metrics_reference_labels": {
+      "accuracy": 0.835820895522388,
+      "precision": 0.8,
+      "f1_score": 0.8791208791208791,
+      "sensitivity": 0.975609756097561,
+      "specificity": 0.6153846153846154,
+      "auc": 0.9127579737335835,
+      "tn": 16,
+      "fp": 10,
+      "fn": 1,
+      "tp": 40,
+      "correct": 56,
+      "n": 67,
+      "threshold": 0.5,
+      "confusion_matrix": [
+        [
+          16,
+          10
+        ],
+        [
+          1,
+          40
+        ]
+      ]
+    },
+    "test_metrics_project_labels": {
+      "accuracy": 0.835820895522388,
+      "precision": 0.9411764705882353,
+      "f1_score": 0.744186046511628,
+      "sensitivity": 0.6153846153846154,
+      "specificity": 0.975609756097561,
+      "auc": 0.9127579737335835,
+      "tn": 40,
+      "fp": 1,
+      "fn": 10,
+      "tp": 16,
+      "correct": 56,
+      "n": 67,
+      "threshold": 0.5,
+      "confusion_matrix": [
+        [
+          40,
+          1
+        ],
+        [
+          10,
+          16
+        ]
+      ],
+      "label_semantics": {
+        "0": "thin <1.3mm",
+        "1": "thick >=1.3mm"
+      }
+    },
+    "target_reference_accuracy": 0.9104477611940298,
+    "target_reached": false,
+    "intentional_difference": null
+  }
+}

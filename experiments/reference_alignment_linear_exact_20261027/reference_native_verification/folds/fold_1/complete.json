@@ -1,0 +1,33 @@
+{
+  "fold": 1,
+  "best_epoch": 4,
+  "epochs_run": 24,
+  "metrics": {
+    "accuracy": 0.6097560975609756,
+    "balanced_accuracy": 0.5,
+    "macro_precision": 0.3048780487804878,
+    "macro_recall": 0.5,
+    "macro_f1": 0.37878787878787873,
+    "sensitivity": 1.0,
+    "specificity": 0.0,
+    "roc_auc": 0.87375,
+    "correct": 25,
+    "n": 41,
+    "threshold": 0.5,
+    "confusion_matrix": [
+      [
+        0,
+        16
+      ],
+      [
+        0,
+        25
+      ]
+    ]
+  },
+  "parameter_count": 9888772,
+  "peak_allocated_mb": 295.453125,
+  "attempt_seconds": 129.22842621803284,
+  "checkpoint_sha256": "648cf503b762fa291e32bb5cee8af23c3c8895ef18a3856902b5df2c8bca3b2c",
+  "predictions_sha256": "025373e7d8987d57247745ea66c16270685ef1a2e1847e79e8e78f003edff25e"
+}

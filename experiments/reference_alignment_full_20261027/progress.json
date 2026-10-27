@@ -1,0 +1,270 @@
+{
+  "status": "complete",
+  "pid": 17384,
+  "started_at": "2026-10-27T12:58:54+08:00",
+  "fold": null,
+  "epoch": 0,
+  "epochs": 120,
+  "updated_at": "2026-10-27T13:12:55+08:00",
+  "best_epoch": 7,
+  "best_validation_auc": 0.8613333333333333,
+  "stale": 20,
+  "result": {
+    "status": "complete",
+    "finished_at": "2026-10-27T13:12:55+08:00",
+    "folds": [
+      {
+        "fold": 1,
+        "best_epoch": 3,
+        "epochs_run": 23,
+        "validation": {
+          "accuracy": 0.6097560975609756,
+          "precision": 0.6097560975609756,
+          "f1_score": 0.7575757575757575,
+          "sensitivity": 1.0,
+          "specificity": 0.0,
+          "auc": 0.87875,
+          "tn": 0,
+          "fp": 16,
+          "fn": 0,
+          "tp": 25,
+          "correct": 25,
+          "n": 41,
+          "threshold": 0.5,
+          "confusion_matrix": [
+            [
+              0,
+              16
+            ],
+            [
+              0,
+              25
+            ]
+          ]
+        },
+        "parameter_count": 9888772,
+        "peak_allocated_mb": 290.67333984375,
+        "seconds": 116.3130000000001,
+        "checkpoint_sha256": "784080ab0c64fb0e183ab60f40bcefdd8fe4576c2a006f27dae6d41517a6ff4e"
+      },
+      {
+        "fold": 2,
+        "best_epoch": 7,
+        "epochs_run": 27,
+        "validation": {
+          "accuracy": 0.65,
+          "precision": 0.6774193548387096,
+          "f1_score": 0.75,
+          "sensitivity": 0.84,
+          "specificity": 0.3333333333333333,
+          "auc": 0.7973333333333333,
+          "tn": 5,
+          "fp": 10,
+          "fn": 4,
+          "tp": 21,
+          "correct": 26,
+          "n": 40,
+          "threshold": 0.5,
+          "confusion_matrix": [
+            [
+              5,
+              10
+            ],
+            [
+              4,
+              21
+            ]
+          ]
+        },
+        "parameter_count": 9888772,
+        "peak_allocated_mb": 290.66162109375,
+        "seconds": 156.26499999999987,
+        "checkpoint_sha256": "2502ff4ce4b4ea07b0972f873f61cfb3e608055ad40c12d4321122fa726f4d2d"
+      },
+      {
+        "fold": 3,
+        "best_epoch": 1,
+        "epochs_run": 21,
+        "validation": {
+          "accuracy": 0.625,
+          "precision": 0.625,
+          "f1_score": 0.7692307692307693,
+          "sensitivity": 1.0,
+          "specificity": 0.0,
+          "auc": 0.8586666666666667,
+          "tn": 0,
+          "fp": 15,
+          "fn": 0,
+          "tp": 25,
+          "correct": 25,
+          "n": 40,
+          "threshold": 0.5,
+          "confusion_matrix": [
+            [
+              0,
+              15
+            ],
+            [
+              0,
+              25
+            ]
+          ]
+        },
+        "parameter_count": 9888772,
+        "peak_allocated_mb": 290.66162109375,
+        "seconds": 127.6869999999999,
+        "checkpoint_sha256": "cfbdac656088d79399bf3cddc53e1f5428c965cf94ee3a5ad137909bf3391bc7"
+      },
+      {
+        "fold": 4,
+        "best_epoch": 24,
+        "epochs_run": 44,
+        "validation": {
+          "accuracy": 0.775,
+          "precision": 0.7857142857142857,
+          "f1_score": 0.830188679245283,
+          "sensitivity": 0.88,
+          "specificity": 0.6,
+          "auc": 0.8186666666666667,
+          "tn": 9,
+          "fp": 6,
+          "fn": 3,
+          "tp": 22,
+          "correct": 31,
+          "n": 40,
+          "threshold": 0.5,
+          "confusion_matrix": [
+            [
+              9,
+              6
+            ],
+            [
+              3,
+              22
+            ]
+          ]
+        },
+        "parameter_count": 9888772,
+        "peak_allocated_mb": 290.66162109375,
+        "seconds": 268.703,
+        "checkpoint_sha256": "c3a02b50cc14c1450821b01448383feae9db4c5bb92eab68a0b840f92c316831"
+      },
+      {
+        "fold": 5,
+        "best_epoch": 7,
+        "epochs_run": 27,
+        "validation": {
+          "accuracy": 0.8,
+          "precision": 0.8695652173913043,
+          "f1_score": 0.8333333333333333,
+          "sensitivity": 0.8,
+          "specificity": 0.8,
+          "auc": 0.8613333333333333,
+          "tn": 12,
+          "fp": 3,
+          "fn": 5,
+          "tp": 20,
+          "correct": 32,
+          "n": 40,
+          "threshold": 0.5,
+          "confusion_matrix": [
+            [
+              12,
+              3
+            ],
+            [
+              5,
+              20
+            ]
+          ]
+        },
+        "parameter_count": 9888772,
+        "peak_allocated_mb": 290.66162109375,
+        "seconds": 163.9380000000001,
+        "checkpoint_sha256": "b9e5ddbaeeff0cbf27cf580c0699853e61158aa24c71da87b314181c929116a2"
+      }
+    ],
+    "oof_metrics_reference_labels": {
+      "accuracy": 0.6915422885572139,
+      "precision": 0.6932515337423313,
+      "f1_score": 0.7847222222222222,
+      "sensitivity": 0.904,
+      "specificity": 0.34210526315789475,
+      "auc": 0.7340526315789474,
+      "tn": 26,
+      "fp": 50,
+      "fn": 12,
+      "tp": 113,
+      "correct": 139,
+      "n": 201,
+      "threshold": 0.5,
+      "confusion_matrix": [
+        [
+          26,
+          50
+        ],
+        [
+          12,
+          113
+        ]
+      ]
+    },
+    "test_metrics_reference_labels": {
+      "accuracy": 0.8208955223880597,
+      "precision": 0.7735849056603774,
+      "f1_score": 0.8723404255319149,
+      "sensitivity": 1.0,
+      "specificity": 0.5384615384615384,
+      "auc": 0.9052532833020638,
+      "tn": 14,
+      "fp": 12,
+      "fn": 0,
+      "tp": 41,
+      "correct": 55,
+      "n": 67,
+      "threshold": 0.5,
+      "confusion_matrix": [
+        [
+          14,
+          12
+        ],
+        [
+          0,
+          41
+        ]
+      ]
+    },
+    "test_metrics_project_labels": {
+      "accuracy": 0.8208955223880597,
+      "precision": 1.0,
+      "f1_score": 0.7000000000000001,
+      "sensitivity": 0.5384615384615384,
+      "specificity": 1.0,
+      "auc": 0.9052532833020638,
+      "tn": 41,
+      "fp": 0,
+      "fn": 12,
+      "tp": 14,
+      "correct": 55,
+      "n": 67,
+      "threshold": 0.5,
+      "confusion_matrix": [
+        [
+          41,
+          0
+        ],
+        [
+          12,
+          14
+        ]
+      ],
+      "label_semantics": {
+        "0": "thin <1.3mm",
+        "1": "thick >=1.3mm"
+      }
+    },
+    "target_reference_accuracy": 0.9104477611940298,
+    "target_reached": false,
+    "intentional_difference": "cubic spline replaces reference linear interpolation"
+  }
+}

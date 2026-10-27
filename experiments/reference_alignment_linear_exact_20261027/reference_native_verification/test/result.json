@@ -1,0 +1,61 @@
+{
+  "method": "six_channel_beam_vote",
+  "id": "random_0086",
+  "parameters": {
+    "patch_size": 8,
+    "dim": 256,
+    "depth": 2,
+    "heads": 4,
+    "lr": 0.0003,
+    "dropout": 0.4,
+    "weight_decay": 0,
+    "batch_size": 4,
+    "mlp_dim": 1024,
+    "label_smoothing": 0.0,
+    "warmup": 5
+  },
+  "metrics": {
+    "accuracy": 0.835820895522388,
+    "balanced_accuracy": 0.7954971857410882,
+    "macro_precision": 0.8705882352941177,
+    "macro_recall": 0.7954971857410882,
+    "macro_f1": 0.8116534628162535,
+    "sensitivity": 0.975609756097561,
+    "specificity": 0.6153846153846154,
+    "roc_auc": 0.9127579737335835,
+    "correct": 56,
+    "n": 67,
+    "threshold": 0.5,
+    "confusion_matrix": [
+      [
+        16,
+        10
+      ],
+      [
+        1,
+        40
+      ]
+    ]
+  },
+  "threshold": 0.5,
+  "ensemble_folds": 5,
+  "training_performed": false,
+  "reused_test_predictions": false,
+  "checkpoint_hashes_verified": true,
+  "csv_metrics_recomputed": true,
+  "test_used_for_ranking": true,
+  "test_used_for_epoch_or_threshold_selection": false,
+  "checkpoint_hashes": {
+    "D:\\Ultrasound\\骨分层\\code_reference\\runs\\local_random_0086_20261027\\methods\\six_channel_beam_vote\\review\\random_0086\\fold_1\\best.pt": "648cf503b762fa291e32bb5cee8af23c3c8895ef18a3856902b5df2c8bca3b2c",
+    "D:\\Ultrasound\\骨分层\\code_reference\\runs\\local_random_0086_20261027\\methods\\six_channel_beam_vote\\review\\random_0086\\fold_2\\best.pt": "6420245e93bced9ff8359923a66486f7a528b1057db243fb03ecfac99a1118ff",
+    "D:\\Ultrasound\\骨分层\\code_reference\\runs\\local_random_0086_20261027\\methods\\six_channel_beam_vote\\review\\random_0086\\fold_3\\best.pt": "59f73f806f68ac20340b2fc2a12e315bb9fb61e66331e4e604eb24b46dccfc72",
+    "D:\\Ultrasound\\骨分层\\code_reference\\runs\\local_random_0086_20261027\\methods\\six_channel_beam_vote\\review\\random_0086\\fold_4\\best.pt": "33bb3b50e96569d3d17cf73d1af1e328047006cc7a4c06dd34d1d9e938fcae68",
+    "D:\\Ultrasound\\骨分层\\code_reference\\runs\\local_random_0086_20261027\\methods\\six_channel_beam_vote\\review\\random_0086\\fold_5\\best.pt": "ff47b3bf3393e6ddc0c78723ab34b2a4080228da57023b19c76cc98d6753165a"
+  },
+  "artifacts_sha256": {
+    "test_beam_probabilities_by_fold.npy": "2aea218e16307d907febc1a895b11007fc02b29898b14025fcc4ff7747d5ac96",
+    "test_predictions.csv": "1bb863379b4b114eb4723b8ac3a94210baf1ff568258ac897e01e9b22da34516",
+    "test_probabilities_by_fold.npy": "fa5a626dbec2939fdd9e0fb2967973196ee216ed3cf5124205232c91b39da4a4"
+  },
+  "completed_at": "2026-10-27T20:04:13.967249+08:00"
+}

@@ -1,0 +1,163 @@
+[
+  {
+    "epoch": 1,
+    "train_loss": 0.7161994128493789,
+    "validation_auc": 0.764,
+    "validation_accuracy_05": 0.625,
+    "lr": 5.9999999999999995e-05
+  },
+  {
+    "epoch": 2,
+    "train_loss": 0.6976856681871118,
+    "validation_auc": 0.8453333333333333,
+    "validation_accuracy_05": 0.625,
+    "lr": 0.00011999999999999999
+  },
+  {
+    "epoch": 3,
+    "train_loss": 0.711184673427795,
+    "validation_auc": 0.8560000000000001,
+    "validation_accuracy_05": 0.625,
+    "lr": 0.00017999999999999998
+  },
+  {
+    "epoch": 4,
+    "train_loss": 0.7076378105590062,
+    "validation_auc": 0.8400000000000001,
+    "validation_accuracy_05": 0.525,
+    "lr": 0.00023999999999999998
+  },
+  {
+    "epoch": 5,
+    "train_loss": 0.6679475203804348,
+    "validation_auc": 0.8186666666666667,
+    "validation_accuracy_05": 0.625,
+    "lr": 0.0003
+  },
+  {
+    "epoch": 6,
+    "train_loss": 0.6548761403338509,
+    "validation_auc": 0.8400000000000001,
+    "validation_accuracy_05": 0.625,
+    "lr": 0.00029994403218928657
+  },
+  {
+    "epoch": 7,
+    "train_loss": 0.6152942728552019,
+    "validation_auc": 0.8106666666666666,
+    "validation_accuracy_05": 0.75,
+    "lr": 0.00029977617052242417
+  },
+  {
+    "epoch": 8,
+    "train_loss": 0.6171063725252329,
+    "validation_auc": 0.804,
+    "validation_accuracy_05": 0.625,
+    "lr": 0.0002994965402640794
+  },
+  {
+    "epoch": 9,
+    "train_loss": 0.6272461695700698,
+    "validation_auc": 0.8,
+    "validation_accuracy_05": 0.7,
+    "lr": 0.0002991053500848305
+  },
+  {
+    "epoch": 10,
+    "train_loss": 0.6075583511257764,
+    "validation_auc": 0.784,
+    "validation_accuracy_05": 0.725,
+    "lr": 0.0002986028919054496
+  },
+  {
+    "epoch": 11,
+    "train_loss": 0.6078464673913043,
+    "validation_auc": 0.7973333333333333,
+    "validation_accuracy_05": 0.775,
+    "lr": 0.0002979895406790603
+  },
+  {
+    "epoch": 12,
+    "train_loss": 0.576149887179736,
+    "validation_auc": 0.7666666666666666,
+    "validation_accuracy_05": 0.725,
+    "lr": 0.00029726575411133377
+  },
+  {
+    "epoch": 13,
+    "train_loss": 0.624184555148486,
+    "validation_auc": 0.7866666666666666,
+    "validation_accuracy_05": 0.7,
+    "lr": 0.00029643207231893167
+  },
+  {
+    "epoch": 14,
+    "train_loss": 0.590653129245924,
+    "validation_auc": 0.8053333333333333,
+    "validation_accuracy_05": 0.775,
+    "lr": 0.0002954891174264507
+  },
+  {
+    "epoch": 15,
+    "train_loss": 0.5937155018682065,
+    "validation_auc": 0.8093333333333332,
+    "validation_accuracy_05": 0.675,
+    "lr": 0.0002944375931021699
+  },
+  {
+    "epoch": 16,
+    "train_loss": 0.6256681643657803,
+    "validation_auc": 0.8186666666666667,
+    "validation_accuracy_05": 0.75,
+    "lr": 0.0002932782840329472
+  },
+  {
+    "epoch": 17,
+    "train_loss": 0.5780673767468945,
+    "validation_auc": 0.8266666666666667,
+    "validation_accuracy_05": 0.7,
+    "lr": 0.00029201205533865653
+  },
+  {
+    "epoch": 18,
+    "train_loss": 0.58984981560559,
+    "validation_auc": 0.7706666666666667,
+    "validation_accuracy_05": 0.7,
+    "lr": 0.00029063985192660303
+  },
+  {
+    "epoch": 19,
+    "train_loss": 0.5447543126455745,
+    "validation_auc": 0.7746666666666666,
+    "validation_accuracy_05": 0.65,
+    "lr": 0.00028916269778639765
+  },
+  {
+    "epoch": 20,
+    "train_loss": 0.5578658773291926,
+    "validation_auc": 0.7946666666666667,
+    "validation_accuracy_05": 0.775,
+    "lr": 0.0002875816952258179
+  },
+  {
+    "epoch": 21,
+    "train_loss": 0.5870797293526786,
+    "validation_auc": 0.8160000000000001,
+    "validation_accuracy_05": 0.725,
+    "lr": 0.00028589802404822455
+  },
+  {
+    "epoch": 22,
+    "train_loss": 0.5613971970836569,
+    "validation_auc": 0.8026666666666666,
+    "validation_accuracy_05": 0.75,
+    "lr": 0.00028411294067214764
+  },
+  {
+    "epoch": 23,
+    "train_loss": 0.5867622328100738,
+    "validation_auc": 0.8133333333333332,
+    "validation_accuracy_05": 0.75,
+    "lr": 0.0002822277771937007
+  }
+]
